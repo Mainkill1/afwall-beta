@@ -8,6 +8,7 @@ import android.util.Log;
 
 import java.io.ByteArrayOutputStream;
 import java.io.File;
+import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
@@ -39,6 +40,9 @@ public final class DnsHijackManager {
     private static final String SOCKET = "afwall_dnsd.sock";
     private static final String QUERY_LOG = "afwall_dnsd.log";
     private static final String SUPERVISOR_LOG = "afwall_dnsd_supervisor.log";
+    private static final String SUPERVISOR_PID = "afwall_dnsd_supervisor.pid";
+    private static final String RESTART_COUNT = "afwall_dnsd_restart_count";
+    private static final String LAST_EXIT = "afwall_dnsd_last_exit";
     private static final String BOOT_SCRIPT = "afwall_dnsd_boot.sh";
     private static final String BOOT_LOG = "afwall_dnsd_boot.log";
     private static final String CHAIN_V4 = "afwall-dns";
@@ -157,6 +161,9 @@ public final class DnsHijackManager {
         File socket = new File(dir, SOCKET);
         File queryLog = new File(dir, QUERY_LOG);
         File supervisorLog = new File(dir, SUPERVISOR_LOG);
+        File supervisorPid = new File(dir, SUPERVISOR_PID);
+        File restartCount = new File(dir, RESTART_COUNT);
+        File lastExit = new File(dir, LAST_EXIT);
         File bootScript = new File(dir, BOOT_SCRIPT);
         File bootLog = new File(dir, BOOT_LOG);
 
@@ -195,8 +202,16 @@ public final class DnsHijackManager {
         appendFileInfo(out, "control_socket", socket);
         appendFileInfo(out, "query_log", queryLog);
         appendFileInfo(out, "supervisor_log", supervisorLog);
+        appendFileInfo(out, "supervisor_pid", supervisorPid);
+        appendFileInfo(out, "restart_count", restartCount);
+        appendFileInfo(out, "last_exit", lastExit);
         appendFileInfo(out, "boot_script", bootScript);
         appendFileInfo(out, "boot_log", bootLog);
+
+        out.append("\n[supervisor metadata]\n");
+        appendSmallFileValue(out, "watchdog_pid", supervisorPid);
+        appendSmallFileValue(out, "restart_count", restartCount);
+        appendSmallFileValue(out, "last_exit", lastExit);
 
         out.append("\n[control status]\n");
         out.append(queryControl(context, "status"));
@@ -426,6 +441,25 @@ public final class DnsHijackManager {
             out.append(" canExecute=").append(file.canExecute());
         }
         out.append('\n');
+    }
+
+    private static void appendSmallFileValue(StringBuilder out, String label, File file) {
+        out.append(label).append('=');
+        if (!file.exists()) {
+            out.append("missing\n");
+            return;
+        }
+        try (FileInputStream input = new FileInputStream(file)) {
+            byte[] buffer = new byte[256];
+            int read = input.read(buffer);
+            if (read <= 0) {
+                out.append("empty\n");
+            } else {
+                out.append(new String(buffer, 0, read, StandardCharsets.UTF_8).trim()).append('\n');
+            }
+        } catch (IOException e) {
+            out.append("unreadable: ").append(e.getMessage()).append('\n');
+        }
     }
 
     private static String normalizeSupervisorAction(String action) {
@@ -1129,16 +1163,56 @@ public final class DnsHijackManager {
         String config = new File(dir, CONF).getAbsolutePath();
         String pid = new File(dir, PID).getAbsolutePath();
         String log = new File(dir, SUPERVISOR_LOG).getAbsolutePath();
+        String supervisorPid = new File(dir, SUPERVISOR_PID).getAbsolutePath();
+        String restartCount = new File(dir, RESTART_COUNT).getAbsolutePath();
+        String lastExit = new File(dir, LAST_EXIT).getAbsolutePath();
 
         return "#!/system/bin/sh\n"
                 + "DIR=" + shellQuote(dir.getAbsolutePath()) + "\n"
                 + "DAEMON=" + shellQuote(daemon.getAbsolutePath()) + "\n"
                 + "CONF=" + shellQuote(config) + "\n"
                 + "PID=" + shellQuote(pid) + "\n"
+                + "SUP_PID=" + shellQuote(supervisorPid) + "\n"
                 + "MARKER=" + shellQuote(marker) + "\n"
                 + "LOG=" + shellQuote(log) + "\n"
+                + "RESTARTS=" + shellQuote(restartCount) + "\n"
+                + "LAST_EXIT=" + shellQuote(lastExit) + "\n"
+                + "log_msg() {\n"
+                + "  echo \"$(date +%s) $*\" >> \"$LOG\" 2>/dev/null\n"
+                + "}\n"
                 + "is_running() {\n"
                 + "  [ -f \"$PID\" ] && kill -0 \"$(cat \"$PID\")\" 2>/dev/null\n"
+                + "}\n"
+                + "supervisor_running() {\n"
+                + "  [ -f \"$SUP_PID\" ] && kill -0 \"$(cat \"$SUP_PID\")\" 2>/dev/null\n"
+                + "}\n"
+                + "increment_restarts() {\n"
+                + "  count=$(cat \"$RESTARTS\" 2>/dev/null || echo 0)\n"
+                + "  case \"$count\" in *[!0-9]*|'') count=0 ;; esac\n"
+                + "  count=$((count + 1))\n"
+                + "  echo \"$count\" > \"$RESTARTS\" 2>/dev/null\n"
+                + "}\n"
+                + "watch_loop() {\n"
+                + "  trap 'rm -f \"$SUP_PID\"; exit 0' TERM INT\n"
+                + "  log_msg 'watchdog started'\n"
+                + "  while [ -f \"$MARKER\" ]; do\n"
+                + "    if [ ! -x \"$DAEMON\" ]; then\n"
+                + "      echo \"$(date +%s) missing_daemon\" > \"$LAST_EXIT\" 2>/dev/null\n"
+                + "      log_msg 'daemon binary missing or not executable'\n"
+                + "      sleep 5\n"
+                + "      continue\n"
+                + "    fi\n"
+                + "    \"$DAEMON\" --config \"$CONF\" >> \"$LOG\" 2>&1\n"
+                + "    exit_code=$?\n"
+                + "    echo \"$(date +%s) exit=$exit_code\" > \"$LAST_EXIT\" 2>/dev/null\n"
+                + "    if [ -f \"$MARKER\" ]; then\n"
+                + "      increment_restarts\n"
+                + "      log_msg \"daemon exited with $exit_code; restarting\"\n"
+                + "      sleep 2\n"
+                + "    fi\n"
+                + "  done\n"
+                + "  log_msg 'watchdog stopped'\n"
+                + "  rm -f \"$SUP_PID\"\n"
                 + "}\n"
                 + "start_daemon() {\n"
                 + "  mkdir -p \"$DIR\"\n"
@@ -1146,10 +1220,14 @@ public final class DnsHijackManager {
                 + "  chmod 755 \"$DAEMON\" 2>/dev/null || true\n"
                 + "  touch \"$MARKER\"\n"
                 + "  if is_running; then exit 0; fi\n"
-                + "  ( while [ -f \"$MARKER\" ]; do\n"
-                + "      \"$DAEMON\" --config \"$CONF\" >> \"$LOG\" 2>&1\n"
-                + "      sleep 2\n"
-                + "    done ) >/dev/null 2>&1 &\n"
+                + "  if supervisor_running; then\n"
+                + "    sleep 1\n"
+                + "    if is_running; then exit 0; fi\n"
+                + "    log_msg 'watchdog already running but daemon is not ready'\n"
+                + "    exit 1\n"
+                + "  fi\n"
+                + "  ( watch_loop ) >/dev/null 2>&1 &\n"
+                + "  echo \"$!\" > \"$SUP_PID\" 2>/dev/null\n"
                 + "  sleep 1\n"
                 + "  if is_running; then exit 0; fi\n"
                 + "  exit 1\n"
@@ -1157,13 +1235,20 @@ public final class DnsHijackManager {
                 + "stop_daemon() {\n"
                 + "  rm -f \"$MARKER\"\n"
                 + "  if [ -f \"$PID\" ]; then kill -TERM \"$(cat \"$PID\")\" 2>/dev/null || true; fi\n"
+                + "  if [ -f \"$SUP_PID\" ]; then kill -TERM \"$(cat \"$SUP_PID\")\" 2>/dev/null || true; fi\n"
+                + "  rm -f \"$SUP_PID\"\n"
                 + "}\n"
                 + "case \"$1\" in\n"
                 + "  start) start_daemon ;;\n"
                 + "  stop) stop_daemon; exit 0 ;;\n"
                 + "  restart) stop_daemon; start_daemon ;;\n"
                 + "  reload) if is_running; then kill -HUP \"$(cat \"$PID\")\" 2>/dev/null; else start_daemon; fi ;;\n"
-                + "  status) if is_running; then echo running; exit 0; else echo stopped; exit 1; fi ;;\n"
+                + "  status) \n"
+                + "    if is_running; then echo \"daemon=running pid=$(cat \"$PID\")\"; else echo daemon=stopped; fi\n"
+                + "    if supervisor_running; then echo \"watchdog=running pid=$(cat \"$SUP_PID\")\"; else echo watchdog=stopped; fi\n"
+                + "    echo \"restart_count=$(cat \"$RESTARTS\" 2>/dev/null || echo 0)\"\n"
+                + "    echo \"last_exit=$(cat \"$LAST_EXIT\" 2>/dev/null || echo none)\"\n"
+                + "    if is_running || supervisor_running; then exit 0; else exit 1; fi ;;\n"
                 + "  *) echo \"usage: $0 {start|stop|restart|reload|status}\"; exit 2 ;;\n"
                 + "esac\n";
     }
