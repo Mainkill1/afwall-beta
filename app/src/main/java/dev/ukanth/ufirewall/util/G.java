@@ -189,6 +189,25 @@ public class G extends Application implements Application.ActivityLifecycleCallb
     private static final String DNS_HIJACK_BLOCKLIST_URLS = "dnsHijackBlocklistUrls";
     private static final String DNS_HIJACK_SCHEDULED_BLOCKLIST_UPDATES = "dnsHijackScheduledBlocklistUpdates";
     private static final String DNS_HIJACK_BLOCKLIST_UPDATE_INTERVAL_HOURS = "dnsHijackBlocklistUpdateIntervalHours";
+    private static final String DNS_HIJACK_USE_PROFILE_POLICY = "dnsHijackUseProfilePolicy";
+    private static final String DNS_HIJACK_PROFILE_POLICY_SAVED = "dnsHijackProfilePolicySaved";
+    private static final String[] DNS_HIJACK_PROFILE_POLICY_KEYS = new String[] {
+            DNS_HIJACK_UPSTREAMS,
+            DNS_HIJACK_FAIL_OPEN,
+            DNS_HIJACK_STRICT_MODE,
+            DNS_HIJACK_TIMEOUT_MS,
+            DNS_HIJACK_ALLOW_EXACT,
+            DNS_HIJACK_ALLOW_SUFFIX,
+            DNS_HIJACK_BLOCK_EXACT,
+            DNS_HIJACK_BLOCK_SUFFIX,
+            DNS_HIJACK_ALLOW_REGEX,
+            DNS_HIJACK_BLOCK_REGEX,
+            DNS_HIJACK_TEMP_ALLOW,
+            DNS_HIJACK_TEMP_BLOCK,
+            DNS_HIJACK_BLOCKLIST_URLS,
+            DNS_HIJACK_SCHEDULED_BLOCKLIST_UPDATES,
+            DNS_HIJACK_BLOCKLIST_UPDATE_INTERVAL_HOURS
+    };
 
     private static final String SHOW_ALL_APPS = "showAllApps";
 
@@ -288,15 +307,15 @@ public class G extends Application implements Application.ActivityLifecycleCallb
     }
 
     public static String dnsHijackUpstreams() {
-        return gPrefs.getString(DNS_HIJACK_UPSTREAMS, "1.1.1.1:53\n8.8.8.8:53");
+        return dnsPolicyPrefs().getString(DNS_HIJACK_UPSTREAMS, "1.1.1.1:53\n8.8.8.8:53");
     }
 
     public static boolean dnsHijackFailOpen() {
-        return gPrefs.getBoolean(DNS_HIJACK_FAIL_OPEN, true);
+        return dnsPolicyPrefs().getBoolean(DNS_HIJACK_FAIL_OPEN, true);
     }
 
     public static boolean dnsHijackStrictMode() {
-        return gPrefs.getBoolean(DNS_HIJACK_STRICT_MODE, false);
+        return dnsPolicyPrefs().getBoolean(DNS_HIJACK_STRICT_MODE, false);
     }
 
     public static boolean dnsHijackBootPersistence() {
@@ -309,83 +328,185 @@ public class G extends Application implements Application.ActivityLifecycleCallb
     }
 
     public static int dnsHijackTimeoutMs() {
-        return readIntPreference(DNS_HIJACK_TIMEOUT_MS, 2500, 250, 10000);
+        return readIntPreference(dnsPolicyPrefs(), DNS_HIJACK_TIMEOUT_MS, 2500, 250, 10000);
     }
 
     public static String dnsHijackAllowExact() {
-        return gPrefs.getString(DNS_HIJACK_ALLOW_EXACT, "");
+        return dnsPolicyPrefs().getString(DNS_HIJACK_ALLOW_EXACT, "");
     }
 
     public static String dnsHijackAllowSuffix() {
-        return gPrefs.getString(DNS_HIJACK_ALLOW_SUFFIX, "");
+        return dnsPolicyPrefs().getString(DNS_HIJACK_ALLOW_SUFFIX, "");
     }
 
     public static String dnsHijackBlockExact() {
-        return gPrefs.getString(DNS_HIJACK_BLOCK_EXACT, "");
+        return dnsPolicyPrefs().getString(DNS_HIJACK_BLOCK_EXACT, "");
     }
 
     public static String dnsHijackBlockSuffix() {
-        return gPrefs.getString(DNS_HIJACK_BLOCK_SUFFIX, "");
+        return dnsPolicyPrefs().getString(DNS_HIJACK_BLOCK_SUFFIX, "");
     }
 
     public static String dnsHijackAllowRegex() {
-        return gPrefs.getString(DNS_HIJACK_ALLOW_REGEX, "");
+        return dnsPolicyPrefs().getString(DNS_HIJACK_ALLOW_REGEX, "");
     }
 
     public static String dnsHijackBlockRegex() {
-        return gPrefs.getString(DNS_HIJACK_BLOCK_REGEX, "");
+        return dnsPolicyPrefs().getString(DNS_HIJACK_BLOCK_REGEX, "");
     }
 
     public static String dnsHijackTempAllow() {
-        return gPrefs.getString(DNS_HIJACK_TEMP_ALLOW, "");
+        return dnsPolicyPrefs().getString(DNS_HIJACK_TEMP_ALLOW, "");
     }
 
     public static String dnsHijackTempBlock() {
-        return gPrefs.getString(DNS_HIJACK_TEMP_BLOCK, "");
+        return dnsPolicyPrefs().getString(DNS_HIJACK_TEMP_BLOCK, "");
     }
 
     public static String dnsHijackBlocklistUrls() {
-        return gPrefs.getString(DNS_HIJACK_BLOCKLIST_URLS, "");
+        return dnsPolicyPrefs().getString(DNS_HIJACK_BLOCKLIST_URLS, "");
     }
 
     public static boolean dnsHijackScheduledBlocklistUpdates() {
-        return gPrefs.getBoolean(DNS_HIJACK_SCHEDULED_BLOCKLIST_UPDATES, false);
+        return dnsPolicyPrefs().getBoolean(DNS_HIJACK_SCHEDULED_BLOCKLIST_UPDATES, false);
     }
 
     public static int dnsHijackBlocklistUpdateIntervalHours() {
-        return readIntPreference(DNS_HIJACK_BLOCKLIST_UPDATE_INTERVAL_HOURS, 24, 1, 720);
+        return readIntPreference(dnsPolicyPrefs(), DNS_HIJACK_BLOCKLIST_UPDATE_INTERVAL_HOURS, 24, 1, 720);
+    }
+
+    public static boolean dnsHijackUseProfilePolicy() {
+        return gPrefs.getBoolean(DNS_HIJACK_USE_PROFILE_POLICY, false);
+    }
+
+    public static boolean activeDnsHijackProfilePolicySaved() {
+        SharedPreferences profilePrefs = activeDnsProfilePrefs();
+        return profilePrefs != null
+                && profilePrefs.getBoolean(DNS_HIJACK_PROFILE_POLICY_SAVED, false);
+    }
+
+    public static String activeDnsHijackPolicyProfile() {
+        if (!enableMultiProfile()) {
+            return Api.DEFAULT_PREFS_NAME;
+        }
+        return storedProfile();
+    }
+
+    public static boolean saveActiveDnsHijackProfilePolicy() {
+        SharedPreferences profilePrefs = activeDnsProfilePrefs();
+        if (profilePrefs == null) {
+            return false;
+        }
+        SharedPreferences.Editor editor = profilePrefs.edit();
+        for (String key : DNS_HIJACK_PROFILE_POLICY_KEYS) {
+            copyPreferenceValue(gPrefs, editor, key);
+        }
+        editor.putBoolean(DNS_HIJACK_PROFILE_POLICY_SAVED, true);
+        return editor.commit();
+    }
+
+    public static boolean clearActiveDnsHijackProfilePolicy() {
+        SharedPreferences profilePrefs = activeDnsProfilePrefs();
+        if (profilePrefs == null) {
+            return false;
+        }
+        SharedPreferences.Editor editor = profilePrefs.edit();
+        for (String key : DNS_HIJACK_PROFILE_POLICY_KEYS) {
+            editor.remove(key);
+        }
+        editor.remove(DNS_HIJACK_PROFILE_POLICY_SAVED);
+        return editor.commit();
+    }
+
+    public static String dnsHijackBlocklistDirectoryName(String defaultName) {
+        if (!usingActiveDnsProfilePolicy()) {
+            return defaultName;
+        }
+        String profile = activeDnsHijackPolicyProfile();
+        String safeProfile = profile == null ? Api.DEFAULT_PREFS_NAME : profile;
+        safeProfile = safeProfile.replaceAll("[^A-Za-z0-9_.-]", "_");
+        if (safeProfile.length() == 0) {
+            safeProfile = Api.DEFAULT_PREFS_NAME;
+        }
+        return defaultName + "_" + safeProfile;
     }
 
     public static boolean appendDnsHijackAllowExact(String domain) {
-        return appendLinePreference(DNS_HIJACK_ALLOW_EXACT, domain);
+        return appendLinePreference(dnsWritablePolicyPrefs(), DNS_HIJACK_ALLOW_EXACT, domain);
     }
 
     public static boolean appendDnsHijackAllowSuffix(String domain) {
-        return appendLinePreference(DNS_HIJACK_ALLOW_SUFFIX, domain);
+        return appendLinePreference(dnsWritablePolicyPrefs(), DNS_HIJACK_ALLOW_SUFFIX, domain);
     }
 
     public static boolean appendDnsHijackBlockExact(String domain) {
-        return appendLinePreference(DNS_HIJACK_BLOCK_EXACT, domain);
+        return appendLinePreference(dnsWritablePolicyPrefs(), DNS_HIJACK_BLOCK_EXACT, domain);
     }
 
     public static boolean appendDnsHijackBlockSuffix(String domain) {
-        return appendLinePreference(DNS_HIJACK_BLOCK_SUFFIX, domain);
+        return appendLinePreference(dnsWritablePolicyPrefs(), DNS_HIJACK_BLOCK_SUFFIX, domain);
     }
 
     public static boolean appendDnsHijackTempAllow(String domain, long expiresAtSeconds) {
-        return appendTemporaryLinePreference(DNS_HIJACK_TEMP_ALLOW, domain, expiresAtSeconds);
+        return appendTemporaryLinePreference(dnsWritablePolicyPrefs(), DNS_HIJACK_TEMP_ALLOW, domain, expiresAtSeconds);
     }
 
     public static boolean appendDnsHijackTempBlock(String domain, long expiresAtSeconds) {
-        return appendTemporaryLinePreference(DNS_HIJACK_TEMP_BLOCK, domain, expiresAtSeconds);
+        return appendTemporaryLinePreference(dnsWritablePolicyPrefs(), DNS_HIJACK_TEMP_BLOCK, domain, expiresAtSeconds);
     }
 
     public static void pruneExpiredDnsHijackTemporaryRules() {
-        pruneExpiredTemporaryPreference(DNS_HIJACK_TEMP_ALLOW);
-        pruneExpiredTemporaryPreference(DNS_HIJACK_TEMP_BLOCK);
+        SharedPreferences prefs = dnsWritablePolicyPrefs();
+        pruneExpiredTemporaryPreference(prefs, DNS_HIJACK_TEMP_ALLOW);
+        pruneExpiredTemporaryPreference(prefs, DNS_HIJACK_TEMP_BLOCK);
     }
 
-    private static boolean appendLinePreference(String key, String rawValue) {
+    private static SharedPreferences dnsPolicyPrefs() {
+        return usingActiveDnsProfilePolicy() ? activeDnsProfilePrefs() : gPrefs;
+    }
+
+    private static SharedPreferences dnsWritablePolicyPrefs() {
+        return usingActiveDnsProfilePolicy() ? activeDnsProfilePrefs() : gPrefs;
+    }
+
+    private static boolean usingActiveDnsProfilePolicy() {
+        return dnsHijackUseProfilePolicy() && activeDnsHijackProfilePolicySaved();
+    }
+
+    private static SharedPreferences activeDnsProfilePrefs() {
+        if (ctx == null) {
+            return pPrefs;
+        }
+        if (pPrefs == null) {
+            reloadPrefs();
+        }
+        return pPrefs;
+    }
+
+    @SuppressWarnings("unchecked")
+    private static void copyPreferenceValue(SharedPreferences source, SharedPreferences.Editor target,
+                                            String key) {
+        if (source == null || !source.contains(key)) {
+            target.remove(key);
+            return;
+        }
+        Object value = source.getAll().get(key);
+        if (value instanceof Boolean) {
+            target.putBoolean(key, (Boolean) value);
+        } else if (value instanceof Integer) {
+            target.putInt(key, (Integer) value);
+        } else if (value instanceof Long) {
+            target.putLong(key, (Long) value);
+        } else if (value instanceof Float) {
+            target.putFloat(key, (Float) value);
+        } else if (value instanceof Set) {
+            target.putStringSet(key, (Set<String>) value);
+        } else if (value != null) {
+            target.putString(key, String.valueOf(value));
+        }
+    }
+
+    private static boolean appendLinePreference(SharedPreferences prefs, String key, String rawValue) {
         if (rawValue == null) {
             return false;
         }
@@ -394,7 +515,7 @@ public class G extends Application implements Application.ActivityLifecycleCallb
             return false;
         }
         LinkedHashSet<String> values = new LinkedHashSet<>();
-        String existing = gPrefs.getString(key, "");
+        String existing = prefs.getString(key, "");
         if (existing != null) {
             String[] lines = existing.split("[\\r\\n,]+");
             for (String line : lines) {
@@ -406,12 +527,13 @@ public class G extends Application implements Application.ActivityLifecycleCallb
         }
         boolean added = values.add(value);
         if (added) {
-            gPrefs.edit().putString(key, android.text.TextUtils.join("\n", values)).commit();
+            prefs.edit().putString(key, android.text.TextUtils.join("\n", values)).commit();
         }
         return added;
     }
 
-    private static boolean appendTemporaryLinePreference(String key, String rawValue, long expiresAtSeconds) {
+    private static boolean appendTemporaryLinePreference(SharedPreferences prefs, String key,
+                                                         String rawValue, long expiresAtSeconds) {
         if (rawValue == null || expiresAtSeconds <= (System.currentTimeMillis() / 1000L)) {
             return false;
         }
@@ -421,7 +543,7 @@ public class G extends Application implements Application.ActivityLifecycleCallb
         }
         LinkedHashSet<String> values = new LinkedHashSet<>();
         String prefix = value + "|";
-        String existing = gPrefs.getString(key, "");
+        String existing = prefs.getString(key, "");
         boolean changed = false;
         if (existing != null) {
             String[] lines = existing.split("[\\r\\n]+");
@@ -442,13 +564,13 @@ public class G extends Application implements Application.ActivityLifecycleCallb
         String entry = value + "|" + expiresAtSeconds;
         boolean added = values.add(entry);
         if (added || changed) {
-            gPrefs.edit().putString(key, android.text.TextUtils.join("\n", values)).commit();
+            prefs.edit().putString(key, android.text.TextUtils.join("\n", values)).commit();
         }
         return added || changed;
     }
 
-    private static void pruneExpiredTemporaryPreference(String key) {
-        String existing = gPrefs.getString(key, "");
+    private static void pruneExpiredTemporaryPreference(SharedPreferences prefs, String key) {
+        String existing = prefs.getString(key, "");
         if (existing == null || existing.trim().isEmpty()) {
             return;
         }
@@ -465,7 +587,7 @@ public class G extends Application implements Application.ActivityLifecycleCallb
             values.add(value);
         }
         if (changed) {
-            gPrefs.edit().putString(key, android.text.TextUtils.join("\n", values)).commit();
+            prefs.edit().putString(key, android.text.TextUtils.join("\n", values)).commit();
         }
     }
 
@@ -482,7 +604,11 @@ public class G extends Application implements Application.ActivityLifecycleCallb
     }
 
     private static int readIntPreference(String key, int fallback, int min, int max) {
-        String value = gPrefs.getString(key, String.valueOf(fallback));
+        return readIntPreference(gPrefs, key, fallback, min, max);
+    }
+
+    private static int readIntPreference(SharedPreferences prefs, String key, int fallback, int min, int max) {
+        String value = prefs.getString(key, String.valueOf(fallback));
         try {
             int parsed = Integer.parseInt(value);
             if (parsed < min || parsed > max) {

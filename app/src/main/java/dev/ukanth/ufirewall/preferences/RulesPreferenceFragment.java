@@ -84,6 +84,22 @@ public class RulesPreferenceFragment extends PreferenceFragment implements
                 return true;
             });
         }
+
+        Preference saveProfilePolicy = findPreference("dnsHijackSaveProfilePolicy");
+        if (saveProfilePolicy != null) {
+            saveProfilePolicy.setOnPreferenceClickListener(preference -> {
+                saveDnsProfilePolicy();
+                return true;
+            });
+        }
+
+        Preference clearProfilePolicy = findPreference("dnsHijackClearProfilePolicy");
+        if (clearProfilePolicy != null) {
+            clearProfilePolicy.setOnPreferenceClickListener(preference -> {
+                clearDnsProfilePolicy();
+                return true;
+            });
+        }
     }
 
     private void updateRuleStatus() {
@@ -199,6 +215,34 @@ public class RulesPreferenceFragment extends PreferenceFragment implements
 
     private void runDnsBlocklistRollback() {
         runBlocklistTask(() -> DnsBlocklistManager.restorePrevious(ctx));
+    }
+
+    private void saveDnsProfilePolicy() {
+        boolean saved = G.saveActiveDnsHijackProfilePolicy()
+                && DnsBlocklistManager.copyGlobalBlocklistToActiveProfile(ctx);
+        handleDnsProfilePolicyResult(saved,
+                R.string.dns_hijack_profile_policy_saved);
+    }
+
+    private void clearDnsProfilePolicy() {
+        handleDnsProfilePolicyResult(G.clearActiveDnsHijackProfilePolicy(),
+                R.string.dns_hijack_profile_policy_cleared);
+    }
+
+    private void handleDnsProfilePolicyResult(boolean success, int successMessage) {
+        if (ctx == null) {
+            return;
+        }
+        if (success) {
+            Api.setRulesUpToDate(false);
+            DnsBlocklistUpdateReceiver.scheduleOrCancel(ctx);
+            if (G.enableDnsHijack()) {
+                DnsHijackManager.requestReload(ctx);
+            }
+            Api.toast(ctx, getString(successMessage));
+        } else {
+            Api.toast(ctx, getString(R.string.dns_hijack_profile_policy_failed));
+        }
     }
 
     private void runBlocklistTask(BlocklistTask task) {
@@ -449,14 +493,16 @@ public class RulesPreferenceFragment extends PreferenceFragment implements
                 || key.equals("dnsHijackBlockRegex")
                 || key.equals("dnsHijackBlocklistUrls")
                 || key.equals("dnsHijackScheduledBlocklistUpdates")
-                || key.equals("dnsHijackBlocklistUpdateIntervalHours"));
+                || key.equals("dnsHijackBlocklistUpdateIntervalHours")
+                || key.equals("dnsHijackUseProfilePolicy"));
     }
 
     private boolean isDnsHijackBlocklistSchedulePreference(String key) {
         return key != null && (key.equals("enableDnsHijack")
                 || key.equals("dnsHijackBlocklistUrls")
                 || key.equals("dnsHijackScheduledBlocklistUpdates")
-                || key.equals("dnsHijackBlocklistUpdateIntervalHours"));
+                || key.equals("dnsHijackBlocklistUpdateIntervalHours")
+                || key.equals("dnsHijackUseProfilePolicy"));
     }
 
     private boolean shouldReloadDnsHijackPreference(String key) {

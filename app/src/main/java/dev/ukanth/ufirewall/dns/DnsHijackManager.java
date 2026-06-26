@@ -156,6 +156,12 @@ public final class DnsHijackManager {
         File bootLog = new File(dir, BOOT_LOG);
 
         out.append("enabled_pref=").append(G.enableDnsHijack()).append('\n');
+        out.append("active_profile=").append(G.activeDnsHijackPolicyProfile()).append('\n');
+        out.append("profile_dns_overrides_enabled=").append(G.dnsHijackUseProfilePolicy()).append('\n');
+        out.append("active_profile_dns_override_saved=")
+                .append(G.activeDnsHijackProfilePolicySaved()).append('\n');
+        out.append("blocklist_storage=").append(G.dnsHijackBlocklistDirectoryName("dnsd_blocklists"))
+                .append('\n');
         out.append("boot_persistence_pref=").append(G.dnsHijackBootPersistence()).append('\n');
         out.append("port=").append(G.dnsHijackPort(DEFAULT_PORT)).append('\n');
         out.append("fail_open=").append(G.dnsHijackFailOpen()).append('\n');

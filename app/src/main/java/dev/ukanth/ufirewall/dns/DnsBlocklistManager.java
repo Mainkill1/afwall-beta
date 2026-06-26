@@ -141,6 +141,30 @@ public final class DnsBlocklistManager {
         }
     }
 
+    public static boolean copyGlobalBlocklistToActiveProfile(Context context) {
+        File sourceDir = context.getApplicationContext().getDir(DIR, Context.MODE_PRIVATE);
+        File targetDir = blocklistDir(context);
+        if (sourceDir.equals(targetDir)) {
+            return true;
+        }
+        if (!targetDir.exists() && !targetDir.mkdirs()) {
+            ApplicationErrorLog.add(context, "Unable to create active profile DNS blocklist directory");
+            return false;
+        }
+        try {
+            copyIfExists(new File(sourceDir, EXACT_FILE), new File(targetDir, EXACT_FILE));
+            copyIfExists(new File(sourceDir, SUFFIX_FILE), new File(targetDir, SUFFIX_FILE));
+            copyIfExists(new File(sourceDir, EXACT_BACKUP), new File(targetDir, EXACT_BACKUP));
+            copyIfExists(new File(sourceDir, SUFFIX_BACKUP), new File(targetDir, SUFFIX_BACKUP));
+            copyIfExists(new File(sourceDir, META_FILE), new File(targetDir, META_FILE));
+            return true;
+        } catch (IOException e) {
+            Log.e(TAG, "DNS profile blocklist copy failed", e);
+            ApplicationErrorLog.add(context, "DNS profile blocklist copy failed: " + e.getMessage());
+            return false;
+        }
+    }
+
     static File exactBlockFile(Context context) {
         return new File(blocklistDir(context), EXACT_FILE);
     }
@@ -353,7 +377,8 @@ public final class DnsBlocklistManager {
     }
 
     private static File blocklistDir(Context context) {
-        return context.getApplicationContext().getDir(DIR, Context.MODE_PRIVATE);
+        return context.getApplicationContext()
+                .getDir(G.dnsHijackBlocklistDirectoryName(DIR), Context.MODE_PRIVATE);
     }
 
     public static final class Result {

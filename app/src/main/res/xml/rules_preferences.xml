@@ -119,6 +119,25 @@
             android:summary="@string/dns_hijack_timeout_summary"
             android:title="@string/dns_hijack_timeout_title" />
 
+        <CheckBoxPreference
+            android:defaultValue="false"
+            android:dependency="enableDnsHijack"
+            android:key="dnsHijackUseProfilePolicy"
+            android:summary="@string/dns_hijack_profile_policy_summary"
+            android:title="@string/dns_hijack_profile_policy_title" />
+
+        <Preference
+            android:dependency="dnsHijackUseProfilePolicy"
+            android:key="dnsHijackSaveProfilePolicy"
+            android:summary="@string/dns_hijack_save_profile_policy_summary"
+            android:title="@string/dns_hijack_save_profile_policy_title" />
+
+        <Preference
+            android:dependency="dnsHijackUseProfilePolicy"
+            android:key="dnsHijackClearProfilePolicy"
+            android:summary="@string/dns_hijack_clear_profile_policy_summary"
+            android:title="@string/dns_hijack_clear_profile_policy_title" />
+
         <EditTextPreference
             android:dependency="enableDnsHijack"
             android:key="dnsHijackAllowExact"

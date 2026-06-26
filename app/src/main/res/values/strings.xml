@@ -313,6 +313,15 @@
     <string name="dns_hijack_boot_persistence_summary">Install a root boot script that restarts the DNS daemon and restores DNS redirect rules before opening the app.</string>
     <string name="dns_hijack_timeout_title">Upstream timeout</string>
     <string name="dns_hijack_timeout_summary">DNS upstream timeout in milliseconds.</string>
+    <string name="dns_hijack_profile_policy_title">Use active profile DNS policy</string>
+    <string name="dns_hijack_profile_policy_summary">When enabled, saved DNS settings and compiled blocklists follow the active firewall profile.</string>
+    <string name="dns_hijack_save_profile_policy_title">Save DNS policy to active profile</string>
+    <string name="dns_hijack_save_profile_policy_summary">Copy the current DNS upstreams, rules, blocklist URLs, and update schedule into the active profile.</string>
+    <string name="dns_hijack_clear_profile_policy_title">Clear active profile DNS policy</string>
+    <string name="dns_hijack_clear_profile_policy_summary">Remove the active profile DNS override and fall back to the global DNS settings.</string>
+    <string name="dns_hijack_profile_policy_saved">DNS policy saved for active profile.</string>
+    <string name="dns_hijack_profile_policy_cleared">Active profile DNS policy cleared.</string>
+    <string name="dns_hijack_profile_policy_failed">Unable to update active profile DNS policy.</string>
     <string name="dns_hijack_allow_exact_title">Exact allow domains</string>
     <string name="dns_hijack_allow_exact_summary">Domains that should always be allowed. One entry per line.</string>
     <string name="dns_hijack_allow_suffix_title">Wildcard allow suffixes</string>
