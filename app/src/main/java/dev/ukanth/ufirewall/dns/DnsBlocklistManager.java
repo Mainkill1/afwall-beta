@@ -61,6 +61,7 @@ public final class DnsBlocklistManager {
                 result.message = "Unable to open selected blocklist";
                 return result;
             }
+            result.sources = 1;
             parsePossiblyJsonStream(input, result);
             activate(context, result);
             return result;
@@ -80,6 +81,7 @@ public final class DnsBlocklistManager {
             result.message = "No DNS blocklist text was provided";
             return result;
         }
+        result.sources = 1;
         try (InputStream input = new ByteArrayInputStream(text.getBytes(StandardCharsets.UTF_8))) {
             parsePossiblyJsonStream(input, result);
             activate(context, result);
@@ -147,8 +149,10 @@ public final class DnsBlocklistManager {
         try {
             copyIfExists(exactBackup, new File(dir, EXACT_FILE));
             copyIfExists(suffixBackup, new File(dir, SUFFIX_FILE));
-            writeMetadata(context, "rollback", countLines(new File(dir, EXACT_FILE)),
-                    countLines(new File(dir, SUFFIX_FILE)), 0, 0, 0);
+            result.finish();
+            writeMetadata(context, "rollback", "rollback", countLines(new File(dir, EXACT_FILE)),
+                    countLines(new File(dir, SUFFIX_FILE)), 0, 0, 0, 0, 0,
+                    result.durationMs());
             result.message = "Restored previous DNS blocklist";
             return result;
         } catch (IOException e) {
@@ -555,11 +559,13 @@ public final class DnsBlocklistManager {
         copyIfExists(suffix, new File(dir, SUFFIX_BACKUP));
         writeRuleFile(new File(dir, EXACT_FILE + ".tmp"), exact, result.exactRules);
         writeRuleFile(new File(dir, SUFFIX_FILE + ".tmp"), suffix, result.suffixRules);
-        writeMetadata(context, result.sourceLabel, result.exactRules.size(), result.suffixRules.size(),
-                result.duplicates, result.invalid, result.skipped);
+        result.finish();
+        writeMetadata(context, result.sourceLabel, "active", result.exactRules.size(), result.suffixRules.size(),
+                result.duplicates, result.invalid, result.skipped, result.sources, result.lines,
+                result.durationMs());
         result.message = "Activated DNS blocklist: " + result.exactRules.size()
                 + " exact, " + result.suffixRules.size() + " wildcard";
-        ApplicationErrorLog.add(context, result.message);
+        ApplicationErrorLog.add(context, result.message + " in " + formatDuration(result.durationMs()));
     }
 
     private static void writeRuleFile(File tmp, File target, Set<String> rules) throws IOException {
@@ -580,16 +586,26 @@ public final class DnsBlocklistManager {
         }
     }
 
-    private static void writeMetadata(Context context, String source, int exact, int suffix,
-                                      int duplicates, int invalid, int skipped) throws IOException {
+    private static void writeMetadata(Context context, String source, String status, int exact, int suffix,
+                                      int duplicates, int invalid, int skipped, int sources,
+                                      int lines, long durationMs) throws IOException {
         File meta = new File(blocklistDir(context), META_FILE);
         String timestamp = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(new Date());
         try (OutputStreamWriter writer = new OutputStreamWriter(new FileOutputStream(meta, false), StandardCharsets.UTF_8)) {
             writer.write("updated=");
             writer.write(timestamp);
             writer.write('\n');
+            writer.write("status=");
+            writer.write(status == null ? "unknown" : status);
+            writer.write('\n');
             writer.write("source=");
             writer.write(source == null ? "unknown" : source);
+            writer.write('\n');
+            writer.write("sources=");
+            writer.write(String.valueOf(sources));
+            writer.write('\n');
+            writer.write("lines=");
+            writer.write(String.valueOf(lines));
             writer.write('\n');
             writer.write("exact=");
             writer.write(String.valueOf(exact));
@@ -606,7 +622,17 @@ public final class DnsBlocklistManager {
             writer.write("skipped=");
             writer.write(String.valueOf(skipped));
             writer.write('\n');
+            writer.write("duration_ms=");
+            writer.write(String.valueOf(durationMs));
+            writer.write('\n');
         }
+    }
+
+    private static String formatDuration(long durationMs) {
+        if (durationMs < 1000L) {
+            return durationMs + "ms";
+        }
+        return String.format(Locale.US, "%.1fs", durationMs / 1000.0d);
     }
 
     private static int countLines(File file) throws IOException {
@@ -645,6 +671,8 @@ public final class DnsBlocklistManager {
         private final Set<String> exactRules = new LinkedHashSet<>();
         private final Set<String> suffixRules = new LinkedHashSet<>();
         private final StringBuilder notes = new StringBuilder();
+        private final long startedAtMs = System.currentTimeMillis();
+        private long finishedAtMs;
         private String sourceLabel;
         public int lines;
         public int duplicates;
@@ -658,6 +686,17 @@ public final class DnsBlocklistManager {
             this.sourceLabel = sourceLabel;
         }
 
+        private void finish() {
+            if (finishedAtMs == 0L) {
+                finishedAtMs = System.currentTimeMillis();
+            }
+        }
+
+        private long durationMs() {
+            long end = finishedAtMs == 0L ? System.currentTimeMillis() : finishedAtMs;
+            return Math.max(0L, end - startedAtMs);
+        }
+
         public boolean hasRules() {
             return !exactRules.isEmpty() || !suffixRules.isEmpty();
         }
@@ -665,11 +704,15 @@ public final class DnsBlocklistManager {
         public String summary() {
             StringBuilder summary = new StringBuilder();
             summary.append(message);
+            summary.append("\nStatus: ").append(failed ? "failed" : "complete");
+            summary.append("\nSources: ").append(sources);
+            summary.append("\nLines: ").append(lines);
             summary.append("\nExact: ").append(exactRules.size());
             summary.append("\nWildcard: ").append(suffixRules.size());
             summary.append("\nDuplicates: ").append(duplicates);
             summary.append("\nInvalid: ").append(invalid);
             summary.append("\nSkipped: ").append(skipped);
+            summary.append("\nDuration: ").append(formatDuration(durationMs()));
             if (notes.length() > 0) {
                 summary.append("\n\n").append(notes);
             }
