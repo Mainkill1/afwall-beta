@@ -35,6 +35,7 @@
 #define MAX_REGEX 128
 #define MAX_TEMP_RULES 1024
 #define MAX_UPSTREAMS 8
+#define MAX_SPLIT_UPSTREAMS 32
 #define CACHE_SIZE 1024
 #define LOG_RING 256
 #define DEFAULT_PORT 5354
@@ -66,6 +67,11 @@ typedef struct {
 } upstream_t;
 
 typedef struct {
+    char suffix[MAX_DOMAIN];
+    upstream_t upstream;
+} split_upstream_t;
+
+typedef struct {
     int listen_port;
     int strict_mode;
     int fail_open;
@@ -75,6 +81,8 @@ typedef struct {
     char pid_file[256];
     upstream_t upstreams[MAX_UPSTREAMS];
     int upstream_count;
+    split_upstream_t split_upstreams[MAX_SPLIT_UPSTREAMS];
+    int split_upstream_count;
     string_rule_t exact_allow[MAX_RULES];
     string_rule_t suffix_allow[MAX_RULES];
     string_rule_t exact_block[MAX_RULES];
@@ -400,22 +408,34 @@ static bool temp_match(const temp_rule_t *rules, int count, const char *domain, 
     return false;
 }
 
+static bool domain_has_suffix(const char *domain, const char *suffix);
+
 static bool suffix_match(const string_rule_t *rules, int count, const char *domain) {
     int i;
-    size_t domain_len = strlen(domain);
     for (i = 0; i < count; i++) {
         const char *suffix = rules[i].value;
-        size_t suffix_len = strlen(suffix);
-        if (suffix_len == 0 || suffix_len > domain_len) {
-            continue;
-        }
-        if (strcmp(domain + domain_len - suffix_len, suffix) == 0) {
-            if (suffix_len == domain_len || domain[domain_len - suffix_len - 1] == '.') {
-                return true;
-            }
+        if (domain_has_suffix(domain, suffix)) {
+            return true;
         }
     }
     return false;
+}
+
+static bool domain_has_suffix(const char *domain, const char *suffix) {
+    size_t domain_len;
+    size_t suffix_len;
+    if (domain == NULL || suffix == NULL) {
+        return false;
+    }
+    domain_len = strlen(domain);
+    suffix_len = strlen(suffix);
+    if (suffix_len == 0 || suffix_len > domain_len) {
+        return false;
+    }
+    if (strcmp(domain + domain_len - suffix_len, suffix) != 0) {
+        return false;
+    }
+    return suffix_len == domain_len || domain[domain_len - suffix_len - 1] == '.';
 }
 
 static bool regex_match_rules(const regex_rule_t *rules, int count, const char *domain) {
@@ -737,10 +757,40 @@ static int connect_upstream(const upstream_t *upstream, int socktype, int timeou
     return fd;
 }
 
-static ssize_t forward_udp(const config_t *cfg, const uint8_t *query, size_t query_len, uint8_t *response, size_t response_len) {
+static const upstream_t *select_upstreams(const config_t *cfg, const char *domain,
+                                          int *count, const char **route) {
     int i;
-    for (i = 0; i < cfg->upstream_count; i++) {
-        int fd = connect_upstream(&cfg->upstreams[i], SOCK_DGRAM, cfg->timeout_ms);
+    int best = -1;
+    size_t best_len = 0;
+    for (i = 0; i < cfg->split_upstream_count; i++) {
+        size_t suffix_len = strlen(cfg->split_upstreams[i].suffix);
+        if (suffix_len > best_len && domain_has_suffix(domain, cfg->split_upstreams[i].suffix)) {
+            best = i;
+            best_len = suffix_len;
+        }
+    }
+    if (best >= 0) {
+        *count = 1;
+        if (route != NULL) {
+            *route = "split_upstream";
+        }
+        return &cfg->split_upstreams[best].upstream;
+    }
+    *count = cfg->upstream_count;
+    if (route != NULL) {
+        *route = "upstream";
+    }
+    return cfg->upstreams;
+}
+
+static ssize_t forward_udp(const config_t *cfg, const char *domain, const uint8_t *query,
+                           size_t query_len, uint8_t *response, size_t response_len,
+                           const char **route) {
+    int i;
+    int count = 0;
+    const upstream_t *upstreams = select_upstreams(cfg, domain, &count, route);
+    for (i = 0; i < count; i++) {
+        int fd = connect_upstream(&upstreams[i], SOCK_DGRAM, cfg->timeout_ms);
         ssize_t got;
         if (fd < 0) {
             continue;
@@ -820,18 +870,23 @@ static ssize_t read_full(int fd, uint8_t *buf, size_t len) {
     return (ssize_t) got;
 }
 
-static ssize_t forward_tcp(const config_t *cfg, const uint8_t *query, size_t query_len, uint8_t *response, size_t response_len) {
+static ssize_t forward_tcp(const config_t *cfg, const char *domain, const uint8_t *query,
+                           size_t query_len, uint8_t *response, size_t response_len,
+                           const char **route) {
     int i;
     uint8_t lenbuf[2];
+    int count = 0;
+    const upstream_t *upstreams;
     if (query_len > 65535) {
         return -1;
     }
+    upstreams = select_upstreams(cfg, domain, &count, route);
     lenbuf[0] = (uint8_t) ((query_len >> 8) & 0xffu);
     lenbuf[1] = (uint8_t) (query_len & 0xffu);
-    for (i = 0; i < cfg->upstream_count; i++) {
+    for (i = 0; i < count; i++) {
         uint8_t rlenbuf[2];
         uint16_t rlen;
-        int fd = connect_upstream(&cfg->upstreams[i], SOCK_STREAM, cfg->timeout_ms);
+        int fd = connect_upstream(&upstreams[i], SOCK_STREAM, cfg->timeout_ms);
         if (fd < 0) {
             continue;
         }
@@ -869,13 +924,11 @@ static void default_config(config_t *cfg) {
     cfg->upstreams[0].port = 53;
 }
 
-static bool parse_upstream(config_t *cfg, const char *value) {
+static bool parse_upstream_value(const char *value, upstream_t *upstream) {
     const char *colon;
-    upstream_t *upstream;
-    if (cfg->upstream_count >= MAX_UPSTREAMS || value == NULL || value[0] == '\0') {
+    if (value == NULL || value[0] == '\0' || upstream == NULL) {
         return false;
     }
-    upstream = &cfg->upstreams[cfg->upstream_count];
     memset(upstream, 0, sizeof(*upstream));
     colon = strrchr(value, ':');
     if (colon != NULL && colon[1] != '\0') {
@@ -895,7 +948,60 @@ static bool parse_upstream(config_t *cfg, const char *value) {
     if (upstream->port <= 0 || upstream->port > 65535) {
         upstream->port = 53;
     }
+    return upstream->host[0] != '\0';
+}
+
+static bool parse_upstream(config_t *cfg, const char *value) {
+    if (cfg->upstream_count >= MAX_UPSTREAMS) {
+        return false;
+    }
+    if (!parse_upstream_value(value, &cfg->upstreams[cfg->upstream_count])) {
+        return false;
+    }
     cfg->upstream_count++;
+    return true;
+}
+
+static bool parse_split_upstream(config_t *cfg, const char *value) {
+    char line[512];
+    char *sep;
+    char *suffix;
+    char *upstream;
+    if (cfg->split_upstream_count >= MAX_SPLIT_UPSTREAMS || value == NULL || value[0] == '\0') {
+        return false;
+    }
+    safe_copy(line, sizeof(line), value);
+    sep = strchr(line, '|');
+    if (sep == NULL) {
+        sep = strchr(line, '=');
+    }
+    if (sep == NULL) {
+        sep = strchr(line, ' ');
+    }
+    if (sep == NULL) {
+        return false;
+    }
+    *sep = '\0';
+    suffix = line;
+    upstream = sep + 1;
+    trim(suffix);
+    trim(upstream);
+    lower_ascii(suffix);
+    if (suffix[0] == '*' && suffix[1] == '.') {
+        memmove(suffix, suffix + 2, strlen(suffix + 2) + 1);
+    }
+    while (suffix[0] == '.') {
+        memmove(suffix, suffix + 1, strlen(suffix));
+    }
+    if (!valid_domain_rule(suffix)) {
+        return false;
+    }
+    safe_copy(cfg->split_upstreams[cfg->split_upstream_count].suffix,
+            sizeof(cfg->split_upstreams[cfg->split_upstream_count].suffix), suffix);
+    if (!parse_upstream_value(upstream, &cfg->split_upstreams[cfg->split_upstream_count].upstream)) {
+        return false;
+    }
+    cfg->split_upstream_count++;
     return true;
 }
 
@@ -949,6 +1055,8 @@ static bool load_config(const char *path, config_t *new_cfg) {
             }
         } else if (strcmp(key, "upstream") == 0) {
             parse_upstream(new_cfg, value);
+        } else if (strcmp(key, "split_upstream") == 0) {
+            parse_split_upstream(new_cfg, value);
         } else if (strcmp(key, "allow_exact") == 0) {
             add_string_rule(new_cfg->exact_allow, &new_cfg->exact_allow_count, value);
         } else if (strcmp(key, "allow_exact_file") == 0) {
@@ -1140,6 +1248,7 @@ static void handle_dns_query(const config_t *cfg, const uint8_t *query, size_t q
     uint16_t qtype = 0;
     const char *reason = "parse";
     ssize_t forwarded;
+    const char *route = "upstream";
     struct timeval start;
     struct timeval upstream_start;
     struct timeval upstream_end;
@@ -1177,8 +1286,8 @@ static void handle_dns_query(const config_t *cfg, const uint8_t *query, size_t q
     g_stats.upstream_requests++;
     gettimeofday(&upstream_start, NULL);
     forwarded = tcp
-            ? forward_tcp(cfg, query, query_len, response, MAX_PACKET)
-            : forward_udp(cfg, query, query_len, response, MAX_PACKET);
+            ? forward_tcp(cfg, domain, query, query_len, response, MAX_PACKET, &route)
+            : forward_udp(cfg, domain, query, query_len, response, MAX_PACKET, &route);
     gettimeofday(&upstream_end, NULL);
     upstream_latency_ms = elapsed_ms(&upstream_start, &upstream_end);
     if (upstream_latency_ms > 0) {
@@ -1189,8 +1298,8 @@ static void handle_dns_query(const config_t *cfg, const uint8_t *query, size_t q
         cache_store(domain, qtype, response, *response_len);
         g_stats.allowed++;
         g_stats.upstream_successes++;
-        *action_out = "upstream";
-        finish_dns_query(domain, "upstream", &start);
+        *action_out = route;
+        finish_dns_query(domain, route, &start);
         return;
     }
     g_stats.upstream_failures++;
@@ -1338,7 +1447,7 @@ static void write_health_response(int client) {
 
     write_control_response(client,
             "health=1\nrunning=1\npid=%ld\nuptime=%llu\nlisten_port=%d\n"
-            "generation=%llu\nupstreams=%d\nupstream_probe=%s\n"
+            "generation=%llu\nupstreams=%d\nsplit_upstreams=%d\nupstream_probe=%s\n"
             "upstream_probe_ms=%d\nupstream_probe_index=%d\nupstream_probe_rcode=%d\n"
             "queries=%llu\nblocked=%llu\nallowed=%llu\ncache_entries=%d\n"
             "rules_total=%d\n",
@@ -1347,6 +1456,7 @@ static void write_health_response(int client) {
             g_cfg.listen_port,
             (unsigned long long) g_cfg.generation,
             g_cfg.upstream_count,
+            g_cfg.split_upstream_count,
             response_len > 0 ? "ok" : "fail",
             latency_ms,
             upstream_index,
@@ -1432,7 +1542,7 @@ static void handle_control(int fd) {
                 "avg_latency_ms=%llu\nmax_latency_ms=%llu\nupstream_avg_latency_ms=%llu\n"
                 "reloads=%llu\nrules_exact_allow=%d\nrules_suffix_allow=%d\nrules_exact_block=%d\n"
                 "rules_suffix_block=%d\nrules_regex_allow=%d\nrules_regex_block=%d\n"
-                "rules_temp_allow=%d\nrules_temp_block=%d\n",
+                "rules_temp_allow=%d\nrules_temp_block=%d\nsplit_upstreams=%d\n",
                 (long) getpid(),
                 (unsigned long long) (now_seconds() - g_stats.start_time),
                 (unsigned long long) g_cfg.generation,
@@ -1467,7 +1577,8 @@ static void handle_control(int fd) {
                 g_cfg.regex_allow_count,
                 g_cfg.regex_block_count,
                 g_cfg.temp_allow_count,
-                g_cfg.temp_block_count);
+                g_cfg.temp_block_count,
+                g_cfg.split_upstream_count);
     } else if (strcmp(cmd, "health") == 0) {
         write_health_response(client);
     } else if (strcmp(cmd, "benchmark") == 0) {

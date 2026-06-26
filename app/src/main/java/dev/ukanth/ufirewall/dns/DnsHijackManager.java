@@ -171,6 +171,7 @@ public final class DnsHijackManager {
         out.append("fail_open=").append(G.dnsHijackFailOpen()).append('\n');
         out.append("strict_mode=").append(G.dnsHijackStrictMode()).append('\n');
         out.append("timeout_ms=").append(G.dnsHijackTimeoutMs()).append('\n');
+        out.append("split_upstream_entries=").append(countLines(G.dnsHijackSplitUpstreams())).append('\n');
         out.append("scheduled_blocklist_updates=").append(G.dnsHijackScheduledBlocklistUpdates()).append('\n');
         out.append("blocklist_update_interval_hours=")
                 .append(G.dnsHijackBlocklistUpdateIntervalHours()).append('\n');
@@ -750,6 +751,7 @@ public final class DnsHijackManager {
         config.append("timeout_ms=").append(G.dnsHijackTimeoutMs()).append('\n');
 
         appendConfigEntries(config, "upstream", G.dnsHijackUpstreams());
+        appendConfigEntries(config, "split_upstream", G.dnsHijackSplitUpstreams());
         appendConfigEntries(config, "allow_exact", G.dnsHijackAllowExact());
         appendConfigEntries(config, "allow_suffix", G.dnsHijackAllowSuffix());
         appendConfigEntries(config, "block_exact", G.dnsHijackBlockExact());
