@@ -632,6 +632,7 @@ public class RulesPreferenceFragment extends PreferenceFragment implements
         return key != null && (key.equals("enableDnsHijack")
                 || key.equals("dnsHijackPort")
                 || key.equals("dnsHijackUpstreams")
+                || key.equals("dnsHijackBootstrapUpstreams")
                 || key.equals("dnsHijackSplitUpstreams")
                 || key.equals("dnsHijackCaptureUids")
                 || key.equals("dnsHijackBypassUids")

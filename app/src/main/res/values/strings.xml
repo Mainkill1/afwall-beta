@@ -305,6 +305,8 @@
     <string name="dns_hijack_port_summary">Port used by the local root DNS daemon. Reapply firewall rules after changing this.</string>
     <string name="dns_hijack_upstreams_title">Upstream DNS servers</string>
     <string name="dns_hijack_upstreams_summary">One upstream per line. Use host:port, udp://host:port, tcp://host:port, or bracketed IPv6.</string>
+    <string name="dns_hijack_bootstrap_upstreams_title">Bootstrap DNS servers</string>
+    <string name="dns_hijack_bootstrap_upstreams_summary">Resolvers used to resolve hostname-based upstreams before writing daemon config.</string>
     <string name="dns_hijack_benchmark_upstreams_title">Benchmark upstream DNS</string>
     <string name="dns_hijack_benchmark_upstreams_summary">Probe configured upstream resolvers and report per-server latency.</string>
     <string name="dns_hijack_benchmark_empty">No benchmark result was returned.</string>

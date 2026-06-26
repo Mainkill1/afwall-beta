@@ -184,6 +184,7 @@ public final class DnsHijackManager {
         out.append("strict_mode=").append(G.dnsHijackStrictMode()).append('\n');
         out.append("timeout_ms=").append(G.dnsHijackTimeoutMs()).append('\n');
         out.append("cache_size=").append(G.dnsHijackCacheSize()).append('\n');
+        out.append("bootstrap_upstream_entries=").append(countLines(G.dnsHijackBootstrapUpstreams())).append('\n');
         out.append("split_upstream_entries=").append(countLines(G.dnsHijackSplitUpstreams())).append('\n');
         out.append("capture_uid_entries=").append(parseUidList(G.dnsHijackCaptureUids()).size()).append('\n');
         out.append("bypass_uid_entries=").append(parseUidList(G.dnsHijackBypassUids()).size()).append('\n');
@@ -1086,11 +1087,23 @@ public final class DnsHijackManager {
                     port = parsePort(value.substring(firstColon + 1), port);
                 }
             }
-            host = host.trim();
+            host = host.trim().toLowerCase(Locale.US);
             if (host.isEmpty()) {
                 return null;
             }
             return new UpstreamTarget(host, port, protocol);
+        }
+
+        private boolean hasLiteralHost() {
+            return isIpv4Literal(host) || host.contains(":");
+        }
+
+        private String toConfigValue() {
+            String prefix = "tcp".equals(protocol) ? "tcp://"
+                    : "udp".equals(protocol) ? "udp://" : "";
+            String formattedHost = host.contains(":") && !host.startsWith("[")
+                    ? "[" + host + "]" : host;
+            return prefix + formattedHost + ":" + port;
         }
 
         private static int parsePort(String raw, int fallback) {
@@ -1100,6 +1113,27 @@ public final class DnsHijackManager {
             } catch (NumberFormatException e) {
                 return fallback;
             }
+        }
+
+        private static boolean isIpv4Literal(String value) {
+            if (value == null) {
+                return false;
+            }
+            String[] parts = value.split("\\.");
+            if (parts.length != 4) {
+                return false;
+            }
+            for (String part : parts) {
+                try {
+                    int parsed = Integer.parseInt(part);
+                    if (parsed < 0 || parsed > 255) {
+                        return false;
+                    }
+                } catch (NumberFormatException e) {
+                    return false;
+                }
+            }
+            return true;
         }
     }
 
@@ -1323,8 +1357,8 @@ public final class DnsHijackManager {
         config.append("timeout_ms=").append(G.dnsHijackTimeoutMs()).append('\n');
         config.append("cache_size=").append(G.dnsHijackCacheSize()).append('\n');
 
-        appendConfigEntries(config, "upstream", G.dnsHijackUpstreams());
-        appendConfigEntries(config, "split_upstream", G.dnsHijackSplitUpstreams());
+        appendResolvedUpstreamConfigEntries(context, config, "upstream", G.dnsHijackUpstreams());
+        appendResolvedSplitUpstreamConfigEntries(context, config, G.dnsHijackSplitUpstreams());
         appendConfigEntries(config, "allow_exact", G.dnsHijackAllowExact());
         appendConfigEntries(config, "allow_suffix", G.dnsHijackAllowSuffix());
         appendConfigEntries(config, "block_exact", G.dnsHijackBlockExact());
@@ -1357,6 +1391,260 @@ public final class DnsHijackManager {
             }
             config.append(key).append('=').append(value.toLowerCase(Locale.US)).append('\n');
         }
+    }
+
+    private static void appendResolvedUpstreamConfigEntries(Context context, StringBuilder config,
+                                                            String key, String raw) {
+        if (raw == null) {
+            return;
+        }
+        String[] lines = raw.split("[\\r\\n,]+");
+        for (String line : lines) {
+            String value = line == null ? "" : line.trim();
+            if (value.isEmpty() || value.startsWith("#")) {
+                continue;
+            }
+            for (String resolved : resolveUpstreamValue(context, value)) {
+                config.append(key).append('=').append(resolved).append('\n');
+            }
+        }
+    }
+
+    private static void appendResolvedSplitUpstreamConfigEntries(Context context, StringBuilder config,
+                                                                 String raw) {
+        if (raw == null) {
+            return;
+        }
+        String[] lines = raw.split("\\r?\\n");
+        for (String line : lines) {
+            String value = line == null ? "" : line.trim();
+            int separator = findSplitSeparator(value);
+            if (value.isEmpty() || value.startsWith("#") || separator <= 0) {
+                continue;
+            }
+            String suffix = value.substring(0, separator).trim().toLowerCase(Locale.US);
+            String upstream = value.substring(separator + 1).trim();
+            if (upstream.isEmpty()) {
+                continue;
+            }
+            for (String resolved : resolveUpstreamValue(context, upstream)) {
+                config.append("split_upstream=").append(suffix).append('=')
+                        .append(resolved).append('\n');
+            }
+        }
+    }
+
+    private static int findSplitSeparator(String value) {
+        int separator = value.indexOf('|');
+        if (separator < 0) {
+            separator = value.indexOf('=');
+        }
+        if (separator < 0) {
+            for (int i = 0; i < value.length(); i++) {
+                if (Character.isWhitespace(value.charAt(i))) {
+                    return i;
+                }
+            }
+        }
+        return separator;
+    }
+
+    private static List<String> resolveUpstreamValue(Context context, String value) {
+        List<String> resolvedValues = new ArrayList<>();
+        UpstreamTarget target = UpstreamTarget.parse(value);
+        if (target == null || target.hasLiteralHost()) {
+            resolvedValues.add(value.toLowerCase(Locale.US));
+            return resolvedValues;
+        }
+
+        List<String> addresses = resolveWithBootstrap(context, target.host);
+        if (addresses.isEmpty()) {
+            ApplicationErrorLog.add(context, "DNS bootstrap resolution failed for upstream " + target.host);
+            resolvedValues.add(target.toConfigValue());
+            return resolvedValues;
+        }
+        for (String address : addresses) {
+            resolvedValues.add(new UpstreamTarget(address, target.port, target.protocol).toConfigValue());
+        }
+        return resolvedValues;
+    }
+
+    private static List<String> resolveWithBootstrap(Context context, String host) {
+        List<String> addresses = new ArrayList<>();
+        List<UpstreamTarget> bootstrapTargets = parseUpstreamTargets(G.dnsHijackBootstrapUpstreams());
+        if (bootstrapTargets.isEmpty()) {
+            bootstrapTargets = parseUpstreamTargets("1.1.1.1:53\n8.8.8.8:53");
+        }
+        for (UpstreamTarget bootstrap : bootstrapTargets) {
+            if (!bootstrap.hasLiteralHost()) {
+                continue;
+            }
+            addResolvedAddresses(addresses, queryBootstrap(bootstrap, host, 1), 1);
+            addResolvedAddresses(addresses, queryBootstrap(bootstrap, host, 28), 28);
+            if (!addresses.isEmpty()) {
+                ApplicationErrorLog.add(context, "DNS bootstrap resolved " + host
+                        + " using " + bootstrap.toConfigValue() + " addresses=" + addresses.size());
+                break;
+            }
+        }
+        return addresses;
+    }
+
+    private static byte[] queryBootstrap(UpstreamTarget bootstrap, String host, int qtype) {
+        byte[] query = buildDnsLookupQuery(host, qtype);
+        if (query == null) {
+            return null;
+        }
+        if ("tcp".equals(bootstrap.protocol)) {
+            return queryBootstrapTcp(bootstrap, query);
+        }
+        return queryBootstrapUdp(bootstrap, query);
+    }
+
+    private static byte[] queryBootstrapUdp(UpstreamTarget bootstrap, byte[] query) {
+        int timeoutMs = Math.min(Math.max(G.dnsHijackTimeoutMs(), 250), 1500);
+        try (DatagramSocket socket = new DatagramSocket()) {
+            socket.setSoTimeout(timeoutMs);
+            InetAddress address = InetAddress.getByName(bootstrap.host);
+            DatagramPacket request = new DatagramPacket(query, query.length, address, bootstrap.port);
+            socket.send(request);
+            byte[] response = new byte[1500];
+            DatagramPacket reply = new DatagramPacket(response, response.length);
+            socket.receive(reply);
+            byte[] copy = new byte[reply.getLength()];
+            System.arraycopy(response, 0, copy, 0, reply.getLength());
+            return copy;
+        } catch (IOException | RuntimeException e) {
+            return null;
+        }
+    }
+
+    private static byte[] queryBootstrapTcp(UpstreamTarget bootstrap, byte[] query) {
+        int timeoutMs = Math.min(Math.max(G.dnsHijackTimeoutMs(), 250), 1500);
+        try (Socket socket = new Socket()) {
+            socket.connect(new InetSocketAddress(InetAddress.getByName(bootstrap.host), bootstrap.port), timeoutMs);
+            socket.setSoTimeout(timeoutMs);
+            OutputStream output = socket.getOutputStream();
+            output.write((query.length >> 8) & 0xff);
+            output.write(query.length & 0xff);
+            output.write(query);
+            output.flush();
+            InputStream input = socket.getInputStream();
+            int high = input.read();
+            int low = input.read();
+            if (high < 0 || low < 0) {
+                return null;
+            }
+            int expected = (high << 8) | low;
+            if (expected <= 0 || expected > 4096) {
+                return null;
+            }
+            byte[] response = new byte[expected];
+            int read = readFully(input, response, expected);
+            return read == expected ? response : null;
+        } catch (IOException | RuntimeException e) {
+            return null;
+        }
+    }
+
+    private static byte[] buildDnsLookupQuery(String host, int qtype) {
+        String clean = host == null ? "" : host.trim().toLowerCase(Locale.US);
+        if (clean.isEmpty()) {
+            return null;
+        }
+        ByteArrayOutputStream query = new ByteArrayOutputStream();
+        int id = (int) (System.currentTimeMillis() & 0xffff);
+        query.write((id >> 8) & 0xff);
+        query.write(id & 0xff);
+        query.write(0x01);
+        query.write(0x00);
+        query.write(0x00);
+        query.write(0x01);
+        query.write(0x00);
+        query.write(0x00);
+        query.write(0x00);
+        query.write(0x00);
+        query.write(0x00);
+        query.write(0x00);
+        String[] labels = clean.split("\\.");
+        for (String label : labels) {
+            if (label.isEmpty() || label.length() > 63) {
+                return null;
+            }
+            byte[] labelBytes = label.getBytes(StandardCharsets.US_ASCII);
+            query.write(labelBytes.length);
+            query.write(labelBytes, 0, labelBytes.length);
+        }
+        query.write(0x00);
+        query.write((qtype >> 8) & 0xff);
+        query.write(qtype & 0xff);
+        query.write(0x00);
+        query.write(0x01);
+        return query.toByteArray();
+    }
+
+    private static void addResolvedAddresses(List<String> addresses, byte[] response, int qtype) {
+        if (response == null || response.length < 12) {
+            return;
+        }
+        int qdCount = readU16(response, 4);
+        int anCount = readU16(response, 6);
+        int offset = 12;
+        for (int i = 0; i < qdCount; i++) {
+            offset = skipDnsName(response, offset);
+            if (offset < 0 || offset + 4 > response.length) {
+                return;
+            }
+            offset += 4;
+        }
+        for (int i = 0; i < anCount; i++) {
+            offset = skipDnsName(response, offset);
+            if (offset < 0 || offset + 10 > response.length) {
+                return;
+            }
+            int type = readU16(response, offset);
+            int clazz = readU16(response, offset + 2);
+            int rdLength = readU16(response, offset + 8);
+            offset += 10;
+            if (offset + rdLength > response.length) {
+                return;
+            }
+            if (clazz == 1 && type == qtype && (rdLength == 4 || rdLength == 16)) {
+                byte[] raw = new byte[rdLength];
+                System.arraycopy(response, offset, raw, 0, rdLength);
+                try {
+                    String address = InetAddress.getByAddress(raw).getHostAddress();
+                    if (!addresses.contains(address)) {
+                        addresses.add(address);
+                    }
+                } catch (IOException ignored) {
+                }
+            }
+            offset += rdLength;
+        }
+    }
+
+    private static int skipDnsName(byte[] packet, int offset) {
+        int jumps = 0;
+        while (offset >= 0 && offset < packet.length && jumps < 128) {
+            int length = packet[offset] & 0xff;
+            if (length == 0) {
+                return offset + 1;
+            }
+            if ((length & 0xc0) == 0xc0) {
+                return offset + 2;
+            }
+            offset += length + 1;
+            jumps++;
+        }
+        return -1;
+    }
+
+    private static int readU16(byte[] packet, int offset) {
+        if (offset < 0 || offset + 1 >= packet.length) {
+            return 0;
+        }
+        return ((packet[offset] & 0xff) << 8) | (packet[offset + 1] & 0xff);
     }
 
     private static String buildBootScript(Context context, File dir) {
