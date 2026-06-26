@@ -89,7 +89,21 @@ typedef struct {
     uint64_t allowed;
     uint64_t blocked;
     uint64_t cache_hits;
+    uint64_t cache_misses;
+    uint64_t cache_stores;
+    uint64_t cache_expired;
+    uint64_t cache_evictions;
+    uint64_t udp_queries;
+    uint64_t tcp_queries;
+    uint64_t invalid_queries;
+    uint64_t fail_open_drops;
+    uint64_t fail_closed_blocks;
+    uint64_t upstream_requests;
+    uint64_t upstream_successes;
     uint64_t upstream_failures;
+    uint64_t total_latency_ms;
+    uint64_t upstream_latency_ms;
+    uint64_t max_latency_ms;
     uint64_t reloads;
     uint64_t start_time;
 } stats_t;
@@ -179,6 +193,34 @@ static uint32_t hash_domain(const char *domain, uint16_t qtype) {
     h ^= (qtype >> 8) & 0xffu;
     h *= 16777619u;
     return h;
+}
+
+static uint64_t div_u64(uint64_t numerator, uint64_t denominator) {
+    return denominator == 0 ? 0 : numerator / denominator;
+}
+
+static void record_query_latency(int latency_ms) {
+    uint64_t latency;
+    if (latency_ms < 0) {
+        latency_ms = 0;
+    }
+    latency = (uint64_t) latency_ms;
+    g_stats.total_latency_ms += latency;
+    if (latency > g_stats.max_latency_ms) {
+        g_stats.max_latency_ms = latency;
+    }
+}
+
+static int cache_entry_count(void) {
+    int count = 0;
+    int i;
+    time_t now = time(NULL);
+    for (i = 0; i < CACHE_SIZE; i++) {
+        if (g_cache[i].used && g_cache[i].expires_at > now) {
+            count++;
+        }
+    }
+    return count;
 }
 
 static void add_log(const char *domain, const char *action, int latency_ms) {
@@ -491,12 +533,13 @@ static bool cache_lookup(const char *domain, uint16_t qtype, const uint8_t *quer
     for (i = 0; i < 8; i++) {
         cache_entry_t *entry = &g_cache[(start + i) % CACHE_SIZE];
         if (!entry->used) {
-            return false;
+            continue;
         }
         if (entry->hash == h && entry->qtype == qtype && strcmp(entry->domain, domain) == 0) {
             if (entry->expires_at <= now) {
                 entry->used = false;
-                return false;
+                g_stats.cache_expired++;
+                continue;
             }
             memcpy(out, entry->response, entry->response_len);
             out[0] = query[0];
@@ -508,12 +551,29 @@ static bool cache_lookup(const char *domain, uint16_t qtype, const uint8_t *quer
     return false;
 }
 
+static bool response_cacheable(const uint8_t *response, size_t response_len) {
+    uint16_t flags;
+    uint16_t rcode;
+    if (response_len < 12) {
+        return false;
+    }
+    flags = read_u16(response + 2);
+    rcode = flags & 0x000fu;
+    if ((flags & 0x8000u) == 0) {
+        return false;
+    }
+    return rcode == 0 || rcode == 3;
+}
+
 static void cache_store(const char *domain, uint16_t qtype, const uint8_t *response, size_t response_len) {
     uint32_t h;
     uint32_t slot;
     uint32_t ttl;
     cache_entry_t *entry;
-    if (response_len < 12 || response_len > MAX_PACKET) {
+    uint32_t i;
+    time_t now = time(NULL);
+    bool evicting = false;
+    if (response_len < 12 || response_len > MAX_PACKET || !response_cacheable(response, response_len)) {
         return;
     }
     ttl = extract_min_ttl(response, response_len);
@@ -522,15 +582,39 @@ static void cache_store(const char *domain, uint16_t qtype, const uint8_t *respo
     }
     h = hash_domain(domain, qtype);
     slot = h % CACHE_SIZE;
-    entry = &g_cache[slot];
+    entry = NULL;
+    for (i = 0; i < 8; i++) {
+        cache_entry_t *candidate = &g_cache[(slot + i) % CACHE_SIZE];
+        if (candidate->used && candidate->hash == h
+                && candidate->qtype == qtype
+                && strcmp(candidate->domain, domain) == 0) {
+            entry = candidate;
+            break;
+        }
+        if (!candidate->used || candidate->expires_at <= now) {
+            if (candidate->used) {
+                g_stats.cache_expired++;
+            }
+            entry = candidate;
+            break;
+        }
+    }
+    if (entry == NULL) {
+        entry = &g_cache[slot];
+        evicting = entry->used && entry->expires_at > now;
+    }
+    if (evicting) {
+        g_stats.cache_evictions++;
+    }
     memset(entry, 0, sizeof(*entry));
     safe_copy(entry->domain, sizeof(entry->domain), domain);
     entry->qtype = qtype;
     entry->hash = h;
     memcpy(entry->response, response, response_len);
     entry->response_len = response_len;
-    entry->expires_at = time(NULL) + ttl;
+    entry->expires_at = now + ttl;
     entry->used = true;
+    g_stats.cache_stores++;
 }
 
 static int connect_upstream(const upstream_t *upstream, int socktype, int timeout_ms) {
@@ -805,12 +889,17 @@ static void load_regex_rule_file(regex_rule_t *rules, int *count, const char *pa
 }
 
 static bool reload_config(void) {
-    config_t next;
-    if (!load_config(g_config_path, &next)) {
+    config_t *next = (config_t *) calloc(1, sizeof(config_t));
+    if (next == NULL) {
+        return false;
+    }
+    if (!load_config(g_config_path, next)) {
+        free(next);
         return false;
     }
     free_regex_rules(&g_cfg);
-    g_cfg = next;
+    g_cfg = *next;
+    free(next);
     memset(g_cache, 0, sizeof(g_cache));
     g_stats.reloads++;
     return true;
@@ -894,6 +983,15 @@ static int create_control_socket(const char *path) {
     return fd;
 }
 
+static void finish_dns_query(const char *domain, const char *action, const struct timeval *start) {
+    struct timeval end;
+    int latency_ms;
+    gettimeofday(&end, NULL);
+    latency_ms = elapsed_ms(start, &end);
+    record_query_latency(latency_ms);
+    add_log(domain, action, latency_ms);
+}
+
 static void handle_dns_query(const config_t *cfg, const uint8_t *query, size_t query_len,
                              uint8_t *response, size_t *response_len, const char **action_out,
                              int tcp) {
@@ -901,47 +999,71 @@ static void handle_dns_query(const config_t *cfg, const uint8_t *query, size_t q
     uint16_t qtype = 0;
     const char *reason = "parse";
     ssize_t forwarded;
+    struct timeval start;
+    struct timeval upstream_start;
+    struct timeval upstream_end;
+    int upstream_latency_ms;
+    gettimeofday(&start, NULL);
+    g_stats.queries++;
+    if (tcp) {
+        g_stats.tcp_queries++;
+    } else {
+        g_stats.udp_queries++;
+    }
     if (!parse_qname(query, query_len, domain, sizeof(domain), &qtype)) {
         *response_len = build_block_response(query, query_len, response, MAX_PACKET);
         *action_out = "invalid";
+        g_stats.invalid_queries++;
+        g_stats.blocked++;
+        finish_dns_query("unknown", "invalid", &start);
         return;
     }
-    g_stats.queries++;
     if (evaluate_domain(cfg, domain, &reason) == DECISION_BLOCK) {
         *response_len = build_block_response(query, query_len, response, MAX_PACKET);
         g_stats.blocked++;
         *action_out = reason;
-        add_log(domain, "blocked", 0);
+        finish_dns_query(domain, reason, &start);
         return;
     }
     if (cache_lookup(domain, qtype, query, response, response_len)) {
         g_stats.cache_hits++;
         g_stats.allowed++;
         *action_out = "cache";
-        add_log(domain, "cache", 0);
+        finish_dns_query(domain, "cache", &start);
         return;
     }
+    g_stats.cache_misses++;
+    g_stats.upstream_requests++;
+    gettimeofday(&upstream_start, NULL);
     forwarded = tcp
             ? forward_tcp(cfg, query, query_len, response, MAX_PACKET)
             : forward_udp(cfg, query, query_len, response, MAX_PACKET);
+    gettimeofday(&upstream_end, NULL);
+    upstream_latency_ms = elapsed_ms(&upstream_start, &upstream_end);
+    if (upstream_latency_ms > 0) {
+        g_stats.upstream_latency_ms += (uint64_t) upstream_latency_ms;
+    }
     if (forwarded > 0) {
         *response_len = (size_t) forwarded;
         cache_store(domain, qtype, response, *response_len);
         g_stats.allowed++;
+        g_stats.upstream_successes++;
         *action_out = "upstream";
-        add_log(domain, "allowed", 0);
+        finish_dns_query(domain, "upstream", &start);
         return;
     }
     g_stats.upstream_failures++;
     if (cfg->fail_open) {
         *response_len = 0;
         *action_out = "upstream_failed";
+        g_stats.fail_open_drops++;
     } else {
         *response_len = build_block_response(query, query_len, response, MAX_PACKET);
         g_stats.blocked++;
         *action_out = "fail_closed";
+        g_stats.fail_closed_blocks++;
     }
-    add_log(domain, *action_out, 0);
+    finish_dns_query(domain, *action_out, &start);
 }
 
 static void handle_udp(int fd) {
@@ -1037,15 +1159,41 @@ static void handle_control(int fd) {
     trim(cmd);
     if (strcmp(cmd, "status") == 0 || strcmp(cmd, "stats") == 0) {
         write_control_response(client,
-                "running=1\npid=%ld\nuptime=%llu\ngeneration=%llu\nqueries=%llu\nallowed=%llu\nblocked=%llu\ncache_hits=%llu\nupstream_failures=%llu\nreloads=%llu\nrules_exact_allow=%d\nrules_suffix_allow=%d\nrules_exact_block=%d\nrules_suffix_block=%d\nrules_regex_allow=%d\nrules_regex_block=%d\n",
+                "running=1\npid=%ld\nuptime=%llu\ngeneration=%llu\n"
+                "queries=%llu\nudp_queries=%llu\ntcp_queries=%llu\ninvalid_queries=%llu\n"
+                "allowed=%llu\nblocked=%llu\nfail_open_drops=%llu\nfail_closed_blocks=%llu\n"
+                "cache_size=%d\ncache_entries=%d\ncache_hits=%llu\ncache_misses=%llu\n"
+                "cache_hit_rate_ppm=%llu\ncache_stores=%llu\ncache_expired=%llu\ncache_evictions=%llu\n"
+                "upstream_requests=%llu\nupstream_successes=%llu\nupstream_failures=%llu\n"
+                "avg_latency_ms=%llu\nmax_latency_ms=%llu\nupstream_avg_latency_ms=%llu\n"
+                "reloads=%llu\nrules_exact_allow=%d\nrules_suffix_allow=%d\nrules_exact_block=%d\n"
+                "rules_suffix_block=%d\nrules_regex_allow=%d\nrules_regex_block=%d\n",
                 (long) getpid(),
                 (unsigned long long) (now_seconds() - g_stats.start_time),
                 (unsigned long long) g_cfg.generation,
                 (unsigned long long) g_stats.queries,
+                (unsigned long long) g_stats.udp_queries,
+                (unsigned long long) g_stats.tcp_queries,
+                (unsigned long long) g_stats.invalid_queries,
                 (unsigned long long) g_stats.allowed,
                 (unsigned long long) g_stats.blocked,
+                (unsigned long long) g_stats.fail_open_drops,
+                (unsigned long long) g_stats.fail_closed_blocks,
+                CACHE_SIZE,
+                cache_entry_count(),
                 (unsigned long long) g_stats.cache_hits,
+                (unsigned long long) g_stats.cache_misses,
+                (unsigned long long) div_u64(g_stats.cache_hits * 1000000ULL,
+                        g_stats.cache_hits + g_stats.cache_misses),
+                (unsigned long long) g_stats.cache_stores,
+                (unsigned long long) g_stats.cache_expired,
+                (unsigned long long) g_stats.cache_evictions,
+                (unsigned long long) g_stats.upstream_requests,
+                (unsigned long long) g_stats.upstream_successes,
                 (unsigned long long) g_stats.upstream_failures,
+                (unsigned long long) div_u64(g_stats.total_latency_ms, g_stats.queries),
+                (unsigned long long) g_stats.max_latency_ms,
+                (unsigned long long) div_u64(g_stats.upstream_latency_ms, g_stats.upstream_requests),
                 (unsigned long long) g_stats.reloads,
                 g_cfg.exact_allow_count,
                 g_cfg.suffix_allow_count,
