@@ -758,6 +758,38 @@ static ssize_t forward_udp(const config_t *cfg, const uint8_t *query, size_t que
     return -1;
 }
 
+static ssize_t forward_udp_probe(const config_t *cfg, const uint8_t *query, size_t query_len,
+                                 uint8_t *response, size_t response_len, int *upstream_index) {
+    int i;
+    int timeout_ms = cfg->timeout_ms < 1000 ? cfg->timeout_ms : 1000;
+    if (timeout_ms < 250) {
+        timeout_ms = 250;
+    }
+    if (upstream_index != NULL) {
+        *upstream_index = -1;
+    }
+    for (i = 0; i < cfg->upstream_count; i++) {
+        int fd = connect_upstream(&cfg->upstreams[i], SOCK_DGRAM, timeout_ms);
+        ssize_t got;
+        if (fd < 0) {
+            continue;
+        }
+        if (send(fd, query, query_len, 0) < 0) {
+            close(fd);
+            continue;
+        }
+        got = recv(fd, response, response_len, 0);
+        close(fd);
+        if (got > 0) {
+            if (upstream_index != NULL) {
+                *upstream_index = i;
+            }
+            return got;
+        }
+    }
+    return -1;
+}
+
 static ssize_t read_full(int fd, uint8_t *buf, size_t len) {
     size_t got = 0;
     while (got < len) {
@@ -1234,6 +1266,83 @@ static void write_control_response(int fd, const char *fmt, ...) {
     }
 }
 
+static size_t build_health_query(uint8_t *out, size_t out_len) {
+    uint16_t id = (uint16_t) ((now_seconds() ^ (uint64_t) getpid()) & 0xffffu);
+    const uint8_t qname[] = {
+            7, 'e', 'x', 'a', 'm', 'p', 'l', 'e',
+            3, 'c', 'o', 'm',
+            0
+    };
+    size_t pos = 12;
+    if (out_len < pos + sizeof(qname) + 4) {
+        return 0;
+    }
+    memset(out, 0, out_len);
+    out[0] = (uint8_t) ((id >> 8) & 0xffu);
+    out[1] = (uint8_t) (id & 0xffu);
+    out[2] = 0x01;
+    out[5] = 0x01;
+    memcpy(out + pos, qname, sizeof(qname));
+    pos += sizeof(qname);
+    out[pos++] = 0x00;
+    out[pos++] = 0x01;
+    out[pos++] = 0x00;
+    out[pos++] = 0x01;
+    return pos;
+}
+
+static int response_rcode(const uint8_t *response, size_t response_len) {
+    if (response_len < 4) {
+        return -1;
+    }
+    return response[3] & 0x0f;
+}
+
+static void write_health_response(int client) {
+    uint8_t query[MAX_PACKET];
+    uint8_t response[MAX_PACKET];
+    struct timeval start;
+    struct timeval end;
+    size_t query_len;
+    ssize_t response_len;
+    int latency_ms;
+    int upstream_index = -1;
+    int rcode;
+
+    query_len = build_health_query(query, sizeof(query));
+    gettimeofday(&start, NULL);
+    response_len = query_len == 0
+            ? -1
+            : forward_udp_probe(&g_cfg, query, query_len, response, sizeof(response), &upstream_index);
+    gettimeofday(&end, NULL);
+    latency_ms = elapsed_ms(&start, &end);
+    rcode = response_len > 0 ? response_rcode(response, (size_t) response_len) : -1;
+
+    write_control_response(client,
+            "health=1\nrunning=1\npid=%ld\nuptime=%llu\nlisten_port=%d\n"
+            "generation=%llu\nupstreams=%d\nupstream_probe=%s\n"
+            "upstream_probe_ms=%d\nupstream_probe_index=%d\nupstream_probe_rcode=%d\n"
+            "queries=%llu\nblocked=%llu\nallowed=%llu\ncache_entries=%d\n"
+            "rules_total=%d\n",
+            (long) getpid(),
+            (unsigned long long) (now_seconds() - g_stats.start_time),
+            g_cfg.listen_port,
+            (unsigned long long) g_cfg.generation,
+            g_cfg.upstream_count,
+            response_len > 0 ? "ok" : "fail",
+            latency_ms,
+            upstream_index,
+            rcode,
+            (unsigned long long) g_stats.queries,
+            (unsigned long long) g_stats.blocked,
+            (unsigned long long) g_stats.allowed,
+            cache_entry_count(),
+            g_cfg.exact_allow_count + g_cfg.suffix_allow_count
+                    + g_cfg.exact_block_count + g_cfg.suffix_block_count
+                    + g_cfg.regex_allow_count + g_cfg.regex_block_count
+                    + g_cfg.temp_allow_count + g_cfg.temp_block_count);
+}
+
 static void handle_control(int fd) {
     int client = accept(fd, NULL, NULL);
     char cmd[128];
@@ -1295,6 +1404,8 @@ static void handle_control(int fd) {
                 g_cfg.regex_block_count,
                 g_cfg.temp_allow_count,
                 g_cfg.temp_block_count);
+    } else if (strcmp(cmd, "health") == 0) {
+        write_health_response(client);
     } else if (strcmp(cmd, "reload") == 0) {
         if (reload_config()) {
             write_control_response(client, "ok reload generation=%llu\n", (unsigned long long) g_cfg.generation);

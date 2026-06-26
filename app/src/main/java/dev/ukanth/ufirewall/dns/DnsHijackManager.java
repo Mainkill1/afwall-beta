@@ -178,6 +178,8 @@ public final class DnsHijackManager {
 
         out.append("\n[control status]\n");
         out.append(queryControl(context, "status"));
+        out.append("\n[control health]\n");
+        out.append(queryControl(context, "health"));
         out.append("\n[recent queries]\n");
         String logs = queryControl(context, "logs");
         out.append(logs.trim().isEmpty() ? "no daemon query logs reported\n" : logs);
