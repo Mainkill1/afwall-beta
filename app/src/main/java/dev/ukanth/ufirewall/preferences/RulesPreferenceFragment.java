@@ -16,6 +16,7 @@ import java.util.regex.Pattern;
 
 import dev.ukanth.ufirewall.Api;
 import dev.ukanth.ufirewall.R;
+import dev.ukanth.ufirewall.dns.DnsHijackManager;
 import dev.ukanth.ufirewall.service.RootCommand;
 import dev.ukanth.ufirewall.util.G;
 
@@ -174,6 +175,10 @@ public class RulesPreferenceFragment extends PreferenceFragment implements
                 enableTor.setChecked(false);
                 CheckBoxPreference enableCustomRules = (CheckBoxPreference) findPreference("enableCustomRules");
                 enableCustomRules.setChecked(false);
+                CheckBoxPreference enableDnsHijack = (CheckBoxPreference) findPreference("enableDnsHijack");
+                if (enableDnsHijack != null) {
+                    enableDnsHijack.setChecked(false);
+                }
 
                 G.enableRoam(false);
                 G.enableLAN(false);
@@ -181,6 +186,7 @@ public class RulesPreferenceFragment extends PreferenceFragment implements
                 G.enableTether(false);
                 G.enableTor(false);
                 G.enableCustomRules(false);
+                G.enableDnsHijack(false);
 
             }
         }
@@ -306,5 +312,27 @@ public class RulesPreferenceFragment extends PreferenceFragment implements
             allow.setChecked(false);
         }
 
+        if (isDnsHijackPreference(key)) {
+            Api.setRulesUpToDate(false);
+            if (!key.equals("enableDnsHijack") && !key.equals("dnsHijackPort") && G.enableDnsHijack()) {
+                DnsHijackManager.requestReload(ctx);
+            }
+        }
+
+    }
+
+    private boolean isDnsHijackPreference(String key) {
+        return key != null && (key.equals("enableDnsHijack")
+                || key.equals("dnsHijackPort")
+                || key.equals("dnsHijackUpstreams")
+                || key.equals("dnsHijackFailOpen")
+                || key.equals("dnsHijackStrictMode")
+                || key.equals("dnsHijackTimeoutMs")
+                || key.equals("dnsHijackAllowExact")
+                || key.equals("dnsHijackAllowSuffix")
+                || key.equals("dnsHijackBlockExact")
+                || key.equals("dnsHijackBlockSuffix")
+                || key.equals("dnsHijackAllowRegex")
+                || key.equals("dnsHijackBlockRegex"));
     }
 }

@@ -170,6 +170,18 @@ public class G extends Application implements Application.ActivityLifecycleCallb
     private static final String COPIED_OLD_EXPORTS = "copyOldExports";
     private static final String SYSTEM_FILE_PICKER = "useSystemFilePicker";
     private static final String ZIP_LOG_REPORTS = "zipLogReports";
+    private static final String ENABLE_DNS_HIJACK = "enableDnsHijack";
+    private static final String DNS_HIJACK_PORT = "dnsHijackPort";
+    private static final String DNS_HIJACK_UPSTREAMS = "dnsHijackUpstreams";
+    private static final String DNS_HIJACK_FAIL_OPEN = "dnsHijackFailOpen";
+    private static final String DNS_HIJACK_STRICT_MODE = "dnsHijackStrictMode";
+    private static final String DNS_HIJACK_TIMEOUT_MS = "dnsHijackTimeoutMs";
+    private static final String DNS_HIJACK_ALLOW_EXACT = "dnsHijackAllowExact";
+    private static final String DNS_HIJACK_ALLOW_SUFFIX = "dnsHijackAllowSuffix";
+    private static final String DNS_HIJACK_BLOCK_EXACT = "dnsHijackBlockExact";
+    private static final String DNS_HIJACK_BLOCK_SUFFIX = "dnsHijackBlockSuffix";
+    private static final String DNS_HIJACK_ALLOW_REGEX = "dnsHijackAllowRegex";
+    private static final String DNS_HIJACK_BLOCK_REGEX = "dnsHijackBlockRegex";
 
     private static final String SHOW_ALL_APPS = "showAllApps";
 
@@ -253,6 +265,72 @@ public class G extends Application implements Application.ActivityLifecycleCallb
 
     public static boolean zipLogReports() {
         return gPrefs.getBoolean(ZIP_LOG_REPORTS, false);
+    }
+
+    public static boolean enableDnsHijack() {
+        return gPrefs.getBoolean(ENABLE_DNS_HIJACK, false);
+    }
+
+    public static boolean enableDnsHijack(boolean val) {
+        gPrefs.edit().putBoolean(ENABLE_DNS_HIJACK, val).commit();
+        return val;
+    }
+
+    public static int dnsHijackPort(int fallback) {
+        return readIntPreference(DNS_HIJACK_PORT, fallback, 1024, 65535);
+    }
+
+    public static String dnsHijackUpstreams() {
+        return gPrefs.getString(DNS_HIJACK_UPSTREAMS, "1.1.1.1:53\n8.8.8.8:53");
+    }
+
+    public static boolean dnsHijackFailOpen() {
+        return gPrefs.getBoolean(DNS_HIJACK_FAIL_OPEN, true);
+    }
+
+    public static boolean dnsHijackStrictMode() {
+        return gPrefs.getBoolean(DNS_HIJACK_STRICT_MODE, false);
+    }
+
+    public static int dnsHijackTimeoutMs() {
+        return readIntPreference(DNS_HIJACK_TIMEOUT_MS, 2500, 250, 10000);
+    }
+
+    public static String dnsHijackAllowExact() {
+        return gPrefs.getString(DNS_HIJACK_ALLOW_EXACT, "");
+    }
+
+    public static String dnsHijackAllowSuffix() {
+        return gPrefs.getString(DNS_HIJACK_ALLOW_SUFFIX, "");
+    }
+
+    public static String dnsHijackBlockExact() {
+        return gPrefs.getString(DNS_HIJACK_BLOCK_EXACT, "");
+    }
+
+    public static String dnsHijackBlockSuffix() {
+        return gPrefs.getString(DNS_HIJACK_BLOCK_SUFFIX, "");
+    }
+
+    public static String dnsHijackAllowRegex() {
+        return gPrefs.getString(DNS_HIJACK_ALLOW_REGEX, "");
+    }
+
+    public static String dnsHijackBlockRegex() {
+        return gPrefs.getString(DNS_HIJACK_BLOCK_REGEX, "");
+    }
+
+    private static int readIntPreference(String key, int fallback, int min, int max) {
+        String value = gPrefs.getString(key, String.valueOf(fallback));
+        try {
+            int parsed = Integer.parseInt(value);
+            if (parsed < min || parsed > max) {
+                return fallback;
+            }
+            return parsed;
+        } catch (NumberFormatException e) {
+            return fallback;
+        }
     }
 
 

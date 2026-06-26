@@ -129,6 +129,7 @@ import javax.crypto.spec.DESKeySpec;
 import dev.ukanth.ufirewall.MainActivity.GetAppList;
 import dev.ukanth.ufirewall.customrules.CustomRule;
 import dev.ukanth.ufirewall.customrules.CustomRule_Table;
+import dev.ukanth.ufirewall.dns.DnsHijackManager;
 import dev.ukanth.ufirewall.log.Log;
 import dev.ukanth.ufirewall.log.LogData;
 import dev.ukanth.ufirewall.log.LogData_Table;
@@ -1173,6 +1174,10 @@ public final class Api {
                 cmds.add("-t nat -I OUTPUT 1 -j " + chainName);
             }
 
+            // DNS redirect must be built in the same root batch as firewall apply so stale root
+            // grants fail through normal apply logging instead of leaving half-installed redirects.
+            DnsHijackManager.appendApplyCommands(ctx, cmds, ipv6);
+
             // custom rules in afwall-{3g,wifi,reject} supersede everything else
             addCustomRules(Api.PREF_CUSTOMSCRIPT, cmds, ipv6);
 
@@ -1800,6 +1805,9 @@ public final class Api {
         } else {
             cmdsv4.add("#NOCHK# -D OUTPUT -j " + chainName);
         }
+        // Purging firewall rules must also remove DNS capture, otherwise the root daemon can keep
+        // receiving traffic after the user thinks protection has been disabled.
+        DnsHijackManager.appendPurgeCommands(ctx, cmds, false);
 
         //make sure reset the OUTPUT chain to accept state.
         cmds.add("-P OUTPUT ACCEPT");
@@ -1828,6 +1836,7 @@ public final class Api {
                 cmdsv6.add("-F " + chainName + s);
             }
             cmdsv6.add("#NOCHK# -D OUTPUT -j " + chainName);
+            DnsHijackManager.appendPurgeCommands(ctx, cmdsv6, true);
             cmdsv6.add("-P OUTPUT ACCEPT");
             if (G.enableInbound()) {
                 cmdsv6.add("-D INPUT -j " + chainName + "-input");

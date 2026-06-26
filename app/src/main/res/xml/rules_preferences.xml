@@ -69,6 +69,86 @@
             android:title="@string/direct_rules_visibility_title" />
     </PreferenceCategory>
 
+    <PreferenceCategory android:title="@string/dns_hijack_category">
+        <CheckBoxPreference
+            android:defaultValue="false"
+            android:dependency="activeRules"
+            android:key="enableDnsHijack"
+            android:summary="@string/dns_hijack_summary"
+            android:title="@string/dns_hijack_title" />
+
+        <EditTextPreference
+            android:defaultValue="5354"
+            android:dependency="enableDnsHijack"
+            android:key="dnsHijackPort"
+            android:summary="@string/dns_hijack_port_summary"
+            android:title="@string/dns_hijack_port_title" />
+
+        <EditTextPreference
+            android:defaultValue="1.1.1.1:53&#10;8.8.8.8:53"
+            android:dependency="enableDnsHijack"
+            android:key="dnsHijackUpstreams"
+            android:summary="@string/dns_hijack_upstreams_summary"
+            android:title="@string/dns_hijack_upstreams_title" />
+
+        <CheckBoxPreference
+            android:defaultValue="true"
+            android:dependency="enableDnsHijack"
+            android:key="dnsHijackFailOpen"
+            android:summary="@string/dns_hijack_fail_open_summary"
+            android:title="@string/dns_hijack_fail_open_title" />
+
+        <CheckBoxPreference
+            android:defaultValue="false"
+            android:dependency="enableDnsHijack"
+            android:key="dnsHijackStrictMode"
+            android:summary="@string/dns_hijack_strict_summary"
+            android:title="@string/dns_hijack_strict_title" />
+
+        <EditTextPreference
+            android:defaultValue="2500"
+            android:dependency="enableDnsHijack"
+            android:key="dnsHijackTimeoutMs"
+            android:summary="@string/dns_hijack_timeout_summary"
+            android:title="@string/dns_hijack_timeout_title" />
+
+        <EditTextPreference
+            android:dependency="enableDnsHijack"
+            android:key="dnsHijackAllowExact"
+            android:summary="@string/dns_hijack_allow_exact_summary"
+            android:title="@string/dns_hijack_allow_exact_title" />
+
+        <EditTextPreference
+            android:dependency="enableDnsHijack"
+            android:key="dnsHijackAllowSuffix"
+            android:summary="@string/dns_hijack_allow_suffix_summary"
+            android:title="@string/dns_hijack_allow_suffix_title" />
+
+        <EditTextPreference
+            android:dependency="enableDnsHijack"
+            android:key="dnsHijackBlockExact"
+            android:summary="@string/dns_hijack_block_exact_summary"
+            android:title="@string/dns_hijack_block_exact_title" />
+
+        <EditTextPreference
+            android:dependency="enableDnsHijack"
+            android:key="dnsHijackBlockSuffix"
+            android:summary="@string/dns_hijack_block_suffix_summary"
+            android:title="@string/dns_hijack_block_suffix_title" />
+
+        <EditTextPreference
+            android:dependency="enableDnsHijack"
+            android:key="dnsHijackAllowRegex"
+            android:summary="@string/dns_hijack_allow_regex_summary"
+            android:title="@string/dns_hijack_allow_regex_title" />
+
+        <EditTextPreference
+            android:dependency="enableDnsHijack"
+            android:key="dnsHijackBlockRegex"
+            android:summary="@string/dns_hijack_block_regex_summary"
+            android:title="@string/dns_hijack_block_regex_title" />
+    </PreferenceCategory>
+
     <PreferenceCategory android:title="@string/ui_chains_title">
         <SwitchPreference
             android:defaultValue="true"
