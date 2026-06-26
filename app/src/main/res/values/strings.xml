@@ -310,6 +310,10 @@
     <string name="dns_hijack_benchmark_empty">No benchmark result was returned.</string>
     <string name="dns_hijack_split_upstreams_title">Split DNS routes</string>
     <string name="dns_hijack_split_upstreams_summary">Route matching domains to dedicated upstreams, one per line, such as corp.example=10.0.0.53:53.</string>
+    <string name="dns_hijack_capture_uids_title">Limit DNS capture to UIDs</string>
+    <string name="dns_hijack_capture_uids_summary">Optional app UID list. When set, only listed UIDs are redirected through DNS filtering.</string>
+    <string name="dns_hijack_bypass_uids_title">Bypass DNS capture for UIDs</string>
+    <string name="dns_hijack_bypass_uids_summary">Optional app UID list that keeps matching apps on the normal resolver path.</string>
     <string name="dns_hijack_fail_open_title">Fail open</string>
     <string name="dns_hijack_fail_open_summary">Allow upstream DNS when filtering cannot complete instead of blocking the query.</string>
     <string name="dns_hijack_strict_title">Strict allow/block priority</string>

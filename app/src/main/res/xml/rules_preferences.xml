@@ -103,6 +103,18 @@
             android:summary="@string/dns_hijack_split_upstreams_summary"
             android:title="@string/dns_hijack_split_upstreams_title" />
 
+        <EditTextPreference
+            android:dependency="enableDnsHijack"
+            android:key="dnsHijackCaptureUids"
+            android:summary="@string/dns_hijack_capture_uids_summary"
+            android:title="@string/dns_hijack_capture_uids_title" />
+
+        <EditTextPreference
+            android:dependency="enableDnsHijack"
+            android:key="dnsHijackBypassUids"
+            android:summary="@string/dns_hijack_bypass_uids_summary"
+            android:title="@string/dns_hijack_bypass_uids_title" />
+
         <CheckBoxPreference
             android:defaultValue="true"
             android:dependency="enableDnsHijack"

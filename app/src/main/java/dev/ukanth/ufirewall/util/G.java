@@ -175,6 +175,8 @@ public class G extends Application implements Application.ActivityLifecycleCallb
     private static final String DNS_HIJACK_PORT = "dnsHijackPort";
     private static final String DNS_HIJACK_UPSTREAMS = "dnsHijackUpstreams";
     private static final String DNS_HIJACK_SPLIT_UPSTREAMS = "dnsHijackSplitUpstreams";
+    private static final String DNS_HIJACK_CAPTURE_UIDS = "dnsHijackCaptureUids";
+    private static final String DNS_HIJACK_BYPASS_UIDS = "dnsHijackBypassUids";
     private static final String DNS_HIJACK_FAIL_OPEN = "dnsHijackFailOpen";
     private static final String DNS_HIJACK_STRICT_MODE = "dnsHijackStrictMode";
     private static final String DNS_HIJACK_BOOT_PERSISTENCE = "dnsHijackBootPersistence";
@@ -195,6 +197,8 @@ public class G extends Application implements Application.ActivityLifecycleCallb
     private static final String[] DNS_HIJACK_PROFILE_POLICY_KEYS = new String[] {
             DNS_HIJACK_UPSTREAMS,
             DNS_HIJACK_SPLIT_UPSTREAMS,
+            DNS_HIJACK_CAPTURE_UIDS,
+            DNS_HIJACK_BYPASS_UIDS,
             DNS_HIJACK_FAIL_OPEN,
             DNS_HIJACK_STRICT_MODE,
             DNS_HIJACK_TIMEOUT_MS,
@@ -314,6 +318,14 @@ public class G extends Application implements Application.ActivityLifecycleCallb
 
     public static String dnsHijackSplitUpstreams() {
         return dnsPolicyPrefs().getString(DNS_HIJACK_SPLIT_UPSTREAMS, "");
+    }
+
+    public static String dnsHijackCaptureUids() {
+        return dnsPolicyPrefs().getString(DNS_HIJACK_CAPTURE_UIDS, "");
+    }
+
+    public static String dnsHijackBypassUids() {
+        return dnsPolicyPrefs().getString(DNS_HIJACK_BYPASS_UIDS, "");
     }
 
     public static boolean dnsHijackFailOpen() {

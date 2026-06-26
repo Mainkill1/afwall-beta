@@ -510,6 +510,8 @@ public class RulesPreferenceFragment extends PreferenceFragment implements
                 || key.equals("dnsHijackPort")
                 || key.equals("dnsHijackUpstreams")
                 || key.equals("dnsHijackSplitUpstreams")
+                || key.equals("dnsHijackCaptureUids")
+                || key.equals("dnsHijackBypassUids")
                 || key.equals("dnsHijackFailOpen")
                 || key.equals("dnsHijackStrictMode")
                 || key.equals("dnsHijackBootPersistence")
@@ -539,6 +541,8 @@ public class RulesPreferenceFragment extends PreferenceFragment implements
                 && !key.equals("enableDnsHijack")
                 && !key.equals("dnsHijackPort")
                 && !key.equals("dnsHijackBootPersistence")
+                && !key.equals("dnsHijackCaptureUids")
+                && !key.equals("dnsHijackBypassUids")
                 && !key.equals("dnsHijackBlocklistUrls")
                 && !key.equals("dnsHijackScheduledBlocklistUpdates")
                 && !key.equals("dnsHijackBlocklistUpdateIntervalHours");
