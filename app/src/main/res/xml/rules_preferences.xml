@@ -161,6 +161,20 @@
             android:summary="@string/dns_hijack_blocklist_urls_summary"
             android:title="@string/dns_hijack_blocklist_urls_title" />
 
+        <CheckBoxPreference
+            android:defaultValue="false"
+            android:dependency="enableDnsHijack"
+            android:key="dnsHijackScheduledBlocklistUpdates"
+            android:summary="@string/dns_hijack_scheduled_blocklist_updates_summary"
+            android:title="@string/dns_hijack_scheduled_blocklist_updates_title" />
+
+        <EditTextPreference
+            android:defaultValue="24"
+            android:dependency="dnsHijackScheduledBlocklistUpdates"
+            android:key="dnsHijackBlocklistUpdateIntervalHours"
+            android:summary="@string/dns_hijack_blocklist_update_interval_summary"
+            android:title="@string/dns_hijack_blocklist_update_interval_title" />
+
         <Preference
             android:dependency="enableDnsHijack"
             android:key="dnsHijackImportBlocklist"

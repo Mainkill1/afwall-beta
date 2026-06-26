@@ -228,6 +228,9 @@
             </intent-filter>
         </receiver>
         <receiver
+            android:name=".broadcast.DnsBlocklistUpdateReceiver"
+            android:exported="false" />
+        <receiver
             android:name=".broadcast.PackageBroadcast"
             android:exported="true">
             <intent-filter>

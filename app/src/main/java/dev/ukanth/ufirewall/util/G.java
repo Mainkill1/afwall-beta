@@ -187,6 +187,8 @@ public class G extends Application implements Application.ActivityLifecycleCallb
     private static final String DNS_HIJACK_TEMP_ALLOW = "dnsHijackTempAllow";
     private static final String DNS_HIJACK_TEMP_BLOCK = "dnsHijackTempBlock";
     private static final String DNS_HIJACK_BLOCKLIST_URLS = "dnsHijackBlocklistUrls";
+    private static final String DNS_HIJACK_SCHEDULED_BLOCKLIST_UPDATES = "dnsHijackScheduledBlocklistUpdates";
+    private static final String DNS_HIJACK_BLOCKLIST_UPDATE_INTERVAL_HOURS = "dnsHijackBlocklistUpdateIntervalHours";
 
     private static final String SHOW_ALL_APPS = "showAllApps";
 
@@ -344,6 +346,14 @@ public class G extends Application implements Application.ActivityLifecycleCallb
 
     public static String dnsHijackBlocklistUrls() {
         return gPrefs.getString(DNS_HIJACK_BLOCKLIST_URLS, "");
+    }
+
+    public static boolean dnsHijackScheduledBlocklistUpdates() {
+        return gPrefs.getBoolean(DNS_HIJACK_SCHEDULED_BLOCKLIST_UPDATES, false);
+    }
+
+    public static int dnsHijackBlocklistUpdateIntervalHours() {
+        return readIntPreference(DNS_HIJACK_BLOCKLIST_UPDATE_INTERVAL_HOURS, 24, 1, 720);
     }
 
     public static boolean appendDnsHijackAllowExact(String domain) {

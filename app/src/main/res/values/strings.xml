@@ -327,6 +327,10 @@
     <string name="dns_hijack_block_regex_summary">Regular expressions that block matching queries.</string>
     <string name="dns_hijack_blocklist_urls_title">Blocklist URLs</string>
     <string name="dns_hijack_blocklist_urls_summary">One remote hosts, domain, Pi-hole, or AdBlock-style list URL per line.</string>
+    <string name="dns_hijack_scheduled_blocklist_updates_title">Scheduled blocklist updates</string>
+    <string name="dns_hijack_scheduled_blocklist_updates_summary">Periodically download configured DNS blocklist URLs and reload the daemon after a successful compile.</string>
+    <string name="dns_hijack_blocklist_update_interval_title">Blocklist update interval</string>
+    <string name="dns_hijack_blocklist_update_interval_summary">How often scheduled DNS blocklist updates should run, in hours.</string>
     <string name="dns_hijack_import_blocklist_title">Import DNS blocklist file</string>
     <string name="dns_hijack_import_blocklist_summary">Use the system picker to import a hosts, domain, Pi-hole, or AdBlock-style list.</string>
     <string name="dns_hijack_update_blocklists_title">Update DNS blocklists</string>

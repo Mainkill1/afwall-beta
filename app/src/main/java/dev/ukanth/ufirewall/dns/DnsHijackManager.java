@@ -161,6 +161,9 @@ public final class DnsHijackManager {
         out.append("fail_open=").append(G.dnsHijackFailOpen()).append('\n');
         out.append("strict_mode=").append(G.dnsHijackStrictMode()).append('\n');
         out.append("timeout_ms=").append(G.dnsHijackTimeoutMs()).append('\n');
+        out.append("scheduled_blocklist_updates=").append(G.dnsHijackScheduledBlocklistUpdates()).append('\n');
+        out.append("blocklist_update_interval_hours=")
+                .append(G.dnsHijackBlocklistUpdateIntervalHours()).append('\n');
         out.append("temporary_allow_entries=").append(countLines(G.dnsHijackTempAllow())).append('\n');
         out.append("temporary_block_entries=").append(countLines(G.dnsHijackTempBlock())).append('\n');
         out.append("\n[blocklists]\n");

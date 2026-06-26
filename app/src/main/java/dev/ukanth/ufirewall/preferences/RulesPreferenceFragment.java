@@ -23,6 +23,7 @@ import java.util.regex.Pattern;
 
 import dev.ukanth.ufirewall.Api;
 import dev.ukanth.ufirewall.R;
+import dev.ukanth.ufirewall.broadcast.DnsBlocklistUpdateReceiver;
 import dev.ukanth.ufirewall.dns.DnsBlocklistManager;
 import dev.ukanth.ufirewall.dns.DnsHijackManager;
 import dev.ukanth.ufirewall.service.RootCommand;
@@ -158,6 +159,7 @@ public class RulesPreferenceFragment extends PreferenceFragment implements
                             }
                             getPreferenceScreen().removeAll();
                             addPreferencesFromResource(R.xml.rules_preferences);
+                            wireDnsBlocklistActions();
                         }
                     }
                 }));
@@ -215,6 +217,7 @@ public class RulesPreferenceFragment extends PreferenceFragment implements
             if (G.enableDnsHijack()) {
                 DnsHijackManager.requestReload(ctx);
             }
+            DnsBlocklistUpdateReceiver.scheduleOrCancel(ctx);
             Api.toast(ctx, getString(R.string.dns_hijack_blocklist_active));
         } else {
             Api.toast(ctx, getString(R.string.dns_hijack_blocklist_failed));
@@ -420,8 +423,10 @@ public class RulesPreferenceFragment extends PreferenceFragment implements
 
         if (isDnsHijackPreference(key)) {
             Api.setRulesUpToDate(false);
-            if (!key.equals("enableDnsHijack") && !key.equals("dnsHijackPort")
-                    && !key.equals("dnsHijackBootPersistence") && G.enableDnsHijack()) {
+            if (isDnsHijackBlocklistSchedulePreference(key)) {
+                DnsBlocklistUpdateReceiver.scheduleOrCancel(ctx);
+            }
+            if (shouldReloadDnsHijackPreference(key) && G.enableDnsHijack()) {
                 DnsHijackManager.requestReload(ctx);
             }
         }
@@ -442,6 +447,25 @@ public class RulesPreferenceFragment extends PreferenceFragment implements
                 || key.equals("dnsHijackBlockSuffix")
                 || key.equals("dnsHijackAllowRegex")
                 || key.equals("dnsHijackBlockRegex")
-                || key.equals("dnsHijackBlocklistUrls"));
+                || key.equals("dnsHijackBlocklistUrls")
+                || key.equals("dnsHijackScheduledBlocklistUpdates")
+                || key.equals("dnsHijackBlocklistUpdateIntervalHours"));
+    }
+
+    private boolean isDnsHijackBlocklistSchedulePreference(String key) {
+        return key != null && (key.equals("enableDnsHijack")
+                || key.equals("dnsHijackBlocklistUrls")
+                || key.equals("dnsHijackScheduledBlocklistUpdates")
+                || key.equals("dnsHijackBlocklistUpdateIntervalHours"));
+    }
+
+    private boolean shouldReloadDnsHijackPreference(String key) {
+        return key != null
+                && !key.equals("enableDnsHijack")
+                && !key.equals("dnsHijackPort")
+                && !key.equals("dnsHijackBootPersistence")
+                && !key.equals("dnsHijackBlocklistUrls")
+                && !key.equals("dnsHijackScheduledBlocklistUpdates")
+                && !key.equals("dnsHijackBlocklistUpdateIntervalHours");
     }
 }

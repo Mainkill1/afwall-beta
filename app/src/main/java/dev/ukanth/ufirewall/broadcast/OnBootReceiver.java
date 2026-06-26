@@ -48,6 +48,7 @@ public class OnBootReceiver extends BroadcastReceiver {
 
             // Use BootRuleManager for robust rule application
             BootRuleManager.initializeBootRuleApplication(context);
+            DnsBlocklistUpdateReceiver.scheduleOrCancel(context);
 
             //register private DNS change listener
 
