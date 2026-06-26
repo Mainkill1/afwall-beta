@@ -380,6 +380,8 @@
     <string name="dns_diagnostics_reload_queued">DNS daemon reload requested.</string>
     <string name="dns_diagnostics_restart_queued">DNS daemon restart requested.</string>
     <string name="dns_diagnostics_stop_queued">DNS daemon stop requested.</string>
+    <string name="dns_dashboard_title">DNS Protection</string>
+    <string name="dns_dashboard_loading">Loading DNS protection status...</string>
 
     <string-array name="dns_hijack_blocklist_preset_names">
         <item>StevenBlack Unified hosts</item>

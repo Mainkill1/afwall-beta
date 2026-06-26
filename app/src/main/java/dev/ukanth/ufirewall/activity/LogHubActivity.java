@@ -11,7 +11,7 @@ import android.os.Bundle;
 import android.os.Environment;
 import android.os.Handler;
 import android.os.Looper;
-import android.view.View;
+import android.widget.TextView;
 import android.widget.Toast;
 
 import androidx.appcompat.app.AppCompatActivity;
@@ -41,6 +41,8 @@ import java.util.zip.ZipOutputStream;
 import dev.ukanth.ufirewall.BuildConfig;
 import dev.ukanth.ufirewall.R;
 import dev.ukanth.ufirewall.Api;
+import dev.ukanth.ufirewall.broadcast.DnsBlocklistUpdateReceiver;
+import dev.ukanth.ufirewall.dns.DnsBlocklistManager;
 import dev.ukanth.ufirewall.dns.DnsHijackManager;
 import dev.ukanth.ufirewall.log.Log;
 import dev.ukanth.ufirewall.log.LogInfo;
@@ -59,6 +61,11 @@ public class LogHubActivity extends AppCompatActivity {
     private static final int EXPORT_APPLICATION_ERRORS = 4;
     private static final int EXPORT_DNS_QUERIES = 5;
 
+    private final ExecutorService dashboardExecutor = Executors.newSingleThreadExecutor();
+    private final Handler mainHandler = new Handler(Looper.getMainLooper());
+    private TextView dnsDashboardStatus;
+    private TextView dnsDashboardDetails;
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -76,6 +83,14 @@ public class LogHubActivity extends AppCompatActivity {
             getSupportActionBar().setDisplayHomeAsUpEnabled(true);
         }
 
+        dnsDashboardStatus = findViewById(R.id.log_hub_dns_dashboard_status);
+        dnsDashboardDetails = findViewById(R.id.log_hub_dns_dashboard_details);
+        findViewById(R.id.log_hub_dns_dashboard_queries)
+                .setOnClickListener(v -> startActivity(new Intent(this, DnsQueriesActivity.class)));
+        findViewById(R.id.log_hub_dns_dashboard_update)
+                .setOnClickListener(v -> runDashboardBlocklistUpdate());
+        findViewById(R.id.log_hub_dns_dashboard_repair)
+                .setOnClickListener(v -> runDashboardDnsRepair());
         findViewById(R.id.log_hub_blocked_requests).setOnClickListener(v -> openBlockedRequests());
         findViewById(R.id.log_hub_dns_queries).setOnClickListener(v -> startActivity(new Intent(this, DnsQueriesActivity.class)));
         findViewById(R.id.log_hub_iptables).setOnClickListener(v -> startActivity(new Intent(this, RulesActivity.class)));
@@ -85,9 +100,88 @@ public class LogHubActivity extends AppCompatActivity {
         findViewById(R.id.log_hub_export_logs).setOnClickListener(v -> showExportLogSelection());
     }
 
+    @Override
+    protected void onResume() {
+        super.onResume();
+        loadDnsDashboard();
+    }
+
+    @Override
+    protected void onDestroy() {
+        dashboardExecutor.shutdownNow();
+        super.onDestroy();
+    }
+
     private void openBlockedRequests() {
         Intent intent = new Intent(this, G.oldLogView() ? OldLogActivity.class : LogActivity.class);
         startActivity(intent);
+    }
+
+    private void loadDnsDashboard() {
+        if (dashboardExecutor.isShutdown() || dnsDashboardStatus == null || dnsDashboardDetails == null) {
+            return;
+        }
+        dnsDashboardStatus.setText(R.string.dns_dashboard_loading);
+        dnsDashboardDetails.setText(R.string.dns_dashboard_loading);
+        dashboardExecutor.execute(() -> {
+            DnsHijackManager.DnsDashboardSnapshot snapshot =
+                    DnsHijackManager.getDashboardSnapshot(this);
+            mainHandler.post(() -> {
+                dnsDashboardStatus.setText(snapshot.statusLine);
+                dnsDashboardDetails.setText(snapshot.detailLine);
+            });
+        });
+    }
+
+    private void runDashboardBlocklistUpdate() {
+        if (dashboardExecutor.isShutdown()) {
+            return;
+        }
+        dnsDashboardStatus.setText(R.string.dns_hijack_update_blocklists_title);
+        dashboardExecutor.execute(() -> {
+            DnsBlocklistManager.Result result = DnsBlocklistManager.updateFromConfiguredUrls(this);
+            mainHandler.post(() -> handleDashboardBlocklistResult(result));
+        });
+    }
+
+    private void handleDashboardBlocklistResult(DnsBlocklistManager.Result result) {
+        if (result == null) {
+            return;
+        }
+        if (!result.failed) {
+            Api.setRulesUpToDate(false);
+            if (G.enableDnsHijack()) {
+                DnsHijackManager.requestReload(this);
+            }
+            DnsBlocklistUpdateReceiver.scheduleOrCancel(this);
+            Api.toast(this, getString(R.string.dns_hijack_blocklist_active));
+        } else {
+            Api.toast(this, getString(R.string.dns_hijack_blocklist_failed));
+        }
+        new MaterialDialog.Builder(this)
+                .title(result.failed ? R.string.dns_hijack_blocklist_failed : R.string.dns_hijack_blocklist_active)
+                .content(result.summary())
+                .positiveText(R.string.OK)
+                .show();
+        loadDnsDashboard();
+    }
+
+    private void runDashboardDnsRepair() {
+        String message = getString(R.string.dns_diagnostics_repair_queued);
+        dnsDashboardStatus.setText(message);
+        DnsHijackManager.repairDnsProtection(this, new RootCommand.Callback() {
+            @Override
+            public void cbFunc(RootCommand state) {
+                mainHandler.post(() -> {
+                    if (state.exitCode == 0) {
+                        Api.toast(LogHubActivity.this, message);
+                    } else {
+                        Api.toast(LogHubActivity.this, getString(R.string.error_apply));
+                    }
+                    loadDnsDashboard();
+                });
+            }
+        });
     }
 
     private void showExportLogSelection() {

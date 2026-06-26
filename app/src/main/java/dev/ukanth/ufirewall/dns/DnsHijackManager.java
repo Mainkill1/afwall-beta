@@ -19,8 +19,10 @@ import java.net.InetAddress;
 import java.net.SocketTimeoutException;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 
 import dev.ukanth.ufirewall.Api;
 import dev.ukanth.ufirewall.R;
@@ -227,6 +229,55 @@ public final class DnsHijackManager {
         return parseQueryEntries(queryControl(context, "logs"));
     }
 
+    public static DnsDashboardSnapshot getDashboardSnapshot(Context context) {
+        String status = queryControl(context, "status");
+        String health = queryControl(context, "health");
+        Map<String, String> statusValues = parseKeyValueLines(status);
+        Map<String, String> healthValues = parseKeyValueLines(health);
+        Map<String, String> blocklistValues = parseKeyValueLines(DnsBlocklistManager.getSummary(context));
+
+        boolean enabled = G.enableDnsHijack();
+        boolean running = "1".equals(firstValue(statusValues, healthValues, "running"))
+                || status.contains("running=1") || health.contains("running=1");
+        long queries = parseLong(firstValue(statusValues, healthValues, "queries"), 0L);
+        long blocked = parseLong(firstValue(statusValues, healthValues, "blocked"), 0L);
+        long upstreamLatency = parseLong(firstValue(healthValues, statusValues, "upstream_probe_ms"), -1L);
+        String upstreamProbe = firstValue(healthValues, statusValues, "upstream_probe");
+        String profile = G.activeDnsHijackPolicyProfile();
+        if (profile == null || profile.trim().isEmpty()) {
+            profile = "global";
+        }
+        String blockPercent = queries <= 0L
+                ? "0%"
+                : String.format(Locale.US, "%.1f%%", (blocked * 100.0d) / queries);
+        String protection;
+        if (!enabled) {
+            protection = "DNS protection disabled";
+        } else if (running) {
+            protection = "DNS protection active";
+        } else {
+            protection = "DNS protection enabled, daemon unavailable";
+        }
+
+        String statusLine = protection + " | " + queries + " queries | " + blockPercent + " blocked";
+        String blocklistUpdated = blocklistValues.containsKey("updated")
+                ? blocklistValues.get("updated")
+                : "never";
+        String upstream = upstreamProbe == null || upstreamProbe.trim().isEmpty()
+                ? "unknown"
+                : upstreamProbe;
+        if (upstreamLatency >= 0L) {
+            upstream += " " + upstreamLatency + "ms";
+        }
+        String details = "Daemon: " + (running ? "running" : "stopped")
+                + " | Redirect setting: " + (enabled ? "enabled" : "disabled")
+                + " | Profile: " + profile
+                + (G.dnsHijackUseProfilePolicy() ? " override" : " global")
+                + "\nUpstream: " + upstream
+                + " | Blocklist updated: " + blocklistUpdated;
+        return new DnsDashboardSnapshot(statusLine, details);
+    }
+
     public static List<QueryEntry> getHistoricalQueries(Context context, String filter) {
         String cleanFilter = sanitizeHistoryFilter(filter);
         String command = cleanFilter.isEmpty() ? "history" : "history " + cleanFilter;
@@ -360,6 +411,50 @@ public final class DnsHijackManager {
             }
         }
         return entries;
+    }
+
+    private static Map<String, String> parseKeyValueLines(String raw) {
+        Map<String, String> values = new HashMap<>();
+        if (raw == null) {
+            return values;
+        }
+        String[] lines = raw.split("\\r?\\n");
+        for (String line : lines) {
+            if (line == null) {
+                continue;
+            }
+            int separator = line.indexOf('=');
+            if (separator <= 0) {
+                continue;
+            }
+            String key = line.substring(0, separator).trim();
+            String value = line.substring(separator + 1).trim();
+            if (!key.isEmpty()) {
+                values.put(key, value);
+            }
+        }
+        return values;
+    }
+
+    private static String firstValue(Map<String, String> preferred,
+                                     Map<String, String> fallback,
+                                     String key) {
+        String value = preferred.get(key);
+        if (value == null || value.trim().isEmpty()) {
+            value = fallback.get(key);
+        }
+        return value == null ? "" : value.trim();
+    }
+
+    private static long parseLong(String value, long fallback) {
+        if (value == null || value.trim().isEmpty()) {
+            return fallback;
+        }
+        try {
+            return Long.parseLong(value.trim());
+        } catch (NumberFormatException e) {
+            return fallback;
+        }
     }
 
     private static String sanitizeHistoryFilter(String filter) {
@@ -799,6 +894,16 @@ public final class DnsHijackManager {
 
         public String displayLine() {
             return timestamp + "  " + action + "  " + domain + "  " + latency;
+        }
+    }
+
+    public static final class DnsDashboardSnapshot {
+        public final String statusLine;
+        public final String detailLine;
+
+        private DnsDashboardSnapshot(String statusLine, String detailLine) {
+            this.statusLine = statusLine;
+            this.detailLine = detailLine;
         }
     }
 
