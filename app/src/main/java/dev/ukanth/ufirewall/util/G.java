@@ -184,6 +184,8 @@ public class G extends Application implements Application.ActivityLifecycleCallb
     private static final String DNS_HIJACK_BLOCK_SUFFIX = "dnsHijackBlockSuffix";
     private static final String DNS_HIJACK_ALLOW_REGEX = "dnsHijackAllowRegex";
     private static final String DNS_HIJACK_BLOCK_REGEX = "dnsHijackBlockRegex";
+    private static final String DNS_HIJACK_TEMP_ALLOW = "dnsHijackTempAllow";
+    private static final String DNS_HIJACK_TEMP_BLOCK = "dnsHijackTempBlock";
     private static final String DNS_HIJACK_BLOCKLIST_URLS = "dnsHijackBlocklistUrls";
 
     private static final String SHOW_ALL_APPS = "showAllApps";
@@ -332,6 +334,14 @@ public class G extends Application implements Application.ActivityLifecycleCallb
         return gPrefs.getString(DNS_HIJACK_BLOCK_REGEX, "");
     }
 
+    public static String dnsHijackTempAllow() {
+        return gPrefs.getString(DNS_HIJACK_TEMP_ALLOW, "");
+    }
+
+    public static String dnsHijackTempBlock() {
+        return gPrefs.getString(DNS_HIJACK_TEMP_BLOCK, "");
+    }
+
     public static String dnsHijackBlocklistUrls() {
         return gPrefs.getString(DNS_HIJACK_BLOCKLIST_URLS, "");
     }
@@ -350,6 +360,19 @@ public class G extends Application implements Application.ActivityLifecycleCallb
 
     public static boolean appendDnsHijackBlockSuffix(String domain) {
         return appendLinePreference(DNS_HIJACK_BLOCK_SUFFIX, domain);
+    }
+
+    public static boolean appendDnsHijackTempAllow(String domain, long expiresAtSeconds) {
+        return appendTemporaryLinePreference(DNS_HIJACK_TEMP_ALLOW, domain, expiresAtSeconds);
+    }
+
+    public static boolean appendDnsHijackTempBlock(String domain, long expiresAtSeconds) {
+        return appendTemporaryLinePreference(DNS_HIJACK_TEMP_BLOCK, domain, expiresAtSeconds);
+    }
+
+    public static void pruneExpiredDnsHijackTemporaryRules() {
+        pruneExpiredTemporaryPreference(DNS_HIJACK_TEMP_ALLOW);
+        pruneExpiredTemporaryPreference(DNS_HIJACK_TEMP_BLOCK);
     }
 
     private static boolean appendLinePreference(String key, String rawValue) {
@@ -376,6 +399,76 @@ public class G extends Application implements Application.ActivityLifecycleCallb
             gPrefs.edit().putString(key, android.text.TextUtils.join("\n", values)).commit();
         }
         return added;
+    }
+
+    private static boolean appendTemporaryLinePreference(String key, String rawValue, long expiresAtSeconds) {
+        if (rawValue == null || expiresAtSeconds <= (System.currentTimeMillis() / 1000L)) {
+            return false;
+        }
+        String value = rawValue.trim().toLowerCase(java.util.Locale.US);
+        if (value.isEmpty()) {
+            return false;
+        }
+        LinkedHashSet<String> values = new LinkedHashSet<>();
+        String prefix = value + "|";
+        String existing = gPrefs.getString(key, "");
+        boolean changed = false;
+        if (existing != null) {
+            String[] lines = existing.split("[\\r\\n]+");
+            long now = System.currentTimeMillis() / 1000L;
+            for (String line : lines) {
+                String existingValue = line == null ? "" : line.trim().toLowerCase(java.util.Locale.US);
+                if (existingValue.isEmpty() || isExpiredTemporaryLine(existingValue, now)) {
+                    changed = true;
+                    continue;
+                }
+                if (existingValue.startsWith(prefix)) {
+                    changed = true;
+                    continue;
+                }
+                values.add(existingValue);
+            }
+        }
+        String entry = value + "|" + expiresAtSeconds;
+        boolean added = values.add(entry);
+        if (added || changed) {
+            gPrefs.edit().putString(key, android.text.TextUtils.join("\n", values)).commit();
+        }
+        return added || changed;
+    }
+
+    private static void pruneExpiredTemporaryPreference(String key) {
+        String existing = gPrefs.getString(key, "");
+        if (existing == null || existing.trim().isEmpty()) {
+            return;
+        }
+        LinkedHashSet<String> values = new LinkedHashSet<>();
+        boolean changed = false;
+        long now = System.currentTimeMillis() / 1000L;
+        String[] lines = existing.split("[\\r\\n]+");
+        for (String line : lines) {
+            String value = line == null ? "" : line.trim().toLowerCase(java.util.Locale.US);
+            if (value.isEmpty() || isExpiredTemporaryLine(value, now)) {
+                changed = true;
+                continue;
+            }
+            values.add(value);
+        }
+        if (changed) {
+            gPrefs.edit().putString(key, android.text.TextUtils.join("\n", values)).commit();
+        }
+    }
+
+    private static boolean isExpiredTemporaryLine(String value, long nowSeconds) {
+        int separator = value.lastIndexOf('|');
+        if (separator <= 0 || separator + 1 >= value.length()) {
+            return true;
+        }
+        try {
+            return Long.parseLong(value.substring(separator + 1)) <= nowSeconds;
+        } catch (NumberFormatException e) {
+            return true;
+        }
     }
 
     private static int readIntPreference(String key, int fallback, int min, int max) {

@@ -46,6 +46,9 @@ public final class DnsHijackManager {
     public static final int RULE_ALLOW_SUFFIX = 2;
     public static final int RULE_BLOCK_EXACT = 3;
     public static final int RULE_BLOCK_SUFFIX = 4;
+    public static final int RULE_TEMP_ALLOW = 5;
+    public static final int RULE_TEMP_BLOCK = 6;
+    private static final long TEMP_RULE_DURATION_SECONDS = 15L * 60L;
 
     private DnsHijackManager() {
     }
@@ -158,6 +161,8 @@ public final class DnsHijackManager {
         out.append("fail_open=").append(G.dnsHijackFailOpen()).append('\n');
         out.append("strict_mode=").append(G.dnsHijackStrictMode()).append('\n');
         out.append("timeout_ms=").append(G.dnsHijackTimeoutMs()).append('\n');
+        out.append("temporary_allow_entries=").append(countLines(G.dnsHijackTempAllow())).append('\n');
+        out.append("temporary_block_entries=").append(countLines(G.dnsHijackTempBlock())).append('\n');
         out.append("\n[blocklists]\n");
         out.append(DnsBlocklistManager.getSummary(context)).append('\n');
         appendFileInfo(out, "work_dir", dir);
@@ -211,11 +216,17 @@ public final class DnsHijackManager {
             case RULE_BLOCK_SUFFIX:
                 added = G.appendDnsHijackBlockSuffix(domain);
                 break;
+            case RULE_TEMP_ALLOW:
+                added = G.appendDnsHijackTempAllow(domain, temporaryRuleExpiresAt());
+                break;
+            case RULE_TEMP_BLOCK:
+                added = G.appendDnsHijackTempBlock(domain, temporaryRuleExpiresAt());
+                break;
             default:
                 return false;
         }
         if (added) {
-            ApplicationErrorLog.add(context, "DNS query action added rule for " + domain);
+            ApplicationErrorLog.add(context, "DNS query action added rule for " + domain + " action=" + action);
             requestReload(context);
         }
         return added;
@@ -305,6 +316,24 @@ public final class DnsHijackManager {
             return action;
         }
         return null;
+    }
+
+    private static long temporaryRuleExpiresAt() {
+        return (System.currentTimeMillis() / 1000L) + TEMP_RULE_DURATION_SECONDS;
+    }
+
+    private static int countLines(String raw) {
+        int count = 0;
+        if (raw == null || raw.trim().isEmpty()) {
+            return 0;
+        }
+        String[] lines = raw.split("\\r?\\n");
+        for (String line : lines) {
+            if (line != null && !line.trim().isEmpty()) {
+                count++;
+            }
+        }
+        return count;
     }
 
     public static final class QueryEntry {
@@ -551,6 +580,7 @@ public final class DnsHijackManager {
     private static String buildConfig(Context context) {
         File dir = workDir(context);
         StringBuilder config = new StringBuilder();
+        G.pruneExpiredDnsHijackTemporaryRules();
         config.append("port=").append(G.dnsHijackPort(DEFAULT_PORT)).append('\n');
         config.append("control_socket=").append(new File(dir, SOCKET).getAbsolutePath()).append('\n');
         config.append("pid_file=").append(new File(dir, PID).getAbsolutePath()).append('\n');
@@ -566,6 +596,8 @@ public final class DnsHijackManager {
         appendConfigEntries(config, "block_suffix", G.dnsHijackBlockSuffix());
         appendConfigEntries(config, "allow_regex", G.dnsHijackAllowRegex());
         appendConfigEntries(config, "block_regex", G.dnsHijackBlockRegex());
+        appendConfigEntries(config, "temp_allow", G.dnsHijackTempAllow());
+        appendConfigEntries(config, "temp_block", G.dnsHijackTempBlock());
         appendConfigFile(config, "block_exact_file", DnsBlocklistManager.exactBlockFile(context));
         appendConfigFile(config, "block_suffix_file", DnsBlocklistManager.suffixBlockFile(context));
 

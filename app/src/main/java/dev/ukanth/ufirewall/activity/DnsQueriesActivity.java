@@ -155,8 +155,10 @@ public class DnsQueriesActivity extends AppCompatActivity {
                 .items(new CharSequence[]{
                         getString(R.string.dns_query_allow_exact),
                         getString(R.string.dns_query_allow_suffix),
+                        getString(R.string.dns_query_temp_allow),
                         getString(R.string.dns_query_block_exact),
-                        getString(R.string.dns_query_block_suffix)
+                        getString(R.string.dns_query_block_suffix),
+                        getString(R.string.dns_query_temp_block)
                 })
                 .itemsCallback((dialog, view, which, text) -> applyQueryAction(entry, which))
                 .negativeText(R.string.Cancel)
@@ -173,10 +175,16 @@ public class DnsQueriesActivity extends AppCompatActivity {
                 action = DnsHijackManager.RULE_ALLOW_SUFFIX;
                 break;
             case 2:
-                action = DnsHijackManager.RULE_BLOCK_EXACT;
+                action = DnsHijackManager.RULE_TEMP_ALLOW;
                 break;
             case 3:
+                action = DnsHijackManager.RULE_BLOCK_EXACT;
+                break;
+            case 4:
                 action = DnsHijackManager.RULE_BLOCK_SUFFIX;
+                break;
+            case 5:
+                action = DnsHijackManager.RULE_TEMP_BLOCK;
                 break;
             default:
                 return;

@@ -33,6 +33,7 @@
 #define MAX_DOMAIN 256
 #define MAX_RULES 32768
 #define MAX_REGEX 128
+#define MAX_TEMP_RULES 1024
 #define MAX_UPSTREAMS 8
 #define CACHE_SIZE 1024
 #define LOG_RING 256
@@ -53,6 +54,11 @@ typedef struct {
     char pattern[MAX_DOMAIN];
     bool valid;
 } regex_rule_t;
+
+typedef struct {
+    char value[MAX_DOMAIN];
+    uint64_t expires_at;
+} temp_rule_t;
 
 typedef struct {
     char host[128];
@@ -81,6 +87,10 @@ typedef struct {
     regex_rule_t regex_block[MAX_REGEX];
     int regex_allow_count;
     int regex_block_count;
+    temp_rule_t temp_allow[MAX_TEMP_RULES];
+    temp_rule_t temp_block[MAX_TEMP_RULES];
+    int temp_allow_count;
+    int temp_block_count;
     uint64_t generation;
 } config_t;
 
@@ -296,6 +306,64 @@ static bool add_string_rule(string_rule_t *rules, int *count, const char *value)
     return true;
 }
 
+static bool valid_domain_rule(const char *value) {
+    const char *p = value;
+    size_t label_len = 0;
+    bool dot_seen = false;
+    if (value == NULL || value[0] == '\0' || strlen(value) >= MAX_DOMAIN) {
+        return false;
+    }
+    while (*p) {
+        unsigned char c = (unsigned char) *p;
+        if (c == '.') {
+            if (label_len == 0 || label_len > 63) {
+                return false;
+            }
+            dot_seen = true;
+            label_len = 0;
+        } else if ((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-') {
+            label_len++;
+        } else {
+            return false;
+        }
+        p++;
+    }
+    return dot_seen && label_len > 0 && label_len <= 63;
+}
+
+static bool add_temp_rule(temp_rule_t *rules, int *count, const char *value) {
+    char line[512];
+    char *sep;
+    char *domain;
+    char *expires;
+    uint64_t expires_at;
+    if (*count >= MAX_TEMP_RULES || value == NULL || value[0] == '\0') {
+        return false;
+    }
+    safe_copy(line, sizeof(line), value);
+    sep = strchr(line, '|');
+    if (sep == NULL) {
+        sep = strchr(line, ' ');
+    }
+    if (sep == NULL) {
+        return false;
+    }
+    *sep = '\0';
+    domain = line;
+    expires = sep + 1;
+    trim(domain);
+    trim(expires);
+    lower_ascii(domain);
+    expires_at = (uint64_t) strtoull(expires, NULL, 10);
+    if (!valid_domain_rule(domain) || expires_at <= now_seconds()) {
+        return false;
+    }
+    safe_copy(rules[*count].value, sizeof(rules[*count].value), domain);
+    rules[*count].expires_at = expires_at;
+    (*count)++;
+    return true;
+}
+
 static bool add_regex_rule(regex_rule_t *rules, int *count, const char *value) {
     regex_rule_t *rule;
     if (*count >= MAX_REGEX || value == NULL || value[0] == '\0') {
@@ -316,6 +384,16 @@ static bool exact_match(const string_rule_t *rules, int count, const char *domai
     int i;
     for (i = 0; i < count; i++) {
         if (strcmp(rules[i].value, domain) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool temp_match(const temp_rule_t *rules, int count, const char *domain, uint64_t now) {
+    int i;
+    for (i = 0; i < count; i++) {
+        if (rules[i].expires_at > now && strcmp(rules[i].value, domain) == 0) {
             return true;
         }
     }
@@ -351,12 +429,17 @@ static bool regex_match_rules(const regex_rule_t *rules, int count, const char *
 }
 
 static decision_t evaluate_domain(const config_t *cfg, const char *domain, const char **reason) {
+    uint64_t now = now_seconds();
+    bool temp_allow = temp_match(cfg->temp_allow, cfg->temp_allow_count, domain, now);
     bool exact_allow = exact_match(cfg->exact_allow, cfg->exact_allow_count, domain);
     bool suffix_allow = suffix_match(cfg->suffix_allow, cfg->suffix_allow_count, domain);
     bool regex_allow = regex_match_rules(cfg->regex_allow, cfg->regex_allow_count, domain);
     bool block = false;
 
-    if (exact_match(cfg->exact_block, cfg->exact_block_count, domain)) {
+    if (temp_match(cfg->temp_block, cfg->temp_block_count, domain, now)) {
+        *reason = "temp_block";
+        block = true;
+    } else if (exact_match(cfg->exact_block, cfg->exact_block_count, domain)) {
         *reason = "exact_block";
         block = true;
     } else if (suffix_match(cfg->suffix_block, cfg->suffix_block_count, domain)) {
@@ -369,6 +452,10 @@ static decision_t evaluate_domain(const config_t *cfg, const char *domain, const
 
     if (block && cfg->strict_mode) {
         return DECISION_BLOCK;
+    }
+    if (temp_allow) {
+        *reason = "temp_allow";
+        return DECISION_ALLOW;
     }
     if (exact_allow) {
         *reason = "exact_allow";
@@ -836,6 +923,10 @@ static bool load_config(const char *path, config_t *new_cfg) {
             add_regex_rule(new_cfg->regex_block, &new_cfg->regex_block_count, value);
         } else if (strcmp(key, "block_regex_file") == 0) {
             load_regex_rule_file(new_cfg->regex_block, &new_cfg->regex_block_count, value);
+        } else if (strcmp(key, "temp_allow") == 0) {
+            add_temp_rule(new_cfg->temp_allow, &new_cfg->temp_allow_count, value);
+        } else if (strcmp(key, "temp_block") == 0) {
+            add_temp_rule(new_cfg->temp_block, &new_cfg->temp_block_count, value);
         }
     }
     fclose(fp);
@@ -1167,7 +1258,8 @@ static void handle_control(int fd) {
                 "upstream_requests=%llu\nupstream_successes=%llu\nupstream_failures=%llu\n"
                 "avg_latency_ms=%llu\nmax_latency_ms=%llu\nupstream_avg_latency_ms=%llu\n"
                 "reloads=%llu\nrules_exact_allow=%d\nrules_suffix_allow=%d\nrules_exact_block=%d\n"
-                "rules_suffix_block=%d\nrules_regex_allow=%d\nrules_regex_block=%d\n",
+                "rules_suffix_block=%d\nrules_regex_allow=%d\nrules_regex_block=%d\n"
+                "rules_temp_allow=%d\nrules_temp_block=%d\n",
                 (long) getpid(),
                 (unsigned long long) (now_seconds() - g_stats.start_time),
                 (unsigned long long) g_cfg.generation,
@@ -1200,7 +1292,9 @@ static void handle_control(int fd) {
                 g_cfg.exact_block_count,
                 g_cfg.suffix_block_count,
                 g_cfg.regex_allow_count,
-                g_cfg.regex_block_count);
+                g_cfg.regex_block_count,
+                g_cfg.temp_allow_count,
+                g_cfg.temp_block_count);
     } else if (strcmp(cmd, "reload") == 0) {
         if (reload_config()) {
             write_control_response(client, "ok reload generation=%llu\n", (unsigned long long) g_cfg.generation);

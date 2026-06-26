@@ -350,8 +350,10 @@
     <string name="dns_queries_status">%1$d DNS queries loaded.</string>
     <string name="dns_query_allow_exact">Allow this domain</string>
     <string name="dns_query_allow_suffix">Allow this domain and subdomains</string>
+    <string name="dns_query_temp_allow">Temporarily allow this domain</string>
     <string name="dns_query_block_exact">Block this domain</string>
     <string name="dns_query_block_suffix">Block this domain and subdomains</string>
+    <string name="dns_query_temp_block">Temporarily block this domain</string>
     <string name="dns_query_rule_added">DNS rule added and daemon reload requested.</string>
     <string name="dns_query_rule_exists">DNS rule already exists.</string>
     <string name="log_prefs_title">Log</string>
