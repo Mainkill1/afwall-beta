@@ -35,6 +35,8 @@ public final class DnsHijackManager {
     private static final String SOCKET = "afwall_dnsd.sock";
     private static final String QUERY_LOG = "afwall_dnsd.log";
     private static final String SUPERVISOR_LOG = "afwall_dnsd_supervisor.log";
+    private static final String BOOT_SCRIPT = "afwall_dnsd_boot.sh";
+    private static final String BOOT_LOG = "afwall_dnsd_boot.log";
     private static final String CHAIN_V4 = "afwall-dns";
     private static final String CHAIN_V4_PRE = "afwall-dns-pre";
     private static final String CHAIN_V6 = "afwall-dns6";
@@ -53,6 +55,7 @@ public final class DnsHijackManager {
         if (!G.enableDnsHijack()) {
             if (!ipv6) {
                 appendStopCommand(context, commands);
+                appendRemoveBootPersistenceCommand(commands);
             }
             return;
         }
@@ -67,6 +70,7 @@ public final class DnsHijackManager {
         if (!ipv6) {
             ApplicationErrorLog.add(context, "DNS hijacker enabled; daemon start and DNS redirect rules queued");
             commands.add("#LITERAL# " + shellQuote(supervisorPath(context)) + " start");
+            appendBootPersistenceCommand(context, commands);
         }
         appendRedirectRules(commands, ipv6);
     }
@@ -75,6 +79,7 @@ public final class DnsHijackManager {
         appendPurgeRules(commands, ipv6);
         if (!ipv6) {
             appendStopCommand(context, commands);
+            appendRemoveBootPersistenceCommand(commands);
         }
     }
 
@@ -121,8 +126,11 @@ public final class DnsHijackManager {
         File socket = new File(dir, SOCKET);
         File queryLog = new File(dir, QUERY_LOG);
         File supervisorLog = new File(dir, SUPERVISOR_LOG);
+        File bootScript = new File(dir, BOOT_SCRIPT);
+        File bootLog = new File(dir, BOOT_LOG);
 
         out.append("enabled_pref=").append(G.enableDnsHijack()).append('\n');
+        out.append("boot_persistence_pref=").append(G.dnsHijackBootPersistence()).append('\n');
         out.append("port=").append(G.dnsHijackPort(DEFAULT_PORT)).append('\n');
         out.append("fail_open=").append(G.dnsHijackFailOpen()).append('\n');
         out.append("strict_mode=").append(G.dnsHijackStrictMode()).append('\n');
@@ -137,6 +145,8 @@ public final class DnsHijackManager {
         appendFileInfo(out, "control_socket", socket);
         appendFileInfo(out, "query_log", queryLog);
         appendFileInfo(out, "supervisor_log", supervisorLog);
+        appendFileInfo(out, "boot_script", bootScript);
+        appendFileInfo(out, "boot_log", bootLog);
 
         out.append("\n[control status]\n");
         out.append(queryControl(context, "status"));
@@ -208,6 +218,12 @@ public final class DnsHijackManager {
         commands.add("echo '[IPv6 DNS NAT chains]'");
         commands.add(ip6tables + " -t nat -S " + CHAIN_V6 + " 2>&1 || true");
         commands.add(ip6tables + " -t nat -S " + CHAIN_V6_PRE + " 2>&1 || true");
+        commands.add("echo '[DNS boot persistence]'");
+        commands.add("for f in /data/adb/service.d/" + BOOT_SCRIPT
+                + " /su/su.d/" + BOOT_SCRIPT
+                + " /system/su.d/" + BOOT_SCRIPT
+                + " /system/etc/init.d/" + BOOT_SCRIPT
+                + "; do if [ -f \"$f\" ]; then ls -l \"$f\"; fi; done");
         return commands;
     }
 
@@ -325,6 +341,45 @@ public final class DnsHijackManager {
         return domain;
     }
 
+    private static void appendBootPersistenceCommand(Context context, List<String> commands) {
+        if (!G.dnsHijackBootPersistence()) {
+            appendRemoveBootPersistenceCommand(commands);
+            return;
+        }
+        File bootScript = new File(workDir(context), BOOT_SCRIPT);
+        commands.add("#LITERAL# " + buildInstallBootPersistenceCommand(bootScript));
+        ApplicationErrorLog.add(context, "DNS hijacker boot persistence install queued");
+    }
+
+    private static String buildInstallBootPersistenceCommand(File bootScript) {
+        return "SRC=" + shellQuote(bootScript.getAbsolutePath()) + "; "
+                + "NAME=" + shellQuote(BOOT_SCRIPT) + "; "
+                + "installed=0; "
+                + "for DIR in /data/adb/service.d /su/su.d /system/su.d /system/etc/init.d; do "
+                + "if [ -d \"$DIR\" ]; then "
+                + "cp \"$SRC\" \"$DIR/$NAME\" 2>/dev/null && chmod 755 \"$DIR/$NAME\" 2>/dev/null "
+                + "&& echo \"DNS boot persistence installed at $DIR/$NAME\" && installed=1 && break; "
+                + "fi; "
+                + "done; "
+                + "if [ \"$installed\" = 0 ] && [ -d /data/adb ]; then "
+                + "mkdir -p /data/adb/service.d 2>/dev/null "
+                + "&& cp \"$SRC\" /data/adb/service.d/\"$NAME\" 2>/dev/null "
+                + "&& chmod 755 /data/adb/service.d/\"$NAME\" 2>/dev/null "
+                + "&& echo \"DNS boot persistence installed at /data/adb/service.d/$NAME\" "
+                + "&& installed=1; "
+                + "fi; "
+                + "if [ \"$installed\" = 0 ]; then echo 'DNS boot persistence: no supported root boot directory found'; fi; "
+                + "true";
+    }
+
+    private static void appendRemoveBootPersistenceCommand(List<String> commands) {
+        commands.add("#LITERAL# for FILE in /data/adb/service.d/" + BOOT_SCRIPT
+                + " /su/su.d/" + BOOT_SCRIPT
+                + " /system/su.d/" + BOOT_SCRIPT
+                + " /system/etc/init.d/" + BOOT_SCRIPT
+                + "; do [ -e \"$FILE\" ] && rm -f \"$FILE\" 2>/dev/null; done; true");
+    }
+
     private static void appendRedirectRules(List<String> commands, boolean ipv6) {
         int port = G.dnsHijackPort(DEFAULT_PORT);
         String chain = ipv6 ? CHAIN_V6 : CHAIN_V4;
@@ -397,6 +452,11 @@ public final class DnsHijackManager {
             if (!supervisor.setExecutable(true, false)) {
                 Log.w(TAG, "Unable to mark supervisor executable from app context; root start will chmod it");
             }
+            File bootScript = new File(dir, BOOT_SCRIPT);
+            writeText(bootScript, buildBootScript(context, dir));
+            if (!bootScript.setExecutable(true, false)) {
+                Log.w(TAG, "Unable to mark DNS boot script executable from app context; root install will chmod it");
+            }
             return true;
         } catch (IOException e) {
             Log.e(TAG, "Unable to prepare DNS daemon", e);
@@ -462,6 +522,84 @@ public final class DnsHijackManager {
         }
     }
 
+    private static String buildBootScript(Context context, File dir) {
+        String supervisor = new File(dir, SUPERVISOR).getAbsolutePath();
+        String log = new File(dir, BOOT_LOG).getAbsolutePath();
+        String iptables = Api.getBinaryPath(context, false);
+        String ip6tables = Api.getBinaryPath(context, true);
+        int port = G.dnsHijackPort(DEFAULT_PORT);
+
+        return "#!/system/bin/sh\n"
+                + "PATH=/system/bin:/system/xbin:/vendor/bin:/sbin:/su/bin:/data/adb/magisk:$PATH\n"
+                + "SUPERVISOR=" + shellQuote(supervisor) + "\n"
+                + "IPTABLES=" + shellQuote(iptables) + "\n"
+                + "IP6TABLES=" + shellQuote(ip6tables) + "\n"
+                + "PORT=" + port + "\n"
+                + "LOG=" + shellQuote(log) + "\n"
+                + "CHAIN4=" + CHAIN_V4 + "\n"
+                + "PRE4=" + CHAIN_V4_PRE + "\n"
+                + "CHAIN6=" + CHAIN_V6 + "\n"
+                + "PRE6=" + CHAIN_V6_PRE + "\n"
+                + "log_msg() {\n"
+                + "  echo \"$(date +%s) $*\" >> \"$LOG\" 2>/dev/null\n"
+                + "}\n"
+                + "ipt() {\n"
+                + "  if [ -x \"$IPTABLES\" ]; then \"$IPTABLES\" \"$@\"; else iptables \"$@\"; fi\n"
+                + "}\n"
+                + "ip6t() {\n"
+                + "  if [ -x \"$IP6TABLES\" ]; then \"$IP6TABLES\" \"$@\"; elif command -v ip6tables >/dev/null 2>&1; then ip6tables \"$@\"; else return 0; fi\n"
+                + "}\n"
+                + "restore_v4() {\n"
+                + "  ipt -t nat -D OUTPUT -p udp --dport 53 -j \"$CHAIN4\" >/dev/null 2>&1\n"
+                + "  ipt -t nat -D OUTPUT -p tcp --dport 53 -j \"$CHAIN4\" >/dev/null 2>&1\n"
+                + "  ipt -t nat -D PREROUTING -p udp --dport 53 -j \"$PRE4\" >/dev/null 2>&1\n"
+                + "  ipt -t nat -D PREROUTING -p tcp --dport 53 -j \"$PRE4\" >/dev/null 2>&1\n"
+                + "  ipt -t nat -N \"$CHAIN4\" >/dev/null 2>&1\n"
+                + "  ipt -t nat -N \"$PRE4\" >/dev/null 2>&1\n"
+                + "  ipt -t nat -F \"$CHAIN4\" >/dev/null 2>&1\n"
+                + "  ipt -t nat -F \"$PRE4\" >/dev/null 2>&1\n"
+                + "  ipt -t nat -A \"$CHAIN4\" -o lo -j RETURN >> \"$LOG\" 2>&1\n"
+                + "  ipt -t nat -A \"$CHAIN4\" -m owner --uid-owner 0 -j RETURN >> \"$LOG\" 2>&1\n"
+                + "  ipt -t nat -A \"$CHAIN4\" -p udp --dport 53 -j REDIRECT --to-ports \"$PORT\" >> \"$LOG\" 2>&1\n"
+                + "  ipt -t nat -A \"$CHAIN4\" -p tcp --dport 53 -j REDIRECT --to-ports \"$PORT\" >> \"$LOG\" 2>&1\n"
+                + "  ipt -t nat -A \"$PRE4\" -i lo -j RETURN >> \"$LOG\" 2>&1\n"
+                + "  ipt -t nat -A \"$PRE4\" -p udp --dport 53 -j REDIRECT --to-ports \"$PORT\" >> \"$LOG\" 2>&1\n"
+                + "  ipt -t nat -A \"$PRE4\" -p tcp --dport 53 -j REDIRECT --to-ports \"$PORT\" >> \"$LOG\" 2>&1\n"
+                + "  ipt -t nat -I OUTPUT 1 -p udp --dport 53 -j \"$CHAIN4\" >> \"$LOG\" 2>&1\n"
+                + "  ipt -t nat -I OUTPUT 1 -p tcp --dport 53 -j \"$CHAIN4\" >> \"$LOG\" 2>&1\n"
+                + "  ipt -t nat -I PREROUTING 1 -p udp --dport 53 -j \"$PRE4\" >> \"$LOG\" 2>&1\n"
+                + "  ipt -t nat -I PREROUTING 1 -p tcp --dport 53 -j \"$PRE4\" >> \"$LOG\" 2>&1\n"
+                + "}\n"
+                + "restore_v6() {\n"
+                + "  ip6t -t nat -D OUTPUT -p udp --dport 53 -j \"$CHAIN6\" >/dev/null 2>&1\n"
+                + "  ip6t -t nat -D OUTPUT -p tcp --dport 53 -j \"$CHAIN6\" >/dev/null 2>&1\n"
+                + "  ip6t -t nat -D PREROUTING -p udp --dport 53 -j \"$PRE6\" >/dev/null 2>&1\n"
+                + "  ip6t -t nat -D PREROUTING -p tcp --dport 53 -j \"$PRE6\" >/dev/null 2>&1\n"
+                + "  ip6t -t nat -N \"$CHAIN6\" >/dev/null 2>&1\n"
+                + "  ip6t -t nat -N \"$PRE6\" >/dev/null 2>&1\n"
+                + "  ip6t -t nat -F \"$CHAIN6\" >/dev/null 2>&1\n"
+                + "  ip6t -t nat -F \"$PRE6\" >/dev/null 2>&1\n"
+                + "  ip6t -t nat -A \"$CHAIN6\" -o lo -j RETURN >> \"$LOG\" 2>&1\n"
+                + "  ip6t -t nat -A \"$CHAIN6\" -m owner --uid-owner 0 -j RETURN >> \"$LOG\" 2>&1\n"
+                + "  ip6t -t nat -A \"$CHAIN6\" -p udp --dport 53 -j REDIRECT --to-ports \"$PORT\" >> \"$LOG\" 2>&1\n"
+                + "  ip6t -t nat -A \"$CHAIN6\" -p tcp --dport 53 -j REDIRECT --to-ports \"$PORT\" >> \"$LOG\" 2>&1\n"
+                + "  ip6t -t nat -A \"$PRE6\" -i lo -j RETURN >> \"$LOG\" 2>&1\n"
+                + "  ip6t -t nat -A \"$PRE6\" -p udp --dport 53 -j REDIRECT --to-ports \"$PORT\" >> \"$LOG\" 2>&1\n"
+                + "  ip6t -t nat -A \"$PRE6\" -p tcp --dport 53 -j REDIRECT --to-ports \"$PORT\" >> \"$LOG\" 2>&1\n"
+                + "  ip6t -t nat -I OUTPUT 1 -p udp --dport 53 -j \"$CHAIN6\" >> \"$LOG\" 2>&1\n"
+                + "  ip6t -t nat -I OUTPUT 1 -p tcp --dport 53 -j \"$CHAIN6\" >> \"$LOG\" 2>&1\n"
+                + "  ip6t -t nat -I PREROUTING 1 -p udp --dport 53 -j \"$PRE6\" >> \"$LOG\" 2>&1\n"
+                + "  ip6t -t nat -I PREROUTING 1 -p tcp --dport 53 -j \"$PRE6\" >> \"$LOG\" 2>&1\n"
+                + "}\n"
+                + "log_msg 'DNS boot restore starting'\n"
+                + "sleep 15\n"
+                + "if [ ! -x \"$SUPERVISOR\" ]; then log_msg 'supervisor missing or not executable'; exit 0; fi\n"
+                + "\"$SUPERVISOR\" start >> \"$LOG\" 2>&1\n"
+                + "restore_v4\n"
+                + "restore_v6\n"
+                + "log_msg 'DNS boot restore complete'\n";
+    }
+
     private static String buildSupervisorScript(File dir, File daemon) {
         String marker = new File(dir, ENABLED_MARKER).getAbsolutePath();
         String config = new File(dir, CONF).getAbsolutePath();
@@ -485,7 +623,7 @@ public final class DnsHijackManager {
                 + "  touch \"$MARKER\"\n"
                 + "  if is_running; then exit 0; fi\n"
                 + "  ( while [ -f \"$MARKER\" ]; do\n"
-                + "      \"$DAEMON\" \"$CONF\" >> \"$LOG\" 2>&1\n"
+                + "      \"$DAEMON\" --config \"$CONF\" >> \"$LOG\" 2>&1\n"
                 + "      sleep 2\n"
                 + "    done ) >/dev/null 2>&1 &\n"
                 + "  sleep 1\n"

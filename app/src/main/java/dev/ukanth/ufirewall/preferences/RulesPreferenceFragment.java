@@ -280,6 +280,10 @@ public class RulesPreferenceFragment extends PreferenceFragment implements
                 if (enableDnsHijack != null) {
                     enableDnsHijack.setChecked(false);
                 }
+                CheckBoxPreference dnsBootPersistence = (CheckBoxPreference) findPreference("dnsHijackBootPersistence");
+                if (dnsBootPersistence != null) {
+                    dnsBootPersistence.setChecked(false);
+                }
 
                 G.enableRoam(false);
                 G.enableLAN(false);
@@ -288,6 +292,7 @@ public class RulesPreferenceFragment extends PreferenceFragment implements
                 G.enableTor(false);
                 G.enableCustomRules(false);
                 G.enableDnsHijack(false);
+                G.dnsHijackBootPersistence(false);
 
             }
         }
@@ -415,7 +420,8 @@ public class RulesPreferenceFragment extends PreferenceFragment implements
 
         if (isDnsHijackPreference(key)) {
             Api.setRulesUpToDate(false);
-            if (!key.equals("enableDnsHijack") && !key.equals("dnsHijackPort") && G.enableDnsHijack()) {
+            if (!key.equals("enableDnsHijack") && !key.equals("dnsHijackPort")
+                    && !key.equals("dnsHijackBootPersistence") && G.enableDnsHijack()) {
                 DnsHijackManager.requestReload(ctx);
             }
         }
@@ -428,6 +434,7 @@ public class RulesPreferenceFragment extends PreferenceFragment implements
                 || key.equals("dnsHijackUpstreams")
                 || key.equals("dnsHijackFailOpen")
                 || key.equals("dnsHijackStrictMode")
+                || key.equals("dnsHijackBootPersistence")
                 || key.equals("dnsHijackTimeoutMs")
                 || key.equals("dnsHijackAllowExact")
                 || key.equals("dnsHijackAllowSuffix")

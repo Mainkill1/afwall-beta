@@ -309,6 +309,8 @@
     <string name="dns_hijack_fail_open_summary">Allow upstream DNS when filtering cannot complete instead of blocking the query.</string>
     <string name="dns_hijack_strict_title">Strict allow/block priority</string>
     <string name="dns_hijack_strict_summary">When enabled, exact and wildcard block rules can override allow rules.</string>
+    <string name="dns_hijack_boot_persistence_title">Restore DNS filtering at boot</string>
+    <string name="dns_hijack_boot_persistence_summary">Install a root boot script that restarts the DNS daemon and restores DNS redirect rules before opening the app.</string>
     <string name="dns_hijack_timeout_title">Upstream timeout</string>
     <string name="dns_hijack_timeout_summary">DNS upstream timeout in milliseconds.</string>
     <string name="dns_hijack_allow_exact_title">Exact allow domains</string>

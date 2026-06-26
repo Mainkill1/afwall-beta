@@ -176,6 +176,7 @@ public class G extends Application implements Application.ActivityLifecycleCallb
     private static final String DNS_HIJACK_UPSTREAMS = "dnsHijackUpstreams";
     private static final String DNS_HIJACK_FAIL_OPEN = "dnsHijackFailOpen";
     private static final String DNS_HIJACK_STRICT_MODE = "dnsHijackStrictMode";
+    private static final String DNS_HIJACK_BOOT_PERSISTENCE = "dnsHijackBootPersistence";
     private static final String DNS_HIJACK_TIMEOUT_MS = "dnsHijackTimeoutMs";
     private static final String DNS_HIJACK_ALLOW_EXACT = "dnsHijackAllowExact";
     private static final String DNS_HIJACK_ALLOW_SUFFIX = "dnsHijackAllowSuffix";
@@ -292,6 +293,15 @@ public class G extends Application implements Application.ActivityLifecycleCallb
 
     public static boolean dnsHijackStrictMode() {
         return gPrefs.getBoolean(DNS_HIJACK_STRICT_MODE, false);
+    }
+
+    public static boolean dnsHijackBootPersistence() {
+        return gPrefs.getBoolean(DNS_HIJACK_BOOT_PERSISTENCE, false);
+    }
+
+    public static boolean dnsHijackBootPersistence(boolean val) {
+        gPrefs.edit().putBoolean(DNS_HIJACK_BOOT_PERSISTENCE, val).commit();
+        return val;
     }
 
     public static int dnsHijackTimeoutMs() {

@@ -105,6 +105,13 @@
             android:summary="@string/dns_hijack_strict_summary"
             android:title="@string/dns_hijack_strict_title" />
 
+        <CheckBoxPreference
+            android:defaultValue="false"
+            android:dependency="enableDnsHijack"
+            android:key="dnsHijackBootPersistence"
+            android:summary="@string/dns_hijack_boot_persistence_summary"
+            android:title="@string/dns_hijack_boot_persistence_title" />
+
         <EditTextPreference
             android:defaultValue="2500"
             android:dependency="enableDnsHijack"
