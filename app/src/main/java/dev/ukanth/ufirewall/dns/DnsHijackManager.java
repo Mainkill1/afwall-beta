@@ -1,17 +1,25 @@
 package dev.ukanth.ufirewall.dns;
 
 import android.content.Context;
+import android.net.LocalSocket;
+import android.net.LocalSocketAddress;
 import android.os.Build;
 import android.util.Log;
 
+import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 
+import dev.ukanth.ufirewall.Api;
+import dev.ukanth.ufirewall.R;
+import dev.ukanth.ufirewall.service.RootCommand;
 import dev.ukanth.ufirewall.util.ApplicationErrorLog;
 import dev.ukanth.ufirewall.util.G;
 
@@ -67,17 +75,149 @@ public final class DnsHijackManager {
     }
 
     public static void requestReload(Context context) {
+        runSupervisorAction(context, "reload", null);
+    }
+
+    public static void runSupervisorAction(Context context, String action, RootCommand.Callback callback) {
         if (context == null) {
             return;
         }
-        if (!prepareDaemon(context)) {
+        String safeAction = normalizeSupervisorAction(action);
+        if (safeAction == null) {
+            failSupervisorAction(context, callback, "DNS hijacker supervisor action was invalid: " + action);
             return;
         }
-        List<String> commands = new java.util.ArrayList<>();
-        commands.add(shellQuote(supervisorPath(context)) + " reload");
-        new dev.ukanth.ufirewall.service.RootCommand()
+        if (!"stop".equals(safeAction) && !prepareDaemon(context)) {
+            failSupervisorAction(context, callback, "DNS hijacker " + safeAction + " requested but daemon files could not be prepared");
+            return;
+        }
+        File supervisor = new File(workDir(context), SUPERVISOR);
+        if (!supervisor.exists()) {
+            failSupervisorAction(context, callback, "DNS hijacker " + safeAction + " requested but supervisor script is missing");
+            return;
+        }
+        List<String> commands = new ArrayList<>();
+        commands.add(shellQuote(supervisor.getAbsolutePath()) + " " + safeAction);
+        ApplicationErrorLog.add(context, "DNS hijacker supervisor action queued: " + safeAction);
+        new RootCommand()
                 .setLogging(true)
+                .setReopenShell(true)
+                .setFailureToast(R.string.error_apply)
+                .setCallback(callback)
                 .run(context.getApplicationContext(), commands);
+    }
+
+    public static String collectLocalDiagnostics(Context context) {
+        StringBuilder out = new StringBuilder();
+        File dir = workDir(context);
+        File daemon = new File(dir, DAEMON_NAME);
+        File supervisor = new File(dir, SUPERVISOR);
+        File config = new File(dir, CONF);
+        File pid = new File(dir, PID);
+        File socket = new File(dir, SOCKET);
+        File queryLog = new File(dir, QUERY_LOG);
+        File supervisorLog = new File(dir, SUPERVISOR_LOG);
+
+        out.append("enabled_pref=").append(G.enableDnsHijack()).append('\n');
+        out.append("port=").append(G.dnsHijackPort(DEFAULT_PORT)).append('\n');
+        out.append("fail_open=").append(G.dnsHijackFailOpen()).append('\n');
+        out.append("strict_mode=").append(G.dnsHijackStrictMode()).append('\n');
+        out.append("timeout_ms=").append(G.dnsHijackTimeoutMs()).append('\n');
+        appendFileInfo(out, "work_dir", dir);
+        appendFileInfo(out, "daemon", daemon);
+        appendFileInfo(out, "supervisor", supervisor);
+        appendFileInfo(out, "config", config);
+        appendFileInfo(out, "pid", pid);
+        appendFileInfo(out, "control_socket", socket);
+        appendFileInfo(out, "query_log", queryLog);
+        appendFileInfo(out, "supervisor_log", supervisorLog);
+
+        out.append("\n[control status]\n");
+        out.append(queryControl(context, "status"));
+        out.append("\n[recent queries]\n");
+        String logs = queryControl(context, "logs");
+        out.append(logs.trim().isEmpty() ? "no daemon query logs reported\n" : logs);
+        return out.toString();
+    }
+
+    public static List<String> buildRootDiagnosticsCommands(Context context) {
+        List<String> commands = new ArrayList<>();
+        String supervisor = shellQuote(supervisorPath(context));
+        String iptables = shellQuote(Api.getBinaryPath(context, false));
+        String ip6tables = shellQuote(Api.getBinaryPath(context, true));
+
+        commands.add("echo '[supervisor status]'");
+        commands.add("if [ -x " + supervisor + " ]; then " + supervisor + " status 2>&1; else echo 'supervisor missing'; fi");
+        commands.add("echo '[pid]'");
+        commands.add("cat " + shellQuote(new File(workDir(context), PID).getAbsolutePath()) + " 2>&1 || true");
+        commands.add("echo '[IPv4 DNS NAT OUTPUT]'");
+        commands.add(iptables + " -t nat -S OUTPUT 2>&1 | grep 'afwall-dns' || true");
+        commands.add("echo '[IPv4 DNS NAT chains]'");
+        commands.add(iptables + " -t nat -S " + CHAIN_V4 + " 2>&1 || true");
+        commands.add(iptables + " -t nat -S " + CHAIN_V4_PRE + " 2>&1 || true");
+        commands.add("echo '[IPv6 DNS NAT OUTPUT]'");
+        commands.add(ip6tables + " -t nat -S OUTPUT 2>&1 | grep 'afwall-dns6' || true");
+        commands.add("echo '[IPv6 DNS NAT chains]'");
+        commands.add(ip6tables + " -t nat -S " + CHAIN_V6 + " 2>&1 || true");
+        commands.add(ip6tables + " -t nat -S " + CHAIN_V6_PRE + " 2>&1 || true");
+        return commands;
+    }
+
+    private static void failSupervisorAction(Context context, RootCommand.Callback callback, String message) {
+        ApplicationErrorLog.add(context, message);
+        if (callback == null) {
+            return;
+        }
+        RootCommand state = new RootCommand();
+        state.exitCode = 1;
+        state.res = new StringBuilder(message).append('\n');
+        callback.cbFunc(state);
+    }
+
+    private static String queryControl(Context context, String command) {
+        File socketFile = new File(workDir(context), SOCKET);
+        if (!socketFile.exists()) {
+            return "control socket missing\n";
+        }
+        try (LocalSocket socket = new LocalSocket()) {
+            socket.setSoTimeout(1500);
+            socket.connect(new LocalSocketAddress(socketFile.getAbsolutePath(), LocalSocketAddress.Namespace.FILESYSTEM));
+            OutputStream output = socket.getOutputStream();
+            output.write((command + "\n").getBytes(StandardCharsets.UTF_8));
+            output.flush();
+            socket.shutdownOutput();
+
+            ByteArrayOutputStream buffer = new ByteArrayOutputStream();
+            InputStream input = socket.getInputStream();
+            byte[] chunk = new byte[4096];
+            int read;
+            while ((read = input.read(chunk)) != -1) {
+                buffer.write(chunk, 0, read);
+            }
+            String result = buffer.toString("UTF-8");
+            return result.trim().isEmpty() ? "empty response\n" : result;
+        } catch (IOException e) {
+            return "control socket error: " + e.getMessage() + "\n";
+        }
+    }
+
+    private static void appendFileInfo(StringBuilder out, String label, File file) {
+        out.append(label).append('=').append(file.getAbsolutePath());
+        out.append(" exists=").append(file.exists());
+        if (file.exists()) {
+            out.append(" size=").append(file.length());
+            out.append(" canExecute=").append(file.canExecute());
+        }
+        out.append('\n');
+    }
+
+    private static String normalizeSupervisorAction(String action) {
+        if ("start".equals(action) || "stop".equals(action)
+                || "restart".equals(action) || "reload".equals(action)
+                || "status".equals(action)) {
+            return action;
+        }
+        return null;
     }
 
     private static void appendRedirectRules(List<String> commands, boolean ipv6) {

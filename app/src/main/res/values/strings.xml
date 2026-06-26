@@ -323,6 +323,14 @@
     <string name="dns_hijack_allow_regex_summary">Regular expressions that allow matching queries.</string>
     <string name="dns_hijack_block_regex_title">Regex block rules</string>
     <string name="dns_hijack_block_regex_summary">Regular expressions that block matching queries.</string>
+    <string name="dns_diagnostics_title">DNS daemon diagnostics</string>
+    <string name="dns_diagnostics_loading">Loading DNS daemon diagnostics</string>
+    <string name="dns_diagnostics_reload">Reload DNS daemon</string>
+    <string name="dns_diagnostics_restart">Restart DNS daemon</string>
+    <string name="dns_diagnostics_stop">Stop DNS daemon</string>
+    <string name="dns_diagnostics_reload_queued">DNS daemon reload requested.</string>
+    <string name="dns_diagnostics_restart_queued">DNS daemon restart requested.</string>
+    <string name="dns_diagnostics_stop_queued">DNS daemon stop requested.</string>
     <string name="log_prefs_title">Log</string>
     <string name="hideicons_pref_title">Hide app icons</string>
     <string name="hideicons_pref_summary_on">Improve performance by disabling app icons in the main view</string>
