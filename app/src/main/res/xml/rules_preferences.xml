@@ -155,6 +155,13 @@
             android:summary="@string/dns_hijack_timeout_summary"
             android:title="@string/dns_hijack_timeout_title" />
 
+        <EditTextPreference
+            android:defaultValue="1024"
+            android:dependency="enableDnsHijack"
+            android:key="dnsHijackCacheSize"
+            android:summary="@string/dns_hijack_cache_size_summary"
+            android:title="@string/dns_hijack_cache_size_title" />
+
         <CheckBoxPreference
             android:defaultValue="false"
             android:dependency="enableDnsHijack"

@@ -36,7 +36,8 @@
 #define MAX_TEMP_RULES 1024
 #define MAX_UPSTREAMS 8
 #define MAX_SPLIT_UPSTREAMS 32
-#define CACHE_SIZE 1024
+#define DEFAULT_CACHE_SIZE 1024
+#define MAX_CACHE_SIZE 4096
 #define LOG_RING 256
 #define DEFAULT_PORT 5354
 #define DEFAULT_TIMEOUT_MS 2500
@@ -76,6 +77,7 @@ typedef struct {
     int strict_mode;
     int fail_open;
     int timeout_ms;
+    int cache_size;
     char control_socket[256];
     char log_file[256];
     char pid_file[256];
@@ -151,7 +153,8 @@ static log_entry_t g_logs[LOG_RING];
 static int g_log_pos = 0;
 static uint64_t g_log_seq = 0;
 static uint64_t g_log_flushed_seq = 0;
-static cache_entry_t g_cache[CACHE_SIZE];
+static cache_entry_t *g_cache = NULL;
+static int g_cache_capacity = 0;
 static char g_config_path[256];
 
 static uint64_t now_seconds(void) {
@@ -233,7 +236,10 @@ static int cache_entry_count(void) {
     int count = 0;
     int i;
     time_t now = time(NULL);
-    for (i = 0; i < CACHE_SIZE; i++) {
+    if (g_cache == NULL || g_cache_capacity <= 0) {
+        return 0;
+    }
+    for (i = 0; i < g_cache_capacity; i++) {
         if (g_cache[i].used && g_cache[i].expires_at > now) {
             count++;
         }
@@ -634,11 +640,17 @@ static uint32_t extract_min_ttl(const uint8_t *packet, size_t len) {
 
 static bool cache_lookup(const char *domain, uint16_t qtype, const uint8_t *query, uint8_t *out, size_t *out_len) {
     uint32_t h = hash_domain(domain, qtype);
-    uint32_t start = h % CACHE_SIZE;
+    uint32_t start;
     uint32_t i;
+    uint32_t probe_count;
     time_t now = time(NULL);
-    for (i = 0; i < 8; i++) {
-        cache_entry_t *entry = &g_cache[(start + i) % CACHE_SIZE];
+    if (g_cache == NULL || g_cache_capacity <= 0) {
+        return false;
+    }
+    start = h % (uint32_t) g_cache_capacity;
+    probe_count = g_cache_capacity < 8 ? (uint32_t) g_cache_capacity : 8u;
+    for (i = 0; i < probe_count; i++) {
+        cache_entry_t *entry = &g_cache[(start + i) % (uint32_t) g_cache_capacity];
         if (!entry->used) {
             continue;
         }
@@ -678,9 +690,12 @@ static void cache_store(const char *domain, uint16_t qtype, const uint8_t *respo
     uint32_t ttl;
     cache_entry_t *entry;
     uint32_t i;
+    uint32_t probe_count;
     time_t now = time(NULL);
     bool evicting = false;
-    if (response_len < 12 || response_len > MAX_PACKET || !response_cacheable(response, response_len)) {
+    if (g_cache == NULL || g_cache_capacity <= 0
+            || response_len < 12 || response_len > MAX_PACKET
+            || !response_cacheable(response, response_len)) {
         return;
     }
     ttl = extract_min_ttl(response, response_len);
@@ -688,10 +703,11 @@ static void cache_store(const char *domain, uint16_t qtype, const uint8_t *respo
         return;
     }
     h = hash_domain(domain, qtype);
-    slot = h % CACHE_SIZE;
+    slot = h % (uint32_t) g_cache_capacity;
+    probe_count = g_cache_capacity < 8 ? (uint32_t) g_cache_capacity : 8u;
     entry = NULL;
-    for (i = 0; i < 8; i++) {
-        cache_entry_t *candidate = &g_cache[(slot + i) % CACHE_SIZE];
+    for (i = 0; i < probe_count; i++) {
+        cache_entry_t *candidate = &g_cache[(slot + i) % (uint32_t) g_cache_capacity];
         if (candidate->used && candidate->hash == h
                 && candidate->qtype == qtype
                 && strcmp(candidate->domain, domain) == 0) {
@@ -918,6 +934,7 @@ static void default_config(config_t *cfg) {
     cfg->listen_port = DEFAULT_PORT;
     cfg->fail_open = 1;
     cfg->timeout_ms = DEFAULT_TIMEOUT_MS;
+    cfg->cache_size = DEFAULT_CACHE_SIZE;
     safe_copy(cfg->control_socket, sizeof(cfg->control_socket), "/data/local/tmp/afwall_dnsd.sock");
     cfg->upstream_count = 1;
     safe_copy(cfg->upstreams[0].host, sizeof(cfg->upstreams[0].host), "1.1.1.1");
@@ -1053,6 +1070,11 @@ static bool load_config(const char *path, config_t *new_cfg) {
             if (timeout >= 250 && timeout <= 10000) {
                 new_cfg->timeout_ms = timeout;
             }
+        } else if (strcmp(key, "cache_size") == 0) {
+            int cache_size = atoi(value);
+            if (cache_size >= 0 && cache_size <= MAX_CACHE_SIZE) {
+                new_cfg->cache_size = cache_size;
+            }
         } else if (strcmp(key, "upstream") == 0) {
             parse_upstream(new_cfg, value);
         } else if (strcmp(key, "split_upstream") == 0) {
@@ -1139,6 +1161,7 @@ static void load_regex_rule_file(regex_rule_t *rules, int *count, const char *pa
 
 static bool reload_config(void) {
     config_t *next = (config_t *) calloc(1, sizeof(config_t));
+    cache_entry_t *next_cache = NULL;
     if (next == NULL) {
         return false;
     }
@@ -1146,10 +1169,20 @@ static bool reload_config(void) {
         free(next);
         return false;
     }
+    if (next->cache_size > 0) {
+        next_cache = (cache_entry_t *) calloc((size_t) next->cache_size, sizeof(cache_entry_t));
+        if (next_cache == NULL) {
+            free_regex_rules(next);
+            free(next);
+            return false;
+        }
+    }
     free_regex_rules(&g_cfg);
     g_cfg = *next;
     free(next);
-    memset(g_cache, 0, sizeof(g_cache));
+    free(g_cache);
+    g_cache = next_cache;
+    g_cache_capacity = g_cfg.cache_size;
     g_stats.reloads++;
     return true;
 }
@@ -1449,7 +1482,7 @@ static void write_health_response(int client) {
             "health=1\nrunning=1\npid=%ld\nuptime=%llu\nlisten_port=%d\n"
             "generation=%llu\nupstreams=%d\nsplit_upstreams=%d\nupstream_probe=%s\n"
             "upstream_probe_ms=%d\nupstream_probe_index=%d\nupstream_probe_rcode=%d\n"
-            "queries=%llu\nblocked=%llu\nallowed=%llu\ncache_entries=%d\n"
+            "queries=%llu\nblocked=%llu\nallowed=%llu\ncache_size=%d\ncache_entries=%d\n"
             "rules_total=%d\n",
             (long) getpid(),
             (unsigned long long) (now_seconds() - g_stats.start_time),
@@ -1464,6 +1497,7 @@ static void write_health_response(int client) {
             (unsigned long long) g_stats.queries,
             (unsigned long long) g_stats.blocked,
             (unsigned long long) g_stats.allowed,
+            g_cfg.cache_size,
             cache_entry_count(),
             g_cfg.exact_allow_count + g_cfg.suffix_allow_count
                     + g_cfg.exact_block_count + g_cfg.suffix_block_count
@@ -1554,7 +1588,7 @@ static void handle_control(int fd) {
                 (unsigned long long) g_stats.blocked,
                 (unsigned long long) g_stats.fail_open_drops,
                 (unsigned long long) g_stats.fail_closed_blocks,
-                CACHE_SIZE,
+                g_cfg.cache_size,
                 cache_entry_count(),
                 (unsigned long long) g_stats.cache_hits,
                 (unsigned long long) g_stats.cache_misses,

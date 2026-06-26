@@ -172,6 +172,7 @@ public final class DnsHijackManager {
         out.append("fail_open=").append(G.dnsHijackFailOpen()).append('\n');
         out.append("strict_mode=").append(G.dnsHijackStrictMode()).append('\n');
         out.append("timeout_ms=").append(G.dnsHijackTimeoutMs()).append('\n');
+        out.append("cache_size=").append(G.dnsHijackCacheSize()).append('\n');
         out.append("split_upstream_entries=").append(countLines(G.dnsHijackSplitUpstreams())).append('\n');
         out.append("capture_uid_entries=").append(parseUidList(G.dnsHijackCaptureUids()).size()).append('\n');
         out.append("bypass_uid_entries=").append(parseUidList(G.dnsHijackBypassUids()).size()).append('\n');
@@ -1011,6 +1012,7 @@ public final class DnsHijackManager {
         config.append("fail_open=").append(G.dnsHijackFailOpen() ? "1" : "0").append('\n');
         config.append("strict_mode=").append(G.dnsHijackStrictMode() ? "1" : "0").append('\n');
         config.append("timeout_ms=").append(G.dnsHijackTimeoutMs()).append('\n');
+        config.append("cache_size=").append(G.dnsHijackCacheSize()).append('\n');
 
         appendConfigEntries(config, "upstream", G.dnsHijackUpstreams());
         appendConfigEntries(config, "split_upstream", G.dnsHijackSplitUpstreams());
