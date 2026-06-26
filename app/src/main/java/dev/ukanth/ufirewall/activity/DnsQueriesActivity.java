@@ -1,8 +1,13 @@
 package dev.ukanth.ufirewall.activity;
 
+import android.app.Activity;
+import android.content.ActivityNotFoundException;
+import android.content.Intent;
+import android.net.Uri;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.util.Log;
 import android.view.Menu;
 import android.view.MenuItem;
 import android.widget.ArrayAdapter;
@@ -14,6 +19,9 @@ import androidx.appcompat.widget.Toolbar;
 
 import com.afollestad.materialdialogs.MaterialDialog;
 
+import java.io.IOException;
+import java.io.OutputStream;
+import java.nio.charset.StandardCharsets;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Date;
@@ -30,10 +38,13 @@ import dev.ukanth.ufirewall.util.ThemeHelper;
 
 public class DnsQueriesActivity extends AppCompatActivity {
 
+    private static final String TAG = "AFWallDnsQueries";
+    private static final int REQUEST_EXPORT_DNS_QUERIES = 50;
     private static final int MENU_REFRESH = 1;
     private static final int MENU_COPY = 2;
     private static final int MENU_SEARCH = 3;
     private static final int MENU_TOGGLE_HISTORY = 4;
+    private static final int MENU_EXPORT = 5;
     private static final long REFRESH_MS = 2500L;
 
     private final Handler handler = new Handler(Looper.getMainLooper());
@@ -105,6 +116,7 @@ public class DnsQueriesActivity extends AppCompatActivity {
         menu.add(0, MENU_TOGGLE_HISTORY, 0,
                 showHistory ? R.string.dns_queries_live : R.string.dns_queries_history);
         menu.add(0, MENU_COPY, 0, R.string.copy).setIcon(R.drawable.ic_copy);
+        menu.add(0, MENU_EXPORT, 0, R.string.export_to_sd).setIcon(R.drawable.ic_export);
         return true;
     }
 
@@ -126,8 +138,19 @@ public class DnsQueriesActivity extends AppCompatActivity {
             case MENU_COPY:
                 Api.copyToClipboard(this, buildTextDump());
                 return true;
+            case MENU_EXPORT:
+                startQueryExportPicker();
+                return true;
             default:
                 return super.onOptionsItemSelected(item);
+        }
+    }
+
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode == REQUEST_EXPORT_DNS_QUERIES && resultCode == Activity.RESULT_OK) {
+            exportQueriesToUri(data);
         }
     }
 
@@ -250,6 +273,64 @@ public class DnsQueriesActivity extends AppCompatActivity {
                 })
                 .negativeText(R.string.Cancel)
                 .show();
+    }
+
+    private void startQueryExportPicker() {
+        Intent intent = new Intent(Intent.ACTION_CREATE_DOCUMENT);
+        intent.addCategory(Intent.CATEGORY_OPENABLE);
+        intent.setType("text/plain");
+        intent.putExtra(Intent.EXTRA_TITLE, buildExportFilename());
+        intent.addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+                | Intent.FLAG_GRANT_READ_URI_PERMISSION
+                | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
+        try {
+            startActivityForResult(intent, REQUEST_EXPORT_DNS_QUERIES);
+        } catch (ActivityNotFoundException e) {
+            Log.w(TAG, "System export picker unavailable for DNS query export", e);
+            Api.copyToClipboard(this, buildTextDump());
+            Api.toast(this, getString(R.string.dns_queries_export_picker_missing));
+        }
+    }
+
+    private void exportQueriesToUri(Intent data) {
+        if (data == null || data.getData() == null) {
+            Api.toast(this, getString(R.string.export_logs_fail));
+            return;
+        }
+        Uri uri = data.getData();
+        takePersistablePermission(data, Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
+        try (OutputStream output = getContentResolver().openOutputStream(uri, "wt")) {
+            if (output == null) {
+                throw new IOException("Unable to open selected export location");
+            }
+            output.write(buildTextDump().getBytes(StandardCharsets.UTF_8));
+            output.flush();
+            Api.toast(this, getString(R.string.dns_queries_export_success));
+        } catch (IOException | RuntimeException e) {
+            Log.e(TAG, "Unable to export DNS queries", e);
+            Api.toast(this, getString(R.string.export_logs_fail));
+        }
+    }
+
+    private void takePersistablePermission(Intent data, int permissionFlag) {
+        Uri uri = data.getData();
+        if (uri == null) {
+            return;
+        }
+        int flags = data.getFlags() & permissionFlag;
+        if (flags == 0) {
+            return;
+        }
+        try {
+            getContentResolver().takePersistableUriPermission(uri, flags);
+        } catch (SecurityException e) {
+            Log.w(TAG, "Unable to persist DNS query export URI permission", e);
+        }
+    }
+
+    private String buildExportFilename() {
+        String timestamp = new SimpleDateFormat("yyyy-MM-dd-HH-mm-ss", Locale.US).format(new Date());
+        return "afwall-dns-queries-" + timestamp + ".log";
     }
 
     private String buildTextDump() {
