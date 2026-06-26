@@ -45,6 +45,9 @@
 #define LOG_LINE_MAX 512
 #define DEFAULT_PORT 5354
 #define DEFAULT_TIMEOUT_MS 2500
+#define DEFAULT_POSITIVE_TTL 60
+#define DEFAULT_NEGATIVE_TTL 30
+#define MAX_CACHE_TTL 86400
 
 typedef enum {
     DECISION_ALLOW = 0,
@@ -132,6 +135,10 @@ typedef struct {
     uint64_t cache_hits;
     uint64_t cache_misses;
     uint64_t cache_stores;
+    uint64_t cache_positive_hits;
+    uint64_t cache_negative_hits;
+    uint64_t cache_positive_stores;
+    uint64_t cache_negative_stores;
     uint64_t cache_expired;
     uint64_t cache_evictions;
     uint64_t udp_queries;
@@ -167,6 +174,7 @@ typedef struct {
     time_t expires_at;
     uint32_t hash;
     bool used;
+    bool negative;
 } cache_entry_t;
 
 static volatile sig_atomic_t g_running = 1;
@@ -380,6 +388,21 @@ static int cache_entry_count(void) {
     }
     for (i = 0; i < g_cache_capacity; i++) {
         if (g_cache[i].used && g_cache[i].expires_at > now) {
+            count++;
+        }
+    }
+    return count;
+}
+
+static int cache_entry_count_by_type(bool negative) {
+    int count = 0;
+    int i;
+    time_t now = time(NULL);
+    if (g_cache == NULL || g_cache_capacity <= 0) {
+        return 0;
+    }
+    for (i = 0; i < g_cache_capacity; i++) {
+        if (g_cache[i].used && g_cache[i].expires_at > now && g_cache[i].negative == negative) {
             count++;
         }
     }
@@ -930,17 +953,60 @@ static size_t skip_name(const uint8_t *packet, size_t len, size_t pos) {
     return len + 1;
 }
 
-static uint32_t extract_min_ttl(const uint8_t *packet, size_t len) {
+static bool read_rr_header(const uint8_t *packet, size_t len, size_t *pos,
+                           uint16_t *type, uint32_t *ttl, uint16_t *rdlen,
+                           size_t *rdata_pos) {
+    size_t rr_pos = skip_name(packet, len, *pos);
+    if (rr_pos + 10 > len) {
+        return false;
+    }
+    *type = read_u16(packet + rr_pos);
+    *ttl = read_u32(packet + rr_pos + 4);
+    *rdlen = read_u16(packet + rr_pos + 8);
+    *rdata_pos = rr_pos + 10;
+    if (*rdata_pos + *rdlen > len) {
+        return false;
+    }
+    *pos = *rdata_pos + *rdlen;
+    return true;
+}
+
+static uint32_t clamp_cache_ttl(uint32_t ttl, uint32_t fallback) {
+    if (ttl == 0 || ttl == UINT32_MAX) {
+        ttl = fallback;
+    }
+    if (ttl > MAX_CACHE_TTL) {
+        ttl = MAX_CACHE_TTL;
+    }
+    return ttl;
+}
+
+static bool response_is_negative_cache(const uint8_t *response, size_t response_len) {
+    uint16_t flags;
+    uint16_t an;
+    uint16_t rcode;
+    if (response_len < 12) {
+        return false;
+    }
+    flags = read_u16(response + 2);
+    rcode = flags & 0x000fu;
+    an = read_u16(response + 6);
+    return rcode == 3 || (rcode == 0 && an == 0);
+}
+
+static uint32_t extract_cache_ttl(const uint8_t *packet, size_t len, bool negative) {
     uint16_t qd;
     uint16_t an;
+    uint16_t ns;
     size_t pos = 12;
     uint16_t i;
-    uint32_t min_ttl = 60;
+    uint32_t min_ttl = UINT32_MAX;
     if (len < 12) {
         return 0;
     }
     qd = read_u16(packet + 4);
     an = read_u16(packet + 6);
+    ns = read_u16(packet + 8);
     for (i = 0; i < qd; i++) {
         pos = skip_name(packet, len, pos);
         if (pos + 4 > len) {
@@ -948,37 +1014,48 @@ static uint32_t extract_min_ttl(const uint8_t *packet, size_t len) {
         }
         pos += 4;
     }
-    if (an == 0) {
-        return 30;
-    }
-    min_ttl = UINT32_MAX;
     for (i = 0; i < an; i++) {
-        uint32_t ttl;
+        uint16_t type;
         uint16_t rdlen;
-        pos = skip_name(packet, len, pos);
-        if (pos + 10 > len) {
-            return 30;
+        uint32_t ttl;
+        size_t rdata_pos;
+        if (!read_rr_header(packet, len, &pos, &type, &ttl, &rdlen, &rdata_pos)) {
+            return negative ? DEFAULT_NEGATIVE_TTL : 0;
         }
-        ttl = read_u32(packet + pos + 4);
-        rdlen = read_u16(packet + pos + 8);
-        if (ttl < min_ttl) {
+        if (!negative && ttl < min_ttl) {
             min_ttl = ttl;
         }
-        pos += 10 + rdlen;
-        if (pos > len) {
-            return 30;
+    }
+    if (!negative) {
+        return clamp_cache_ttl(min_ttl, DEFAULT_POSITIVE_TTL);
+    }
+    for (i = 0; i < ns; i++) {
+        uint16_t type;
+        uint16_t rdlen;
+        uint32_t ttl;
+        size_t rdata_pos;
+        size_t rpos;
+        if (!read_rr_header(packet, len, &pos, &type, &ttl, &rdlen, &rdata_pos)) {
+            return DEFAULT_NEGATIVE_TTL;
+        }
+        if (type != 6) {
+            continue;
+        }
+        rpos = skip_name(packet, len, rdata_pos);
+        rpos = skip_name(packet, len, rpos);
+        if (rpos + 20 <= rdata_pos + rdlen && rpos + 20 <= len) {
+            uint32_t minimum = read_u32(packet + rpos + 16);
+            uint32_t negative_ttl = ttl < minimum ? ttl : minimum;
+            if (negative_ttl < min_ttl) {
+                min_ttl = negative_ttl;
+            }
         }
     }
-    if (min_ttl == UINT32_MAX || min_ttl == 0) {
-        return 30;
-    }
-    if (min_ttl > 86400) {
-        return 86400;
-    }
-    return min_ttl;
+    return clamp_cache_ttl(min_ttl, DEFAULT_NEGATIVE_TTL);
 }
 
-static bool cache_lookup(const char *domain, uint16_t qtype, const uint8_t *query, uint8_t *out, size_t *out_len) {
+static bool cache_lookup(const char *domain, uint16_t qtype, const uint8_t *query,
+                         uint8_t *out, size_t *out_len, bool *negative) {
     uint32_t h = hash_domain(domain, qtype);
     uint32_t start;
     uint32_t i;
@@ -1004,6 +1081,9 @@ static bool cache_lookup(const char *domain, uint16_t qtype, const uint8_t *quer
             out[0] = query[0];
             out[1] = query[1];
             *out_len = entry->response_len;
+            if (negative != NULL) {
+                *negative = entry->negative;
+            }
             return true;
         }
     }
@@ -1033,12 +1113,14 @@ static void cache_store(const char *domain, uint16_t qtype, const uint8_t *respo
     uint32_t probe_count;
     time_t now = time(NULL);
     bool evicting = false;
+    bool negative;
     if (g_cache == NULL || g_cache_capacity <= 0
             || response_len < 12 || response_len > MAX_PACKET
             || !response_cacheable(response, response_len)) {
         return;
     }
-    ttl = extract_min_ttl(response, response_len);
+    negative = response_is_negative_cache(response, response_len);
+    ttl = extract_cache_ttl(response, response_len, negative);
     if (ttl == 0) {
         return;
     }
@@ -1077,7 +1159,13 @@ static void cache_store(const char *domain, uint16_t qtype, const uint8_t *respo
     entry->response_len = response_len;
     entry->expires_at = now + ttl;
     entry->used = true;
+    entry->negative = negative;
     g_stats.cache_stores++;
+    if (negative) {
+        g_stats.cache_negative_stores++;
+    } else {
+        g_stats.cache_positive_stores++;
+    }
 }
 
 static int connect_upstream(const upstream_t *upstream, int socktype, int timeout_ms) {
@@ -1686,6 +1774,7 @@ static void handle_dns_query(const config_t *cfg, const uint8_t *query, size_t q
     struct timeval upstream_start;
     struct timeval upstream_end;
     int upstream_latency_ms;
+    bool cache_negative = false;
     gettimeofday(&start, NULL);
     g_stats.queries++;
     if (tcp) {
@@ -1708,11 +1797,16 @@ static void handle_dns_query(const config_t *cfg, const uint8_t *query, size_t q
         finish_dns_query(domain, reason, &start);
         return;
     }
-    if (cache_lookup(domain, qtype, query, response, response_len)) {
+    if (cache_lookup(domain, qtype, query, response, response_len, &cache_negative)) {
         g_stats.cache_hits++;
+        if (cache_negative) {
+            g_stats.cache_negative_hits++;
+        } else {
+            g_stats.cache_positive_hits++;
+        }
         g_stats.allowed++;
-        *action_out = "cache";
-        finish_dns_query(domain, "cache", &start);
+        *action_out = cache_negative ? "cache_negative" : "cache";
+        finish_dns_query(domain, *action_out, &start);
         return;
     }
     g_stats.cache_misses++;
@@ -1896,6 +1990,9 @@ static void write_health_response(int client) {
             "generation=%llu\nupstreams=%d\nsplit_upstreams=%d\nupstream_probe=%s\n"
             "upstream_probe_ms=%d\nupstream_probe_index=%d\nupstream_probe_rcode=%d\n"
             "queries=%llu\nblocked=%llu\nallowed=%llu\ncache_size=%d\ncache_entries=%d\n"
+            "cache_positive_entries=%d\ncache_negative_entries=%d\n"
+            "cache_positive_hits=%llu\ncache_negative_hits=%llu\n"
+            "cache_positive_stores=%llu\ncache_negative_stores=%llu\n"
             "upstream_tcp_fallbacks=%llu\nupstream_truncated_responses=%llu\n"
             "memory_rss_kb=%ld\nmemory_hwm_kb=%ld\ncpu_user_ms=%llu\n"
             "cpu_system_ms=%llu\ncpu_total_ms=%llu\n"
@@ -1916,6 +2013,12 @@ static void write_health_response(int client) {
             (unsigned long long) g_stats.allowed,
             g_cfg.cache_size,
             cache_entry_count(),
+            cache_entry_count_by_type(false),
+            cache_entry_count_by_type(true),
+            (unsigned long long) g_stats.cache_positive_hits,
+            (unsigned long long) g_stats.cache_negative_hits,
+            (unsigned long long) g_stats.cache_positive_stores,
+            (unsigned long long) g_stats.cache_negative_stores,
             (unsigned long long) g_stats.upstream_tcp_fallbacks,
             (unsigned long long) g_stats.upstream_truncated_responses,
             memory_rss_kb,
@@ -2052,7 +2155,11 @@ static void handle_control(int fd) {
                 "memory_rss_kb=%ld\nmemory_hwm_kb=%ld\ncpu_user_ms=%llu\n"
                 "cpu_system_ms=%llu\ncpu_total_ms=%llu\n"
                 "cache_size=%d\ncache_entries=%d\ncache_hits=%llu\ncache_misses=%llu\n"
-                "cache_hit_rate_ppm=%llu\ncache_stores=%llu\ncache_expired=%llu\ncache_evictions=%llu\n"
+                "cache_positive_entries=%d\ncache_negative_entries=%d\n"
+                "cache_positive_hits=%llu\ncache_negative_hits=%llu\n"
+                "cache_hit_rate_ppm=%llu\ncache_stores=%llu\n"
+                "cache_positive_stores=%llu\ncache_negative_stores=%llu\n"
+                "cache_expired=%llu\ncache_evictions=%llu\n"
                 "upstream_requests=%llu\nupstream_successes=%llu\nupstream_failures=%llu\n"
                 "upstream_tcp_fallbacks=%llu\nupstream_truncated_responses=%llu\n"
                 "avg_latency_ms=%llu\nmax_latency_ms=%llu\nupstream_avg_latency_ms=%llu\n"
@@ -2080,9 +2187,15 @@ static void handle_control(int fd) {
                 cache_entry_count(),
                 (unsigned long long) g_stats.cache_hits,
                 (unsigned long long) g_stats.cache_misses,
+                cache_entry_count_by_type(false),
+                cache_entry_count_by_type(true),
+                (unsigned long long) g_stats.cache_positive_hits,
+                (unsigned long long) g_stats.cache_negative_hits,
                 (unsigned long long) div_u64(g_stats.cache_hits * 1000000ULL,
                         g_stats.cache_hits + g_stats.cache_misses),
                 (unsigned long long) g_stats.cache_stores,
+                (unsigned long long) g_stats.cache_positive_stores,
+                (unsigned long long) g_stats.cache_negative_stores,
                 (unsigned long long) g_stats.cache_expired,
                 (unsigned long long) g_stats.cache_evictions,
                 (unsigned long long) g_stats.upstream_requests,
