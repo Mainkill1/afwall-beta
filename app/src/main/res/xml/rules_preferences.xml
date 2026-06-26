@@ -115,6 +115,18 @@
             android:summary="@string/dns_hijack_bypass_uids_summary"
             android:title="@string/dns_hijack_bypass_uids_title" />
 
+        <EditTextPreference
+            android:dependency="enableDnsHijack"
+            android:key="dnsHijackCaptureInterfaces"
+            android:summary="@string/dns_hijack_capture_interfaces_summary"
+            android:title="@string/dns_hijack_capture_interfaces_title" />
+
+        <EditTextPreference
+            android:dependency="enableDnsHijack"
+            android:key="dnsHijackBypassInterfaces"
+            android:summary="@string/dns_hijack_bypass_interfaces_summary"
+            android:title="@string/dns_hijack_bypass_interfaces_title" />
+
         <CheckBoxPreference
             android:defaultValue="true"
             android:dependency="enableDnsHijack"

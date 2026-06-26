@@ -314,6 +314,10 @@
     <string name="dns_hijack_capture_uids_summary">Optional app UID list. When set, only listed UIDs are redirected through DNS filtering.</string>
     <string name="dns_hijack_bypass_uids_title">Bypass DNS capture for UIDs</string>
     <string name="dns_hijack_bypass_uids_summary">Optional app UID list that keeps matching apps on the normal resolver path.</string>
+    <string name="dns_hijack_capture_interfaces_title">Limit DNS capture to interfaces</string>
+    <string name="dns_hijack_capture_interfaces_summary">Optional network interface patterns to capture, such as wlan+, rmnet+, or tun+. When set, other interfaces bypass DNS filtering.</string>
+    <string name="dns_hijack_bypass_interfaces_title">Bypass DNS capture on interfaces</string>
+    <string name="dns_hijack_bypass_interfaces_summary">Optional network interface patterns that should use the normal resolver path.</string>
     <string name="dns_hijack_fail_open_title">Fail open</string>
     <string name="dns_hijack_fail_open_summary">Allow upstream DNS when filtering cannot complete instead of blocking the query.</string>
     <string name="dns_hijack_strict_title">Strict allow/block priority</string>

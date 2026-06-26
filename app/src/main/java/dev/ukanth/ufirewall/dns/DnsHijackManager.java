@@ -76,7 +76,7 @@ public final class DnsHijackManager {
 
         if (!ipv6) {
             ApplicationErrorLog.add(context, "DNS hijacker enabled; daemon start and DNS redirect rules queued");
-            logUidPolicy(context, "DNS per-app redirect policy queued");
+            logRedirectPolicy(context, "DNS redirect policy queued");
             commands.add("#LITERAL# " + shellQuote(supervisorPath(context)) + " start");
             appendBootPersistenceCommand(context, commands);
         }
@@ -175,6 +175,10 @@ public final class DnsHijackManager {
         out.append("split_upstream_entries=").append(countLines(G.dnsHijackSplitUpstreams())).append('\n');
         out.append("capture_uid_entries=").append(parseUidList(G.dnsHijackCaptureUids()).size()).append('\n');
         out.append("bypass_uid_entries=").append(parseUidList(G.dnsHijackBypassUids()).size()).append('\n');
+        out.append("capture_interface_entries=")
+                .append(parseInterfaceList(G.dnsHijackCaptureInterfaces()).size()).append('\n');
+        out.append("bypass_interface_entries=")
+                .append(parseInterfaceList(G.dnsHijackBypassInterfaces()).size()).append('\n');
         out.append("scheduled_blocklist_updates=").append(G.dnsHijackScheduledBlocklistUpdates()).append('\n');
         out.append("blocklist_update_interval_hours=")
                 .append(G.dnsHijackBlocklistUpdateIntervalHours()).append('\n');
@@ -450,32 +454,88 @@ public final class DnsHijackManager {
         return count;
     }
 
-    private static void logUidPolicy(Context context, String prefix) {
+    private static void logRedirectPolicy(Context context, String prefix) {
         int captureCount = parseUidList(G.dnsHijackCaptureUids()).size();
         int bypassCount = parseUidList(G.dnsHijackBypassUids()).size();
-        if (captureCount > 0 || bypassCount > 0) {
+        int captureInterfaceCount = parseInterfaceList(G.dnsHijackCaptureInterfaces()).size();
+        int bypassInterfaceCount = parseInterfaceList(G.dnsHijackBypassInterfaces()).size();
+        if (captureCount > 0 || bypassCount > 0
+                || captureInterfaceCount > 0 || bypassInterfaceCount > 0) {
             ApplicationErrorLog.add(context, prefix + ": capture_uids=" + captureCount
-                    + " bypass_uids=" + bypassCount);
+                    + " bypass_uids=" + bypassCount
+                    + " capture_interfaces=" + captureInterfaceCount
+                    + " bypass_interfaces=" + bypassInterfaceCount);
         }
     }
 
-    private static boolean appendOutputUidPolicyRules(List<String> commands, String appendCommand, int port) {
+    private static boolean appendOutputPolicyRules(List<String> commands, String appendCommand, int port) {
         List<Integer> bypassUids = parseUidList(G.dnsHijackBypassUids());
         List<Integer> captureUids = parseUidList(G.dnsHijackCaptureUids());
+        List<String> bypassInterfaces = parseInterfaceList(G.dnsHijackBypassInterfaces());
+        List<String> captureInterfaces = parseInterfaceList(G.dnsHijackCaptureInterfaces());
+        for (String iface : bypassInterfaces) {
+            commands.add(appendCommand + " -o " + iface + " -j RETURN");
+        }
         for (Integer uid : bypassUids) {
             commands.add(appendCommand + " -m owner --uid-owner " + uid + " -j RETURN");
         }
-        if (captureUids.isEmpty()) {
+        if (captureUids.isEmpty() && captureInterfaces.isEmpty()) {
             return false;
         }
-        for (Integer uid : captureUids) {
-            if (bypassUids.contains(uid)) {
+        if (captureUids.isEmpty()) {
+            for (String iface : captureInterfaces) {
+                appendOutputRedirect(commands, appendCommand, port, null, iface);
+            }
+        } else if (captureInterfaces.isEmpty()) {
+            for (Integer uid : captureUids) {
+                if (!bypassUids.contains(uid)) {
+                    appendOutputRedirect(commands, appendCommand, port, uid, null);
+                }
+            }
+        } else {
+            for (String iface : captureInterfaces) {
+                if (bypassInterfaces.contains(iface)) {
+                    continue;
+                }
+                for (Integer uid : captureUids) {
+                    if (!bypassUids.contains(uid)) {
+                        appendOutputRedirect(commands, appendCommand, port, uid, iface);
+                    }
+                }
+            }
+        }
+        commands.add(appendCommand + " -j RETURN");
+        return true;
+    }
+
+    private static void appendOutputRedirect(List<String> commands, String appendCommand,
+                                             int port, Integer uid, String iface) {
+        String matcher = "";
+        if (iface != null) {
+            matcher += " -o " + iface;
+        }
+        if (uid != null) {
+            matcher += " -m owner --uid-owner " + uid;
+        }
+        commands.add(appendCommand + matcher + " -p udp --dport 53 -j REDIRECT --to-ports " + port);
+        commands.add(appendCommand + matcher + " -p tcp --dport 53 -j REDIRECT --to-ports " + port);
+    }
+
+    private static boolean appendPreroutingPolicyRules(List<String> commands, String appendCommand, int port) {
+        List<String> bypassInterfaces = parseInterfaceList(G.dnsHijackBypassInterfaces());
+        List<String> captureInterfaces = parseInterfaceList(G.dnsHijackCaptureInterfaces());
+        for (String iface : bypassInterfaces) {
+            commands.add(appendCommand + " -i " + iface + " -j RETURN");
+        }
+        if (captureInterfaces.isEmpty()) {
+            return false;
+        }
+        for (String iface : captureInterfaces) {
+            if (bypassInterfaces.contains(iface)) {
                 continue;
             }
-            commands.add(appendCommand + " -p udp --dport 53 -m owner --uid-owner "
-                    + uid + " -j REDIRECT --to-ports " + port);
-            commands.add(appendCommand + " -p tcp --dport 53 -m owner --uid-owner "
-                    + uid + " -j REDIRECT --to-ports " + port);
+            commands.add(appendCommand + " -i " + iface + " -p udp --dport 53 -j REDIRECT --to-ports " + port);
+            commands.add(appendCommand + " -i " + iface + " -p tcp --dport 53 -j REDIRECT --to-ports " + port);
         }
         commands.add(appendCommand + " -j RETURN");
         return true;
@@ -485,12 +545,19 @@ public final class DnsHijackManager {
         StringBuilder script = new StringBuilder();
         List<Integer> bypassUids = parseUidList(G.dnsHijackBypassUids());
         List<Integer> captureUids = parseUidList(G.dnsHijackCaptureUids());
+        List<String> bypassInterfaces = parseInterfaceList(G.dnsHijackBypassInterfaces());
+        List<String> captureInterfaces = parseInterfaceList(G.dnsHijackCaptureInterfaces());
+        for (String iface : bypassInterfaces) {
+            script.append("  ").append(tool).append(" -t nat -A \"")
+                    .append(chainVariable).append("\" -o ")
+                    .append(iface).append(" -j RETURN >> \"$LOG\" 2>&1\n");
+        }
         for (Integer uid : bypassUids) {
             script.append("  ").append(tool).append(" -t nat -A \"")
                     .append(chainVariable).append("\" -m owner --uid-owner ")
                     .append(uid).append(" -j RETURN >> \"$LOG\" 2>&1\n");
         }
-        if (captureUids.isEmpty()) {
+        if (captureUids.isEmpty() && captureInterfaces.isEmpty()) {
             script.append("  ").append(tool).append(" -t nat -A \"")
                     .append(chainVariable)
                     .append("\" -p udp --dport 53 -j REDIRECT --to-ports \"$PORT\" >> \"$LOG\" 2>&1\n");
@@ -499,16 +566,78 @@ public final class DnsHijackManager {
                     .append("\" -p tcp --dport 53 -j REDIRECT --to-ports \"$PORT\" >> \"$LOG\" 2>&1\n");
             return script.toString();
         }
-        for (Integer uid : captureUids) {
-            if (bypassUids.contains(uid)) {
+        if (captureUids.isEmpty()) {
+            for (String iface : captureInterfaces) {
+                appendBootOutputRedirect(script, tool, chainVariable, null, iface);
+            }
+        } else if (captureInterfaces.isEmpty()) {
+            for (Integer uid : captureUids) {
+                if (!bypassUids.contains(uid)) {
+                    appendBootOutputRedirect(script, tool, chainVariable, uid, null);
+                }
+            }
+        } else {
+            for (String iface : captureInterfaces) {
+                if (bypassInterfaces.contains(iface)) {
+                    continue;
+                }
+                for (Integer uid : captureUids) {
+                    if (!bypassUids.contains(uid)) {
+                        appendBootOutputRedirect(script, tool, chainVariable, uid, iface);
+                    }
+                }
+            }
+        }
+        script.append("  ").append(tool).append(" -t nat -A \"")
+                .append(chainVariable).append("\" -j RETURN >> \"$LOG\" 2>&1\n");
+        return script.toString();
+    }
+
+    private static void appendBootOutputRedirect(StringBuilder script, String tool,
+                                                 String chainVariable, Integer uid, String iface) {
+        String matcher = "";
+        if (iface != null) {
+            matcher += " -o " + iface;
+        }
+        if (uid != null) {
+            matcher += " -m owner --uid-owner " + uid;
+        }
+        script.append("  ").append(tool).append(" -t nat -A \"")
+                .append(chainVariable).append("\"").append(matcher)
+                .append(" -p udp --dport 53 -j REDIRECT --to-ports \"$PORT\" >> \"$LOG\" 2>&1\n");
+        script.append("  ").append(tool).append(" -t nat -A \"")
+                .append(chainVariable).append("\"").append(matcher)
+                .append(" -p tcp --dport 53 -j REDIRECT --to-ports \"$PORT\" >> \"$LOG\" 2>&1\n");
+    }
+
+    private static String buildBootPreroutingRedirectRules(String tool, String chainVariable) {
+        StringBuilder script = new StringBuilder();
+        List<String> bypassInterfaces = parseInterfaceList(G.dnsHijackBypassInterfaces());
+        List<String> captureInterfaces = parseInterfaceList(G.dnsHijackCaptureInterfaces());
+        for (String iface : bypassInterfaces) {
+            script.append("  ").append(tool).append(" -t nat -A \"")
+                    .append(chainVariable).append("\" -i ")
+                    .append(iface).append(" -j RETURN >> \"$LOG\" 2>&1\n");
+        }
+        if (captureInterfaces.isEmpty()) {
+            script.append("  ").append(tool).append(" -t nat -A \"")
+                    .append(chainVariable)
+                    .append("\" -p udp --dport 53 -j REDIRECT --to-ports \"$PORT\" >> \"$LOG\" 2>&1\n");
+            script.append("  ").append(tool).append(" -t nat -A \"")
+                    .append(chainVariable)
+                    .append("\" -p tcp --dport 53 -j REDIRECT --to-ports \"$PORT\" >> \"$LOG\" 2>&1\n");
+            return script.toString();
+        }
+        for (String iface : captureInterfaces) {
+            if (bypassInterfaces.contains(iface)) {
                 continue;
             }
             script.append("  ").append(tool).append(" -t nat -A \"")
-                    .append(chainVariable).append("\" -p udp --dport 53 -m owner --uid-owner ")
-                    .append(uid).append(" -j REDIRECT --to-ports \"$PORT\" >> \"$LOG\" 2>&1\n");
+                    .append(chainVariable).append("\" -i ").append(iface)
+                    .append(" -p udp --dport 53 -j REDIRECT --to-ports \"$PORT\" >> \"$LOG\" 2>&1\n");
             script.append("  ").append(tool).append(" -t nat -A \"")
-                    .append(chainVariable).append("\" -p tcp --dport 53 -m owner --uid-owner ")
-                    .append(uid).append(" -j REDIRECT --to-ports \"$PORT\" >> \"$LOG\" 2>&1\n");
+                    .append(chainVariable).append("\" -i ").append(iface)
+                    .append(" -p tcp --dport 53 -j REDIRECT --to-ports \"$PORT\" >> \"$LOG\" 2>&1\n");
         }
         script.append("  ").append(tool).append(" -t nat -A \"")
                 .append(chainVariable).append("\" -j RETURN >> \"$LOG\" 2>&1\n");
@@ -545,6 +674,30 @@ public final class DnsHijackManager {
             }
         }
         return uids;
+    }
+
+    private static List<String> parseInterfaceList(String raw) {
+        List<String> interfaces = new ArrayList<>();
+        if (raw == null || raw.trim().isEmpty()) {
+            return interfaces;
+        }
+        String[] lines = raw.split("\\r?\\n");
+        for (String line : lines) {
+            if (line == null) {
+                continue;
+            }
+            int comment = line.indexOf('#');
+            String clean = comment >= 0 ? line.substring(0, comment) : line;
+            String[] tokens = clean.trim().split("[\\s,|]+");
+            for (String token : tokens) {
+                String iface = token == null ? "" : token.trim();
+                if (iface.matches("[A-Za-z0-9_.:-]{1,31}\\+?")
+                        && !interfaces.contains(iface)) {
+                    interfaces.add(iface);
+                }
+            }
+        }
+        return interfaces;
     }
 
     public static final class QueryEntry {
@@ -701,7 +854,7 @@ public final class DnsHijackManager {
         List<String> commands = new ArrayList<>();
         File bootScript = new File(workDir(context), BOOT_SCRIPT);
         commands.add(shellQuote(supervisorPath(context)) + " start");
-        logUidPolicy(context, "DNS per-app redirect policy repair queued");
+        logRedirectPolicy(context, "DNS redirect policy repair queued");
         appendRootRedirectRepairCommands(context, commands, false);
         if (G.enableIPv6()) {
             appendRootRedirectRepairCommands(context, commands, true);
@@ -730,13 +883,15 @@ public final class DnsHijackManager {
         commands.add(iptables + " -t nat -F " + preChain);
         commands.add(iptables + " -t nat -A " + chain + " -o lo -j RETURN");
         commands.add(iptables + " -t nat -A " + chain + " -m owner --uid-owner 0 -j RETURN");
-        if (!appendOutputUidPolicyRules(commands, iptables + " -t nat -A " + chain, port)) {
+        if (!appendOutputPolicyRules(commands, iptables + " -t nat -A " + chain, port)) {
             commands.add(iptables + " -t nat -A " + chain + " -p udp --dport 53 -j REDIRECT --to-ports " + port);
             commands.add(iptables + " -t nat -A " + chain + " -p tcp --dport 53 -j REDIRECT --to-ports " + port);
         }
         commands.add(iptables + " -t nat -A " + preChain + " -i lo -j RETURN");
-        commands.add(iptables + " -t nat -A " + preChain + " -p udp --dport 53 -j REDIRECT --to-ports " + port);
-        commands.add(iptables + " -t nat -A " + preChain + " -p tcp --dport 53 -j REDIRECT --to-ports " + port);
+        if (!appendPreroutingPolicyRules(commands, iptables + " -t nat -A " + preChain, port)) {
+            commands.add(iptables + " -t nat -A " + preChain + " -p udp --dport 53 -j REDIRECT --to-ports " + port);
+            commands.add(iptables + " -t nat -A " + preChain + " -p tcp --dport 53 -j REDIRECT --to-ports " + port);
+        }
         commands.add(iptables + " -t nat -I OUTPUT 1 -p udp --dport 53 -j " + chain);
         commands.add(iptables + " -t nat -I OUTPUT 1 -p tcp --dport 53 -j " + chain);
         commands.add(iptables + " -t nat -I PREROUTING 1 -p udp --dport 53 -j " + preChain);
@@ -755,14 +910,16 @@ public final class DnsHijackManager {
 
         commands.add("#NOCHK# -t nat -A " + chain + " -o lo -j RETURN");
         commands.add("#NOCHK# -t nat -A " + chain + " -m owner --uid-owner 0 -j RETURN");
-        if (!appendOutputUidPolicyRules(commands, "#NOCHK# -t nat -A " + chain, port)) {
+        if (!appendOutputPolicyRules(commands, "#NOCHK# -t nat -A " + chain, port)) {
             commands.add("#NOCHK# -t nat -A " + chain + " -p udp --dport 53 -j REDIRECT --to-ports " + port);
             commands.add("#NOCHK# -t nat -A " + chain + " -p tcp --dport 53 -j REDIRECT --to-ports " + port);
         }
 
         commands.add("#NOCHK# -t nat -A " + preChain + " -i lo -j RETURN");
-        commands.add("#NOCHK# -t nat -A " + preChain + " -p udp --dport 53 -j REDIRECT --to-ports " + port);
-        commands.add("#NOCHK# -t nat -A " + preChain + " -p tcp --dport 53 -j REDIRECT --to-ports " + port);
+        if (!appendPreroutingPolicyRules(commands, "#NOCHK# -t nat -A " + preChain, port)) {
+            commands.add("#NOCHK# -t nat -A " + preChain + " -p udp --dport 53 -j REDIRECT --to-ports " + port);
+            commands.add("#NOCHK# -t nat -A " + preChain + " -p tcp --dport 53 -j REDIRECT --to-ports " + port);
+        }
 
         commands.add("#NOCHK# -t nat -I OUTPUT 1 -p udp --dport 53 -j " + chain);
         commands.add("#NOCHK# -t nat -I OUTPUT 1 -p tcp --dport 53 -j " + chain);
@@ -931,8 +1088,7 @@ public final class DnsHijackManager {
                 + "  ipt -t nat -A \"$CHAIN4\" -m owner --uid-owner 0 -j RETURN >> \"$LOG\" 2>&1\n"
                 + buildBootOutputRedirectRules("ipt", "$CHAIN4")
                 + "  ipt -t nat -A \"$PRE4\" -i lo -j RETURN >> \"$LOG\" 2>&1\n"
-                + "  ipt -t nat -A \"$PRE4\" -p udp --dport 53 -j REDIRECT --to-ports \"$PORT\" >> \"$LOG\" 2>&1\n"
-                + "  ipt -t nat -A \"$PRE4\" -p tcp --dport 53 -j REDIRECT --to-ports \"$PORT\" >> \"$LOG\" 2>&1\n"
+                + buildBootPreroutingRedirectRules("ipt", "$PRE4")
                 + "  ipt -t nat -I OUTPUT 1 -p udp --dport 53 -j \"$CHAIN4\" >> \"$LOG\" 2>&1\n"
                 + "  ipt -t nat -I OUTPUT 1 -p tcp --dport 53 -j \"$CHAIN4\" >> \"$LOG\" 2>&1\n"
                 + "  ipt -t nat -I PREROUTING 1 -p udp --dport 53 -j \"$PRE4\" >> \"$LOG\" 2>&1\n"
@@ -951,8 +1107,7 @@ public final class DnsHijackManager {
                 + "  ip6t -t nat -A \"$CHAIN6\" -m owner --uid-owner 0 -j RETURN >> \"$LOG\" 2>&1\n"
                 + buildBootOutputRedirectRules("ip6t", "$CHAIN6")
                 + "  ip6t -t nat -A \"$PRE6\" -i lo -j RETURN >> \"$LOG\" 2>&1\n"
-                + "  ip6t -t nat -A \"$PRE6\" -p udp --dport 53 -j REDIRECT --to-ports \"$PORT\" >> \"$LOG\" 2>&1\n"
-                + "  ip6t -t nat -A \"$PRE6\" -p tcp --dport 53 -j REDIRECT --to-ports \"$PORT\" >> \"$LOG\" 2>&1\n"
+                + buildBootPreroutingRedirectRules("ip6t", "$PRE6")
                 + "  ip6t -t nat -I OUTPUT 1 -p udp --dport 53 -j \"$CHAIN6\" >> \"$LOG\" 2>&1\n"
                 + "  ip6t -t nat -I OUTPUT 1 -p tcp --dport 53 -j \"$CHAIN6\" >> \"$LOG\" 2>&1\n"
                 + "  ip6t -t nat -I PREROUTING 1 -p udp --dport 53 -j \"$PRE6\" >> \"$LOG\" 2>&1\n"
