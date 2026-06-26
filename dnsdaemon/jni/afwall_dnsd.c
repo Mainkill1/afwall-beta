@@ -239,6 +239,90 @@ static uint64_t div_u64(uint64_t numerator, uint64_t denominator) {
     return denominator == 0 ? 0 : numerator / denominator;
 }
 
+static long read_proc_status_kb(const char *key) {
+    FILE *fp;
+    char line[256];
+    char prefix[64];
+    size_t prefix_len;
+    long value = 0;
+    if (key == NULL || key[0] == '\0') {
+        return 0;
+    }
+    snprintf(prefix, sizeof(prefix), "%s:", key);
+    prefix_len = strlen(prefix);
+    fp = fopen("/proc/self/status", "r");
+    if (fp == NULL) {
+        return 0;
+    }
+    while (fgets(line, sizeof(line), fp) != NULL) {
+        if (strncmp(line, prefix, prefix_len) == 0) {
+            char *p = line + prefix_len;
+            while (*p && !isdigit((unsigned char) *p)) {
+                p++;
+            }
+            value = strtol(p, NULL, 10);
+            break;
+        }
+    }
+    fclose(fp);
+    return value < 0 ? 0 : value;
+}
+
+static bool read_proc_cpu_ticks(uint64_t *user_ticks, uint64_t *system_ticks) {
+    FILE *fp;
+    char line[1024];
+    char *end_comm;
+    char *token;
+    int field = 3;
+    uint64_t user = 0;
+    uint64_t system = 0;
+    if (user_ticks != NULL) {
+        *user_ticks = 0;
+    }
+    if (system_ticks != NULL) {
+        *system_ticks = 0;
+    }
+    fp = fopen("/proc/self/stat", "r");
+    if (fp == NULL) {
+        return false;
+    }
+    if (fgets(line, sizeof(line), fp) == NULL) {
+        fclose(fp);
+        return false;
+    }
+    fclose(fp);
+    end_comm = strrchr(line, ')');
+    if (end_comm == NULL || end_comm[1] == '\0') {
+        return false;
+    }
+    token = strtok(end_comm + 2, " ");
+    while (token != NULL) {
+        if (field == 14) {
+            user = strtoull(token, NULL, 10);
+        } else if (field == 15) {
+            system = strtoull(token, NULL, 10);
+            break;
+        }
+        field++;
+        token = strtok(NULL, " ");
+    }
+    if (user_ticks != NULL) {
+        *user_ticks = user;
+    }
+    if (system_ticks != NULL) {
+        *system_ticks = system;
+    }
+    return field >= 15;
+}
+
+static uint64_t cpu_ticks_to_ms(uint64_t ticks) {
+    long hz = sysconf(_SC_CLK_TCK);
+    if (hz <= 0) {
+        return 0;
+    }
+    return div_u64(ticks * 1000ULL, (uint64_t) hz);
+}
+
 static void record_query_latency(int latency_ms) {
     uint64_t latency;
     if (latency_ms < 0) {
@@ -1699,7 +1783,18 @@ static void write_health_response(int client) {
     int latency_ms;
     int upstream_index = -1;
     int rcode;
+    long memory_rss_kb = read_proc_status_kb("VmRSS");
+    long memory_hwm_kb = read_proc_status_kb("VmHWM");
+    uint64_t cpu_user_ticks;
+    uint64_t cpu_system_ticks;
+    uint64_t cpu_user_ms;
+    uint64_t cpu_system_ms;
+    uint64_t cpu_total_ms;
 
+    read_proc_cpu_ticks(&cpu_user_ticks, &cpu_system_ticks);
+    cpu_user_ms = cpu_ticks_to_ms(cpu_user_ticks);
+    cpu_system_ms = cpu_ticks_to_ms(cpu_system_ticks);
+    cpu_total_ms = cpu_user_ms + cpu_system_ms;
     query_len = build_health_query(query, sizeof(query));
     gettimeofday(&start, NULL);
     response_len = query_len == 0
@@ -1714,6 +1809,8 @@ static void write_health_response(int client) {
             "generation=%llu\nupstreams=%d\nsplit_upstreams=%d\nupstream_probe=%s\n"
             "upstream_probe_ms=%d\nupstream_probe_index=%d\nupstream_probe_rcode=%d\n"
             "queries=%llu\nblocked=%llu\nallowed=%llu\ncache_size=%d\ncache_entries=%d\n"
+            "memory_rss_kb=%ld\nmemory_hwm_kb=%ld\ncpu_user_ms=%llu\n"
+            "cpu_system_ms=%llu\ncpu_total_ms=%llu\n"
             "exact_index_size=%d\nsuffix_allow_trie_nodes=%d\nsuffix_block_trie_nodes=%d\n"
             "rules_total=%d\n",
             (long) getpid(),
@@ -1731,6 +1828,11 @@ static void write_health_response(int client) {
             (unsigned long long) g_stats.allowed,
             g_cfg.cache_size,
             cache_entry_count(),
+            memory_rss_kb,
+            memory_hwm_kb,
+            (unsigned long long) cpu_user_ms,
+            (unsigned long long) cpu_system_ms,
+            (unsigned long long) cpu_total_ms,
             EXACT_INDEX_SIZE,
             g_cfg.suffix_allow_trie.count,
             g_cfg.suffix_block_trie.count,
@@ -1801,10 +1903,24 @@ static void handle_control(int fd) {
     cmd[n] = '\0';
     trim(cmd);
     if (strcmp(cmd, "status") == 0 || strcmp(cmd, "stats") == 0) {
+        long memory_rss_kb = read_proc_status_kb("VmRSS");
+        long memory_hwm_kb = read_proc_status_kb("VmHWM");
+        uint64_t cpu_user_ticks;
+        uint64_t cpu_system_ticks;
+        uint64_t cpu_user_ms;
+        uint64_t cpu_system_ms;
+        uint64_t cpu_total_ms;
+
+        read_proc_cpu_ticks(&cpu_user_ticks, &cpu_system_ticks);
+        cpu_user_ms = cpu_ticks_to_ms(cpu_user_ticks);
+        cpu_system_ms = cpu_ticks_to_ms(cpu_system_ticks);
+        cpu_total_ms = cpu_user_ms + cpu_system_ms;
         write_control_response(client,
                 "running=1\npid=%ld\nuptime=%llu\ngeneration=%llu\n"
                 "queries=%llu\nudp_queries=%llu\ntcp_queries=%llu\ninvalid_queries=%llu\n"
                 "allowed=%llu\nblocked=%llu\nfail_open_drops=%llu\nfail_closed_blocks=%llu\n"
+                "memory_rss_kb=%ld\nmemory_hwm_kb=%ld\ncpu_user_ms=%llu\n"
+                "cpu_system_ms=%llu\ncpu_total_ms=%llu\n"
                 "cache_size=%d\ncache_entries=%d\ncache_hits=%llu\ncache_misses=%llu\n"
                 "cache_hit_rate_ppm=%llu\ncache_stores=%llu\ncache_expired=%llu\ncache_evictions=%llu\n"
                 "upstream_requests=%llu\nupstream_successes=%llu\nupstream_failures=%llu\n"
@@ -1824,6 +1940,11 @@ static void handle_control(int fd) {
                 (unsigned long long) g_stats.blocked,
                 (unsigned long long) g_stats.fail_open_drops,
                 (unsigned long long) g_stats.fail_closed_blocks,
+                memory_rss_kb,
+                memory_hwm_kb,
+                (unsigned long long) cpu_user_ms,
+                (unsigned long long) cpu_system_ms,
+                (unsigned long long) cpu_total_ms,
                 g_cfg.cache_size,
                 cache_entry_count(),
                 (unsigned long long) g_stats.cache_hits,
