@@ -123,6 +123,8 @@ public final class DnsHijackManager {
         out.append("fail_open=").append(G.dnsHijackFailOpen()).append('\n');
         out.append("strict_mode=").append(G.dnsHijackStrictMode()).append('\n');
         out.append("timeout_ms=").append(G.dnsHijackTimeoutMs()).append('\n');
+        out.append("\n[blocklists]\n");
+        out.append(DnsBlocklistManager.getSummary(context)).append('\n');
         appendFileInfo(out, "work_dir", dir);
         appendFileInfo(out, "daemon", daemon);
         appendFileInfo(out, "supervisor", supervisor);
@@ -331,8 +333,16 @@ public final class DnsHijackManager {
         appendConfigEntries(config, "block_suffix", G.dnsHijackBlockSuffix());
         appendConfigEntries(config, "allow_regex", G.dnsHijackAllowRegex());
         appendConfigEntries(config, "block_regex", G.dnsHijackBlockRegex());
+        appendConfigFile(config, "block_exact_file", DnsBlocklistManager.exactBlockFile(context));
+        appendConfigFile(config, "block_suffix_file", DnsBlocklistManager.suffixBlockFile(context));
 
         return config.toString();
+    }
+
+    private static void appendConfigFile(StringBuilder config, String key, File file) {
+        if (file.exists() && file.length() > 0) {
+            config.append(key).append('=').append(file.getAbsolutePath()).append('\n');
+        }
     }
 
     private static void appendConfigEntries(StringBuilder config, String key, String raw) {

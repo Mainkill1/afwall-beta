@@ -1,14 +1,21 @@
 package dev.ukanth.ufirewall.preferences;
 
 import android.app.Activity;
+import android.content.ActivityNotFoundException;
 import android.content.Context;
+import android.content.Intent;
 import android.content.SharedPreferences;
+import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.preference.CheckBoxPreference;
 import android.preference.Preference;
 import android.preference.PreferenceFragment;
 import android.preference.SwitchPreference;
+
+import com.afollestad.materialdialogs.MaterialDialog;
 
 import java.io.File;
 import java.util.regex.Matcher;
@@ -16,6 +23,7 @@ import java.util.regex.Pattern;
 
 import dev.ukanth.ufirewall.Api;
 import dev.ukanth.ufirewall.R;
+import dev.ukanth.ufirewall.dns.DnsBlocklistManager;
 import dev.ukanth.ufirewall.dns.DnsHijackManager;
 import dev.ukanth.ufirewall.service.RootCommand;
 import dev.ukanth.ufirewall.util.G;
@@ -23,6 +31,7 @@ import dev.ukanth.ufirewall.util.G;
 public class RulesPreferenceFragment extends PreferenceFragment implements
         SharedPreferences.OnSharedPreferenceChangeListener {
 
+    private static final int REQUEST_DNS_BLOCKLIST_FILE = 5301;
     private Context ctx;
 
 
@@ -45,6 +54,34 @@ public class RulesPreferenceFragment extends PreferenceFragment implements
         } else {
             CheckBoxPreference roamPreference = (CheckBoxPreference) findPreference("enableRoam");
             roamPreference.setEnabled(true);
+        }
+
+        wireDnsBlocklistActions();
+    }
+
+    private void wireDnsBlocklistActions() {
+        Preference importBlocklist = findPreference("dnsHijackImportBlocklist");
+        if (importBlocklist != null) {
+            importBlocklist.setOnPreferenceClickListener(preference -> {
+                openDnsBlocklistPicker();
+                return true;
+            });
+        }
+
+        Preference updateBlocklists = findPreference("dnsHijackUpdateBlocklists");
+        if (updateBlocklists != null) {
+            updateBlocklists.setOnPreferenceClickListener(preference -> {
+                runDnsBlocklistUpdate();
+                return true;
+            });
+        }
+
+        Preference rollbackBlocklist = findPreference("dnsHijackRollbackBlocklist");
+        if (rollbackBlocklist != null) {
+            rollbackBlocklist.setOnPreferenceClickListener(preference -> {
+                runDnsBlocklistRollback();
+                return true;
+            });
         }
     }
 
@@ -138,6 +175,70 @@ public class RulesPreferenceFragment extends PreferenceFragment implements
         if(Build.VERSION.SDK_INT < Build.VERSION_CODES.M){
             ctx = activity;
         }
+    }
+
+    private void openDnsBlocklistPicker() {
+        Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+        intent.addCategory(Intent.CATEGORY_OPENABLE);
+        intent.setType("text/*");
+        try {
+            startActivityForResult(intent, REQUEST_DNS_BLOCKLIST_FILE);
+        } catch (ActivityNotFoundException e) {
+            Intent fallback = new Intent(Intent.ACTION_GET_CONTENT);
+            fallback.addCategory(Intent.CATEGORY_OPENABLE);
+            fallback.setType("*/*");
+            startActivityForResult(fallback, REQUEST_DNS_BLOCKLIST_FILE);
+        }
+    }
+
+    private void runDnsBlocklistUpdate() {
+        runBlocklistTask(() -> DnsBlocklistManager.updateFromConfiguredUrls(ctx));
+    }
+
+    private void runDnsBlocklistRollback() {
+        runBlocklistTask(() -> DnsBlocklistManager.restorePrevious(ctx));
+    }
+
+    private void runBlocklistTask(BlocklistTask task) {
+        new Thread(() -> {
+            DnsBlocklistManager.Result result = task.run();
+            new Handler(Looper.getMainLooper()).post(() -> handleBlocklistResult(result));
+        }).start();
+    }
+
+    private void handleBlocklistResult(DnsBlocklistManager.Result result) {
+        if (getActivity() == null || result == null) {
+            return;
+        }
+        if (!result.failed) {
+            Api.setRulesUpToDate(false);
+            if (G.enableDnsHijack()) {
+                DnsHijackManager.requestReload(ctx);
+            }
+            Api.toast(ctx, getString(R.string.dns_hijack_blocklist_active));
+        } else {
+            Api.toast(ctx, getString(R.string.dns_hijack_blocklist_failed));
+        }
+        new MaterialDialog.Builder(getActivity())
+                .title(result.failed ? R.string.dns_hijack_blocklist_failed : R.string.dns_hijack_blocklist_active)
+                .content(result.summary())
+                .positiveText(R.string.OK)
+                .show();
+    }
+
+    @Override
+    public void onActivityResult(int requestCode, int resultCode, Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode == REQUEST_DNS_BLOCKLIST_FILE && resultCode == Activity.RESULT_OK && data != null) {
+            Uri uri = data.getData();
+            if (uri != null) {
+                runBlocklistTask(() -> DnsBlocklistManager.importFromUri(ctx, uri));
+            }
+        }
+    }
+
+    private interface BlocklistTask {
+        DnsBlocklistManager.Result run();
     }
 
     @Override
@@ -333,6 +434,7 @@ public class RulesPreferenceFragment extends PreferenceFragment implements
                 || key.equals("dnsHijackBlockExact")
                 || key.equals("dnsHijackBlockSuffix")
                 || key.equals("dnsHijackAllowRegex")
-                || key.equals("dnsHijackBlockRegex"));
+                || key.equals("dnsHijackBlockRegex")
+                || key.equals("dnsHijackBlocklistUrls"));
     }
 }

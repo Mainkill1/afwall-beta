@@ -31,7 +31,7 @@
 
 #define MAX_PACKET 4096
 #define MAX_DOMAIN 256
-#define MAX_RULES 8192
+#define MAX_RULES 32768
 #define MAX_REGEX 128
 #define MAX_UPSTREAMS 8
 #define CACHE_SIZE 1024
@@ -678,6 +678,9 @@ static bool parse_upstream(config_t *cfg, const char *value) {
     return true;
 }
 
+static void load_string_rule_file(string_rule_t *rules, int *count, const char *path);
+static void load_regex_rule_file(regex_rule_t *rules, int *count, const char *path);
+
 static bool load_config(const char *path, config_t *new_cfg) {
     FILE *fp;
     char line[1024];
@@ -727,16 +730,28 @@ static bool load_config(const char *path, config_t *new_cfg) {
             parse_upstream(new_cfg, value);
         } else if (strcmp(key, "allow_exact") == 0) {
             add_string_rule(new_cfg->exact_allow, &new_cfg->exact_allow_count, value);
+        } else if (strcmp(key, "allow_exact_file") == 0) {
+            load_string_rule_file(new_cfg->exact_allow, &new_cfg->exact_allow_count, value);
         } else if (strcmp(key, "allow_suffix") == 0) {
             add_string_rule(new_cfg->suffix_allow, &new_cfg->suffix_allow_count, value);
+        } else if (strcmp(key, "allow_suffix_file") == 0) {
+            load_string_rule_file(new_cfg->suffix_allow, &new_cfg->suffix_allow_count, value);
         } else if (strcmp(key, "block_exact") == 0) {
             add_string_rule(new_cfg->exact_block, &new_cfg->exact_block_count, value);
+        } else if (strcmp(key, "block_exact_file") == 0) {
+            load_string_rule_file(new_cfg->exact_block, &new_cfg->exact_block_count, value);
         } else if (strcmp(key, "block_suffix") == 0) {
             add_string_rule(new_cfg->suffix_block, &new_cfg->suffix_block_count, value);
+        } else if (strcmp(key, "block_suffix_file") == 0) {
+            load_string_rule_file(new_cfg->suffix_block, &new_cfg->suffix_block_count, value);
         } else if (strcmp(key, "allow_regex") == 0) {
             add_regex_rule(new_cfg->regex_allow, &new_cfg->regex_allow_count, value);
+        } else if (strcmp(key, "allow_regex_file") == 0) {
+            load_regex_rule_file(new_cfg->regex_allow, &new_cfg->regex_allow_count, value);
         } else if (strcmp(key, "block_regex") == 0) {
             add_regex_rule(new_cfg->regex_block, &new_cfg->regex_block_count, value);
+        } else if (strcmp(key, "block_regex_file") == 0) {
+            load_regex_rule_file(new_cfg->regex_block, &new_cfg->regex_block_count, value);
         }
     }
     fclose(fp);
@@ -747,6 +762,46 @@ static bool load_config(const char *path, config_t *new_cfg) {
     }
     new_cfg->generation = g_cfg.generation + 1;
     return true;
+}
+
+static void load_string_rule_file(string_rule_t *rules, int *count, const char *path) {
+    FILE *fp;
+    char line[1024];
+    if (path == NULL || path[0] == '\0') {
+        return;
+    }
+    fp = fopen(path, "r");
+    if (fp == NULL) {
+        return;
+    }
+    while (fgets(line, sizeof(line), fp) != NULL) {
+        trim(line);
+        if (line[0] == '\0' || line[0] == '#') {
+            continue;
+        }
+        add_string_rule(rules, count, line);
+    }
+    fclose(fp);
+}
+
+static void load_regex_rule_file(regex_rule_t *rules, int *count, const char *path) {
+    FILE *fp;
+    char line[1024];
+    if (path == NULL || path[0] == '\0') {
+        return;
+    }
+    fp = fopen(path, "r");
+    if (fp == NULL) {
+        return;
+    }
+    while (fgets(line, sizeof(line), fp) != NULL) {
+        trim(line);
+        if (line[0] == '\0' || line[0] == '#') {
+            continue;
+        }
+        add_regex_rule(rules, count, line);
+    }
+    fclose(fp);
 }
 
 static bool reload_config(void) {

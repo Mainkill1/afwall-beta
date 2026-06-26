@@ -147,6 +147,30 @@
             android:key="dnsHijackBlockRegex"
             android:summary="@string/dns_hijack_block_regex_summary"
             android:title="@string/dns_hijack_block_regex_title" />
+
+        <EditTextPreference
+            android:dependency="enableDnsHijack"
+            android:key="dnsHijackBlocklistUrls"
+            android:summary="@string/dns_hijack_blocklist_urls_summary"
+            android:title="@string/dns_hijack_blocklist_urls_title" />
+
+        <Preference
+            android:dependency="enableDnsHijack"
+            android:key="dnsHijackImportBlocklist"
+            android:summary="@string/dns_hijack_import_blocklist_summary"
+            android:title="@string/dns_hijack_import_blocklist_title" />
+
+        <Preference
+            android:dependency="enableDnsHijack"
+            android:key="dnsHijackUpdateBlocklists"
+            android:summary="@string/dns_hijack_update_blocklists_summary"
+            android:title="@string/dns_hijack_update_blocklists_title" />
+
+        <Preference
+            android:dependency="enableDnsHijack"
+            android:key="dnsHijackRollbackBlocklist"
+            android:summary="@string/dns_hijack_rollback_blocklist_summary"
+            android:title="@string/dns_hijack_rollback_blocklist_title" />
     </PreferenceCategory>
 
     <PreferenceCategory android:title="@string/ui_chains_title">

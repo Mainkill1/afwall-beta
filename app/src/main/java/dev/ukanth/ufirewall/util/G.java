@@ -182,6 +182,7 @@ public class G extends Application implements Application.ActivityLifecycleCallb
     private static final String DNS_HIJACK_BLOCK_SUFFIX = "dnsHijackBlockSuffix";
     private static final String DNS_HIJACK_ALLOW_REGEX = "dnsHijackAllowRegex";
     private static final String DNS_HIJACK_BLOCK_REGEX = "dnsHijackBlockRegex";
+    private static final String DNS_HIJACK_BLOCKLIST_URLS = "dnsHijackBlocklistUrls";
 
     private static final String SHOW_ALL_APPS = "showAllApps";
 
@@ -318,6 +319,10 @@ public class G extends Application implements Application.ActivityLifecycleCallb
 
     public static String dnsHijackBlockRegex() {
         return gPrefs.getString(DNS_HIJACK_BLOCK_REGEX, "");
+    }
+
+    public static String dnsHijackBlocklistUrls() {
+        return gPrefs.getString(DNS_HIJACK_BLOCKLIST_URLS, "");
     }
 
     private static int readIntPreference(String key, int fallback, int min, int max) {

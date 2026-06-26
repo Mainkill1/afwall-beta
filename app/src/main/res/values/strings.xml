@@ -323,6 +323,16 @@
     <string name="dns_hijack_allow_regex_summary">Regular expressions that allow matching queries.</string>
     <string name="dns_hijack_block_regex_title">Regex block rules</string>
     <string name="dns_hijack_block_regex_summary">Regular expressions that block matching queries.</string>
+    <string name="dns_hijack_blocklist_urls_title">Blocklist URLs</string>
+    <string name="dns_hijack_blocklist_urls_summary">One remote hosts, domain, Pi-hole, or AdBlock-style list URL per line.</string>
+    <string name="dns_hijack_import_blocklist_title">Import DNS blocklist file</string>
+    <string name="dns_hijack_import_blocklist_summary">Use the system picker to import a hosts, domain, Pi-hole, or AdBlock-style list.</string>
+    <string name="dns_hijack_update_blocklists_title">Update DNS blocklists</string>
+    <string name="dns_hijack_update_blocklists_summary">Download configured URLs, compile them, and reload the daemon.</string>
+    <string name="dns_hijack_rollback_blocklist_title">Rollback DNS blocklist</string>
+    <string name="dns_hijack_rollback_blocklist_summary">Restore the previous compiled DNS blocklist files.</string>
+    <string name="dns_hijack_blocklist_active">DNS blocklist activated. Reapply firewall rules if DNS capture is not already running.</string>
+    <string name="dns_hijack_blocklist_failed">DNS blocklist update failed.</string>
     <string name="dns_diagnostics_title">DNS daemon diagnostics</string>
     <string name="dns_diagnostics_loading">Loading DNS daemon diagnostics</string>
     <string name="dns_diagnostics_reload">Reload DNS daemon</string>
