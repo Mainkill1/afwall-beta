@@ -95,6 +95,7 @@ typedef struct {
 } stats_t;
 
 typedef struct {
+    uint64_t seq;
     char domain[MAX_DOMAIN];
     char action[16];
     int latency_ms;
@@ -116,6 +117,8 @@ static config_t g_cfg;
 static stats_t g_stats;
 static log_entry_t g_logs[LOG_RING];
 static int g_log_pos = 0;
+static uint64_t g_log_seq = 0;
+static uint64_t g_log_flushed_seq = 0;
 static cache_entry_t g_cache[CACHE_SIZE];
 static char g_config_path[256];
 
@@ -180,11 +183,49 @@ static uint32_t hash_domain(const char *domain, uint16_t qtype) {
 
 static void add_log(const char *domain, const char *action, int latency_ms) {
     log_entry_t *entry = &g_logs[g_log_pos % LOG_RING];
+    entry->seq = ++g_log_seq;
     safe_copy(entry->domain, sizeof(entry->domain), domain);
     safe_copy(entry->action, sizeof(entry->action), action);
     entry->latency_ms = latency_ms;
     entry->timestamp = now_seconds();
     g_log_pos = (g_log_pos + 1) % LOG_RING;
+}
+
+static void flush_logs(void) {
+    FILE *fp;
+    uint64_t first_seq;
+    uint64_t seq;
+    int i;
+
+    if (g_cfg.log_file[0] == '\0' || g_log_flushed_seq == g_log_seq) {
+        return;
+    }
+
+    first_seq = g_log_flushed_seq + 1;
+    if (g_log_seq >= LOG_RING && first_seq < g_log_seq - LOG_RING + 1) {
+        first_seq = g_log_seq - LOG_RING + 1;
+    }
+
+    fp = fopen(g_cfg.log_file, "a");
+    if (fp == NULL) {
+        return;
+    }
+
+    for (seq = first_seq; seq <= g_log_seq; seq++) {
+        for (i = 0; i < LOG_RING; i++) {
+            const log_entry_t *entry = &g_logs[i];
+            if (entry->seq == seq) {
+                fprintf(fp, "%llu %s %s %dms\n",
+                        (unsigned long long) entry->timestamp,
+                        entry->action,
+                        entry->domain,
+                        entry->latency_ms);
+                break;
+            }
+        }
+    }
+    fclose(fp);
+    g_log_flushed_seq = g_log_seq;
 }
 
 static void free_regex_rules(config_t *cfg) {
@@ -1033,19 +1074,22 @@ int main(int argc, char **argv) {
     }
     while (g_running) {
         fd_set readfds;
+        struct timeval timeout;
         int maxfd = udp_fd;
         int ready;
         FD_ZERO(&readfds);
         FD_SET(udp_fd, &readfds);
         FD_SET(tcp_fd, &readfds);
         FD_SET(control_fd, &readfds);
+        timeout.tv_sec = 1;
+        timeout.tv_usec = 0;
         if (tcp_fd > maxfd) {
             maxfd = tcp_fd;
         }
         if (control_fd > maxfd) {
             maxfd = control_fd;
         }
-        ready = select(maxfd + 1, &readfds, NULL, NULL, NULL);
+        ready = select(maxfd + 1, &readfds, NULL, NULL, &timeout);
         if (ready < 0) {
             if (errno == EINTR) {
                 continue;
@@ -1061,7 +1105,9 @@ int main(int argc, char **argv) {
         if (FD_ISSET(control_fd, &readfds)) {
             handle_control(control_fd);
         }
+        flush_logs();
     }
+    flush_logs();
     close(udp_fd);
     close(tcp_fd);
     close(control_fd);
