@@ -245,6 +245,12 @@
 
         <Preference
             android:dependency="enableDnsHijack"
+            android:key="dnsHijackPasteBlocklist"
+            android:summary="@string/dns_hijack_paste_blocklist_summary"
+            android:title="@string/dns_hijack_paste_blocklist_title" />
+
+        <Preference
+            android:dependency="enableDnsHijack"
             android:key="dnsHijackUpdateBlocklists"
             android:summary="@string/dns_hijack_update_blocklists_summary"
             android:title="@string/dns_hijack_update_blocklists_title" />

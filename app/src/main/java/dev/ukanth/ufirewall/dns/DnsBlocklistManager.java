@@ -4,6 +4,7 @@ import android.content.Context;
 import android.net.Uri;
 import android.util.Log;
 
+import java.io.ByteArrayInputStream;
 import java.io.BufferedReader;
 import java.io.File;
 import java.io.FileInputStream;
@@ -56,6 +57,26 @@ public final class DnsBlocklistManager {
             result.message = e.getMessage();
             Log.e(TAG, "DNS blocklist import failed", e);
             ApplicationErrorLog.add(context, "DNS blocklist import failed: " + e.getMessage());
+            return result;
+        }
+    }
+
+    public static Result importFromText(Context context, String text) {
+        Result result = new Result("paste import");
+        if (text == null || text.trim().isEmpty()) {
+            result.failed = true;
+            result.message = "No DNS blocklist text was provided";
+            return result;
+        }
+        try (InputStream input = new ByteArrayInputStream(text.getBytes(StandardCharsets.UTF_8))) {
+            parseStream(input, result);
+            activate(context, result);
+            return result;
+        } catch (IOException e) {
+            result.failed = true;
+            result.message = e.getMessage();
+            Log.e(TAG, "DNS blocklist paste import failed", e);
+            ApplicationErrorLog.add(context, "DNS blocklist paste import failed: " + e.getMessage());
             return result;
         }
     }

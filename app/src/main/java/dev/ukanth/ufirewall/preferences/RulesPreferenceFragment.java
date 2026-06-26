@@ -1,6 +1,8 @@
 package dev.ukanth.ufirewall.preferences;
 
 import android.app.Activity;
+import android.content.ClipData;
+import android.content.ClipboardManager;
 import android.content.ActivityNotFoundException;
 import android.content.Context;
 import android.content.Intent;
@@ -65,6 +67,14 @@ public class RulesPreferenceFragment extends PreferenceFragment implements
         if (importBlocklist != null) {
             importBlocklist.setOnPreferenceClickListener(preference -> {
                 openDnsBlocklistPicker();
+                return true;
+            });
+        }
+
+        Preference pasteBlocklist = findPreference("dnsHijackPasteBlocklist");
+        if (pasteBlocklist != null) {
+            pasteBlocklist.setOnPreferenceClickListener(preference -> {
+                showDnsBlocklistPasteDialog();
                 return true;
             });
         }
@@ -219,6 +229,36 @@ public class RulesPreferenceFragment extends PreferenceFragment implements
 
     private void runDnsBlocklistUpdate() {
         runBlocklistTask(() -> DnsBlocklistManager.updateFromConfiguredUrls(ctx));
+    }
+
+    private void showDnsBlocklistPasteDialog() {
+        if (getActivity() == null) {
+            return;
+        }
+        new MaterialDialog.Builder(getActivity())
+                .title(R.string.dns_hijack_paste_blocklist_title)
+                .input(getString(R.string.dns_hijack_paste_blocklist_hint),
+                        getClipboardText(), (dialog, input) -> {
+                            String text = input == null ? "" : input.toString();
+                            runBlocklistTask(() -> DnsBlocklistManager.importFromText(ctx, text));
+                        })
+                .positiveText(R.string.imports)
+                .negativeText(R.string.Cancel)
+                .show();
+    }
+
+    private String getClipboardText() {
+        if (ctx == null) {
+            return "";
+        }
+        ClipboardManager clipboard = (ClipboardManager) ctx.getSystemService(Context.CLIPBOARD_SERVICE);
+        if (clipboard == null || !clipboard.hasPrimaryClip() || clipboard.getPrimaryClip() == null
+                || clipboard.getPrimaryClip().getItemCount() == 0) {
+            return "";
+        }
+        ClipData.Item item = clipboard.getPrimaryClip().getItemAt(0);
+        CharSequence text = item == null ? null : item.coerceToText(ctx);
+        return text == null ? "" : text.toString();
     }
 
     private void runDnsBlocklistRollback() {
