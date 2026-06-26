@@ -337,9 +337,11 @@
     <string name="dns_hijack_blocklist_failed">DNS blocklist update failed.</string>
     <string name="dns_diagnostics_title">DNS daemon diagnostics</string>
     <string name="dns_diagnostics_loading">Loading DNS daemon diagnostics</string>
+    <string name="dns_diagnostics_repair">Repair DNS protection</string>
     <string name="dns_diagnostics_reload">Reload DNS daemon</string>
     <string name="dns_diagnostics_restart">Restart DNS daemon</string>
     <string name="dns_diagnostics_stop">Stop DNS daemon</string>
+    <string name="dns_diagnostics_repair_queued">DNS protection repair requested.</string>
     <string name="dns_diagnostics_reload_queued">DNS daemon reload requested.</string>
     <string name="dns_diagnostics_restart_queued">DNS daemon restart requested.</string>
     <string name="dns_diagnostics_stop_queued">DNS daemon stop requested.</string>

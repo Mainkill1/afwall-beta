@@ -116,6 +116,29 @@ public final class DnsHijackManager {
                 .run(context.getApplicationContext(), commands);
     }
 
+    public static void repairDnsProtection(Context context, RootCommand.Callback callback) {
+        if (context == null) {
+            return;
+        }
+        if (!G.enableDnsHijack()) {
+            failSupervisorAction(context, callback, "DNS hijacker repair requested while DNS capture is disabled");
+            return;
+        }
+        if (!prepareDaemon(context)) {
+            failSupervisorAction(context, callback, "DNS hijacker repair requested but daemon files could not be prepared");
+            return;
+        }
+
+        List<String> commands = buildRootRepairCommands(context);
+        ApplicationErrorLog.add(context, "DNS hijacker repair queued: daemon start and DNS redirect reinstall");
+        new RootCommand()
+                .setLogging(true)
+                .setReopenShell(true)
+                .setFailureToast(R.string.error_apply)
+                .setCallback(callback)
+                .run(context.getApplicationContext(), commands);
+    }
+
     public static String collectLocalDiagnostics(Context context) {
         StringBuilder out = new StringBuilder();
         File dir = workDir(context);
@@ -372,12 +395,59 @@ public final class DnsHijackManager {
                 + "true";
     }
 
-    private static void appendRemoveBootPersistenceCommand(List<String> commands) {
-        commands.add("#LITERAL# for FILE in /data/adb/service.d/" + BOOT_SCRIPT
+    private static String buildRemoveBootPersistenceCommand() {
+        return "for FILE in /data/adb/service.d/" + BOOT_SCRIPT
                 + " /su/su.d/" + BOOT_SCRIPT
                 + " /system/su.d/" + BOOT_SCRIPT
                 + " /system/etc/init.d/" + BOOT_SCRIPT
-                + "; do [ -e \"$FILE\" ] && rm -f \"$FILE\" 2>/dev/null; done; true");
+                + "; do [ -e \"$FILE\" ] && rm -f \"$FILE\" 2>/dev/null; done; true";
+    }
+
+    private static void appendRemoveBootPersistenceCommand(List<String> commands) {
+        commands.add("#LITERAL# " + buildRemoveBootPersistenceCommand());
+    }
+
+    private static List<String> buildRootRepairCommands(Context context) {
+        List<String> commands = new ArrayList<>();
+        File bootScript = new File(workDir(context), BOOT_SCRIPT);
+        commands.add(shellQuote(supervisorPath(context)) + " start");
+        appendRootRedirectRepairCommands(context, commands, false);
+        if (G.enableIPv6()) {
+            appendRootRedirectRepairCommands(context, commands, true);
+        }
+        if (G.dnsHijackBootPersistence()) {
+            commands.add(buildInstallBootPersistenceCommand(bootScript));
+        } else {
+            commands.add(buildRemoveBootPersistenceCommand());
+        }
+        return commands;
+    }
+
+    private static void appendRootRedirectRepairCommands(Context context, List<String> commands, boolean ipv6) {
+        String iptables = shellQuote(Api.getBinaryPath(context, ipv6));
+        int port = G.dnsHijackPort(DEFAULT_PORT);
+        String chain = ipv6 ? CHAIN_V6 : CHAIN_V4;
+        String preChain = ipv6 ? CHAIN_V6_PRE : CHAIN_V4_PRE;
+
+        commands.add(iptables + " -t nat -D OUTPUT -p udp --dport 53 -j " + chain + " >/dev/null 2>&1 || true");
+        commands.add(iptables + " -t nat -D OUTPUT -p tcp --dport 53 -j " + chain + " >/dev/null 2>&1 || true");
+        commands.add(iptables + " -t nat -D PREROUTING -p udp --dport 53 -j " + preChain + " >/dev/null 2>&1 || true");
+        commands.add(iptables + " -t nat -D PREROUTING -p tcp --dport 53 -j " + preChain + " >/dev/null 2>&1 || true");
+        commands.add(iptables + " -t nat -N " + chain + " >/dev/null 2>&1 || true");
+        commands.add(iptables + " -t nat -N " + preChain + " >/dev/null 2>&1 || true");
+        commands.add(iptables + " -t nat -F " + chain);
+        commands.add(iptables + " -t nat -F " + preChain);
+        commands.add(iptables + " -t nat -A " + chain + " -o lo -j RETURN");
+        commands.add(iptables + " -t nat -A " + chain + " -m owner --uid-owner 0 -j RETURN");
+        commands.add(iptables + " -t nat -A " + chain + " -p udp --dport 53 -j REDIRECT --to-ports " + port);
+        commands.add(iptables + " -t nat -A " + chain + " -p tcp --dport 53 -j REDIRECT --to-ports " + port);
+        commands.add(iptables + " -t nat -A " + preChain + " -i lo -j RETURN");
+        commands.add(iptables + " -t nat -A " + preChain + " -p udp --dport 53 -j REDIRECT --to-ports " + port);
+        commands.add(iptables + " -t nat -A " + preChain + " -p tcp --dport 53 -j REDIRECT --to-ports " + port);
+        commands.add(iptables + " -t nat -I OUTPUT 1 -p udp --dport 53 -j " + chain);
+        commands.add(iptables + " -t nat -I OUTPUT 1 -p tcp --dport 53 -j " + chain);
+        commands.add(iptables + " -t nat -I PREROUTING 1 -p udp --dport 53 -j " + preChain);
+        commands.add(iptables + " -t nat -I PREROUTING 1 -p tcp --dport 53 -j " + preChain);
     }
 
     private static void appendRedirectRules(List<String> commands, boolean ipv6) {

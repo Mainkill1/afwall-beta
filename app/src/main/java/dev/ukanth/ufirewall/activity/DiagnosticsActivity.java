@@ -15,6 +15,7 @@ public class DiagnosticsActivity extends RulesActivity {
     private static final int MENU_DNS_RELOAD = 101;
     private static final int MENU_DNS_RESTART = 102;
     private static final int MENU_DNS_STOP = 103;
+    private static final int MENU_DNS_REPAIR = 104;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -25,6 +26,7 @@ public class DiagnosticsActivity extends RulesActivity {
     @Override
     protected void populateMenu(SubMenu sub) {
         super.populateMenu(sub);
+        sub.add(0, MENU_DNS_REPAIR, 0, R.string.dns_diagnostics_repair).setIcon(R.drawable.ic_apply_menu);
         sub.add(0, MENU_DNS_RELOAD, 0, R.string.dns_diagnostics_reload).setIcon(R.drawable.ic_refresh);
         sub.add(0, MENU_DNS_RESTART, 0, R.string.dns_diagnostics_restart).setIcon(R.drawable.ic_apply_menu);
         sub.add(0, MENU_DNS_STOP, 0, R.string.dns_diagnostics_stop).setIcon(R.drawable.ic_clearlog);
@@ -81,6 +83,9 @@ public class DiagnosticsActivity extends RulesActivity {
     @Override
     public boolean onOptionsItemSelected(MenuItem item) {
         switch (item.getItemId()) {
+            case MENU_DNS_REPAIR:
+                runDnsRepair();
+                return true;
             case MENU_DNS_RELOAD:
                 runDnsAction("reload", getString(R.string.dns_diagnostics_reload_queued));
                 return true;
@@ -93,6 +98,24 @@ public class DiagnosticsActivity extends RulesActivity {
             default:
                 return super.onOptionsItemSelected(item);
         }
+    }
+
+    private void runDnsRepair() {
+        String successMessage = getString(R.string.dns_diagnostics_repair_queued);
+        updateLoadingState(successMessage);
+        DnsHijackManager.repairDnsProtection(this, new RootCommand.Callback() {
+            @Override
+            public void cbFunc(RootCommand state) {
+                runOnUiThread(() -> {
+                    if (state.exitCode == 0) {
+                        Api.toast(DiagnosticsActivity.this, successMessage);
+                    } else {
+                        Api.toast(DiagnosticsActivity.this, getString(R.string.error_apply));
+                    }
+                    populateData(DiagnosticsActivity.this);
+                });
+            }
+        });
     }
 
     private void runDnsAction(String action, String successMessage) {
