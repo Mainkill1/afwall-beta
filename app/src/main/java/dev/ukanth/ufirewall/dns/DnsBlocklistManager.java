@@ -4,8 +4,14 @@ import android.content.Context;
 import android.net.Uri;
 import android.util.Log;
 
+import org.json.JSONArray;
+import org.json.JSONException;
+import org.json.JSONObject;
+
+import java.io.BufferedInputStream;
 import java.io.ByteArrayInputStream;
 import java.io.BufferedReader;
+import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
@@ -18,6 +24,7 @@ import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.text.SimpleDateFormat;
 import java.util.Date;
+import java.util.Iterator;
 import java.util.LinkedHashSet;
 import java.util.Locale;
 import java.util.Set;
@@ -35,6 +42,11 @@ public final class DnsBlocklistManager {
     private static final String EXACT_BACKUP = "block_exact.previous.txt";
     private static final String SUFFIX_BACKUP = "block_suffix.previous.txt";
     private static final String META_FILE = "metadata.txt";
+    private static final int JSON_DETECT_BYTES = 8192;
+    private static final int MAX_JSON_BUNDLE_BYTES = 16 * 1024 * 1024;
+    private static final int JSON_TARGET_GENERIC = 0;
+    private static final int JSON_TARGET_EXACT = 1;
+    private static final int JSON_TARGET_SUFFIX = 2;
     private static final Pattern DOMAIN_PATTERN = Pattern.compile(
             "^(?=.{1,253}$)([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$");
 
@@ -49,7 +61,7 @@ public final class DnsBlocklistManager {
                 result.message = "Unable to open selected blocklist";
                 return result;
             }
-            parseStream(input, result);
+            parsePossiblyJsonStream(input, result);
             activate(context, result);
             return result;
         } catch (IOException e) {
@@ -69,7 +81,7 @@ public final class DnsBlocklistManager {
             return result;
         }
         try (InputStream input = new ByteArrayInputStream(text.getBytes(StandardCharsets.UTF_8))) {
-            parseStream(input, result);
+            parsePossiblyJsonStream(input, result);
             activate(context, result);
             return result;
         } catch (IOException e) {
@@ -208,7 +220,7 @@ public final class DnsBlocklistManager {
                 result.notes.append(urlString).append(": HTTP ").append(code).append('\n');
                 return;
             }
-            parseStream(connection.getInputStream(), result);
+            parsePossiblyJsonStream(connection.getInputStream(), result);
         } catch (IOException e) {
             result.invalid++;
             result.notes.append(urlString).append(": ").append(e.getMessage()).append('\n');
@@ -217,6 +229,233 @@ public final class DnsBlocklistManager {
                 connection.disconnect();
             }
         }
+    }
+
+    private static void parsePossiblyJsonStream(InputStream rawInput, Result result) throws IOException {
+        BufferedInputStream input = new BufferedInputStream(rawInput);
+        input.mark(JSON_DETECT_BYTES);
+        int first = firstNonWhitespace(input);
+        input.reset();
+        if (first == '{' || first == '[') {
+            parseJsonBundle(readLimitedString(input), result);
+        } else {
+            parseStream(input, result);
+        }
+    }
+
+    private static int firstNonWhitespace(InputStream input) throws IOException {
+        for (int i = 0; i < JSON_DETECT_BYTES; i++) {
+            int value = input.read();
+            if (value == -1) {
+                return -1;
+            }
+            if (!Character.isWhitespace((char) value)) {
+                return value;
+            }
+        }
+        return -1;
+    }
+
+    private static String readLimitedString(InputStream input) throws IOException {
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        byte[] buffer = new byte[8192];
+        int total = 0;
+        int read;
+        while ((read = input.read(buffer)) != -1) {
+            total += read;
+            if (total > MAX_JSON_BUNDLE_BYTES) {
+                throw new IOException("JSON DNS blocklist bundle is too large to import safely");
+            }
+            output.write(buffer, 0, read);
+        }
+        return output.toString(StandardCharsets.UTF_8.name());
+    }
+
+    private static void parseJsonBundle(String rawJson, Result result) throws IOException {
+        String json = rawJson == null ? "" : rawJson.trim();
+        if (json.isEmpty()) {
+            return;
+        }
+        result.sourceLabel = result.sourceLabel + " JSON bundle";
+        result.notes.append("Detected JSON DNS blocklist bundle\n");
+        try {
+            if (json.startsWith("[")) {
+                parseJsonArray(new JSONArray(json), result, JSON_TARGET_GENERIC);
+            } else {
+                parseJsonObject(new JSONObject(json), result);
+            }
+        } catch (JSONException e) {
+            throw new IOException("Invalid JSON DNS blocklist bundle: " + e.getMessage(), e);
+        }
+    }
+
+    private static void parseJsonObject(JSONObject object, Result result) throws JSONException {
+        boolean handled = false;
+        Iterator<String> keys = object.keys();
+        while (keys.hasNext()) {
+            String key = keys.next();
+            Object value = object.opt(key);
+            if (JSONObject.NULL.equals(value)) {
+                continue;
+            }
+            if (isJsonAllowKey(key)) {
+                result.skipped += countJsonEntries(value);
+                continue;
+            }
+            int target = classifyJsonRuleKey(key);
+            if (target == JSON_TARGET_EXACT || target == JSON_TARGET_SUFFIX) {
+                parseJsonValue(value, result, target);
+                handled = true;
+            } else if (isJsonGenericRuleKey(key)) {
+                parseJsonValue(value, result, JSON_TARGET_GENERIC);
+                handled = true;
+            } else if (isJsonWrapperKey(key) && (value instanceof JSONObject || value instanceof JSONArray)) {
+                parseJsonValue(value, result, JSON_TARGET_GENERIC);
+                handled = true;
+            }
+        }
+
+        if (!handled) {
+            parseJsonRuleObject(object, result, JSON_TARGET_GENERIC);
+        }
+    }
+
+    private static void parseJsonArray(JSONArray array, Result result, int target) throws JSONException {
+        for (int i = 0; i < array.length(); i++) {
+            parseJsonValue(array.opt(i), result, target);
+        }
+    }
+
+    private static void parseJsonValue(Object value, Result result, int target) throws JSONException {
+        if (value == null || JSONObject.NULL.equals(value)) {
+            return;
+        }
+        if (value instanceof JSONArray) {
+            parseJsonArray((JSONArray) value, result, target);
+        } else if (value instanceof JSONObject) {
+            JSONObject object = (JSONObject) value;
+            if (!parseJsonRuleObject(object, result, target)) {
+                parseJsonObject(object, result);
+            }
+        } else {
+            parseJsonScalar(String.valueOf(value), result, target);
+        }
+    }
+
+    private static boolean parseJsonRuleObject(JSONObject object, Result result, int parentTarget) throws JSONException {
+        String domain = firstJsonString(object, "domain", "host", "hostname", "pattern", "value");
+        if (domain.isEmpty()) {
+            return false;
+        }
+        String action = firstJsonString(object, "action", "policy", "decision", "list");
+        if (isAllowToken(action)) {
+            result.skipped++;
+            return true;
+        }
+        String type = firstJsonString(object, "type", "kind", "rule", "rule_type", "match");
+        if (containsToken(type, "regex")) {
+            result.skipped++;
+            return true;
+        }
+        int target = parentTarget == JSON_TARGET_EXACT || parentTarget == JSON_TARGET_SUFFIX
+                ? parentTarget : JSON_TARGET_GENERIC;
+        if (containsToken(type, "suffix") || containsToken(type, "wildcard")
+                || containsToken(type, "subdomain")) {
+            target = JSON_TARGET_SUFFIX;
+        }
+        parseJsonScalar(domain, result, target);
+        return true;
+    }
+
+    private static void parseJsonScalar(String raw, Result result, int target) {
+        String value = raw == null ? "" : raw.trim();
+        if (value.isEmpty()) {
+            result.skipped++;
+            return;
+        }
+        if (target == JSON_TARGET_SUFFIX) {
+            result.lines++;
+            addDomain(result.suffixRules, normalizeDomain(value), result);
+        } else if (target == JSON_TARGET_EXACT) {
+            result.lines++;
+            addDomain(result.exactRules, normalizeDomain(value), result);
+        } else {
+            parseLine(value, result);
+        }
+    }
+
+    private static String firstJsonString(JSONObject object, String... keys) {
+        for (String key : keys) {
+            String value = object.optString(key, "");
+            if (!value.trim().isEmpty()) {
+                return value.trim();
+            }
+        }
+        return "";
+    }
+
+    private static int classifyJsonRuleKey(String rawKey) {
+        String key = normalizeJsonKey(rawKey);
+        if (key.contains("suffix") || key.contains("wildcard")) {
+            return JSON_TARGET_SUFFIX;
+        }
+        if (key.equals("exact") || key.equals("exactblock") || key.equals("blockexact")
+                || key.equals("host") || key.equals("hosts")) {
+            return JSON_TARGET_EXACT;
+        }
+        return JSON_TARGET_GENERIC;
+    }
+
+    private static boolean isJsonGenericRuleKey(String rawKey) {
+        String key = normalizeJsonKey(rawKey);
+        return key.equals("domain") || key.equals("domains")
+                || key.equals("rule") || key.equals("rules")
+                || key.equals("entry") || key.equals("entries")
+                || key.equals("item") || key.equals("items")
+                || key.equals("block") || key.equals("blocked")
+                || key.equals("deny") || key.equals("denied")
+                || key.equals("blacklist") || key.equals("denylist")
+                || key.equals("blocklist") || key.equals("blocklists")
+                || (key.contains("domain") && (key.contains("block")
+                || key.contains("deny") || key.contains("disallow")));
+    }
+
+    private static boolean isJsonWrapperKey(String rawKey) {
+        String key = normalizeJsonKey(rawKey);
+        return key.equals("data") || key.equals("backup") || key.equals("export")
+                || key.equals("dnsblocklist") || key.equals("dnsblocklists")
+                || key.equals("blocklist") || key.equals("blocklists");
+    }
+
+    private static boolean isJsonAllowKey(String rawKey) {
+        String key = normalizeJsonKey(rawKey);
+        return isAllowToken(key);
+    }
+
+    private static String normalizeJsonKey(String rawKey) {
+        return rawKey == null ? "" : rawKey.toLowerCase(Locale.US).replaceAll("[^a-z0-9]", "");
+    }
+
+    private static boolean containsToken(String value, String token) {
+        return value != null && value.toLowerCase(Locale.US).contains(token);
+    }
+
+    private static boolean isAllowToken(String value) {
+        if (value == null) {
+            return false;
+        }
+        String token = value.toLowerCase(Locale.US);
+        if (token.contains("disallow") || token.contains("deny") || token.contains("block")) {
+            return false;
+        }
+        return token.contains("allow") || token.contains("white");
+    }
+
+    private static int countJsonEntries(Object value) {
+        if (value instanceof JSONArray) {
+            return ((JSONArray) value).length();
+        }
+        return value == null || JSONObject.NULL.equals(value) ? 0 : 1;
     }
 
     private static void parseStream(InputStream input, Result result) throws IOException {
@@ -406,7 +645,7 @@ public final class DnsBlocklistManager {
         private final Set<String> exactRules = new LinkedHashSet<>();
         private final Set<String> suffixRules = new LinkedHashSet<>();
         private final StringBuilder notes = new StringBuilder();
-        private final String sourceLabel;
+        private String sourceLabel;
         public int lines;
         public int duplicates;
         public int invalid;

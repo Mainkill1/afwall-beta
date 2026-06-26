@@ -356,9 +356,9 @@
     <string name="dns_hijack_blocklist_update_interval_title">Blocklist update interval</string>
     <string name="dns_hijack_blocklist_update_interval_summary">How often scheduled DNS blocklist updates should run, in hours.</string>
     <string name="dns_hijack_import_blocklist_title">Import DNS blocklist file</string>
-    <string name="dns_hijack_import_blocklist_summary">Use the system picker to import a hosts, domain, Pi-hole, or AdBlock-style list.</string>
+    <string name="dns_hijack_import_blocklist_summary">Use the system picker to import a hosts, domain, Pi-hole, AdBlock-style, or JSON backup list.</string>
     <string name="dns_hijack_paste_blocklist_title">Paste DNS blocklist</string>
-    <string name="dns_hijack_paste_blocklist_summary">Paste copied hosts, domain, Pi-hole, or AdBlock-style entries and activate them.</string>
+    <string name="dns_hijack_paste_blocklist_summary">Paste copied hosts, domain, Pi-hole, AdBlock-style, or JSON backup entries and activate them.</string>
     <string name="dns_hijack_paste_blocklist_hint">Paste blocklist entries here</string>
     <string name="dns_hijack_update_blocklists_title">Update DNS blocklists</string>
     <string name="dns_hijack_update_blocklists_summary">Download configured URLs, compile them, and reload the daemon.</string>
