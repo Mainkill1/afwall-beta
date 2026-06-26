@@ -142,6 +142,8 @@ typedef struct {
     uint64_t upstream_requests;
     uint64_t upstream_successes;
     uint64_t upstream_failures;
+    uint64_t upstream_tcp_fallbacks;
+    uint64_t upstream_truncated_responses;
     uint64_t total_latency_ms;
     uint64_t upstream_latency_ms;
     uint64_t max_latency_ms;
@@ -152,7 +154,7 @@ typedef struct {
 typedef struct {
     uint64_t seq;
     char domain[MAX_DOMAIN];
-    char action[16];
+    char action[32];
     int latency_ms;
     uint64_t timestamp;
 } log_entry_t;
@@ -1137,12 +1139,21 @@ static const upstream_t *select_upstreams(const config_t *cfg, const char *domai
     return cfg->upstreams;
 }
 
+static bool dns_response_truncated(const uint8_t *response, size_t response_len);
+static ssize_t forward_tcp_to_upstream(const upstream_t *upstream, int timeout_ms,
+                                       const uint8_t *query, size_t query_len,
+                                       uint8_t *response, size_t response_len);
+
 static ssize_t forward_udp(const config_t *cfg, const char *domain, const uint8_t *query,
                            size_t query_len, uint8_t *response, size_t response_len,
                            const char **route) {
     int i;
     int count = 0;
+    uint8_t truncated_response[MAX_PACKET];
+    ssize_t truncated_len = -1;
+    bool split_route = false;
     const upstream_t *upstreams = select_upstreams(cfg, domain, &count, route);
+    split_route = route != NULL && *route != NULL && strcmp(*route, "split_upstream") == 0;
     for (i = 0; i < count; i++) {
         int fd = connect_upstream(&upstreams[i], SOCK_DGRAM, cfg->timeout_ms);
         ssize_t got;
@@ -1156,8 +1167,30 @@ static ssize_t forward_udp(const config_t *cfg, const char *domain, const uint8_
         got = recv(fd, response, response_len, 0);
         close(fd);
         if (got > 0) {
+            if (dns_response_truncated(response, (size_t) got)) {
+                ssize_t tcp_got;
+                g_stats.upstream_truncated_responses++;
+                if (truncated_len < 0 && (size_t) got <= sizeof(truncated_response)) {
+                    memcpy(truncated_response, response, (size_t) got);
+                    truncated_len = got;
+                }
+                tcp_got = forward_tcp_to_upstream(&upstreams[i], cfg->timeout_ms,
+                        query, query_len, response, response_len);
+                if (tcp_got > 0) {
+                    g_stats.upstream_tcp_fallbacks++;
+                    if (route != NULL) {
+                        *route = split_route ? "split_upstream_tcp_fallback" : "upstream_tcp_fallback";
+                    }
+                    return tcp_got;
+                }
+                continue;
+            }
             return got;
         }
+    }
+    if (truncated_len > 0) {
+        memcpy(response, truncated_response, (size_t) truncated_len);
+        return truncated_len;
     }
     return -1;
 }
@@ -1212,6 +1245,10 @@ static ssize_t forward_udp_probe_one(const upstream_t *upstream, int timeout_ms,
     return got;
 }
 
+static bool dns_response_truncated(const uint8_t *response, size_t response_len) {
+    return response_len >= 4 && (response[2] & 0x02u) != 0;
+}
+
 static ssize_t read_full(int fd, uint8_t *buf, size_t len) {
     size_t got = 0;
     while (got < len) {
@@ -1224,45 +1261,59 @@ static ssize_t read_full(int fd, uint8_t *buf, size_t len) {
     return (ssize_t) got;
 }
 
+static ssize_t forward_tcp_to_upstream(const upstream_t *upstream, int timeout_ms,
+                                       const uint8_t *query, size_t query_len,
+                                       uint8_t *response, size_t response_len) {
+    uint8_t lenbuf[2];
+    uint8_t rlenbuf[2];
+    uint16_t rlen;
+    int fd;
+    if (query_len > 65535) {
+        return -1;
+    }
+    lenbuf[0] = (uint8_t) ((query_len >> 8) & 0xffu);
+    lenbuf[1] = (uint8_t) (query_len & 0xffu);
+    fd = connect_upstream(upstream, SOCK_STREAM, timeout_ms);
+    if (fd < 0) {
+        return -1;
+    }
+    if (send(fd, lenbuf, 2, 0) != 2 || send(fd, query, query_len, 0) != (ssize_t) query_len) {
+        close(fd);
+        return -1;
+    }
+    if (read_full(fd, rlenbuf, 2) != 2) {
+        close(fd);
+        return -1;
+    }
+    rlen = (uint16_t) ((rlenbuf[0] << 8) | rlenbuf[1]);
+    if (rlen == 0 || rlen > response_len) {
+        close(fd);
+        return -1;
+    }
+    if (read_full(fd, response, rlen) != rlen) {
+        close(fd);
+        return -1;
+    }
+    close(fd);
+    return rlen;
+}
+
 static ssize_t forward_tcp(const config_t *cfg, const char *domain, const uint8_t *query,
                            size_t query_len, uint8_t *response, size_t response_len,
                            const char **route) {
     int i;
-    uint8_t lenbuf[2];
     int count = 0;
     const upstream_t *upstreams;
     if (query_len > 65535) {
         return -1;
     }
     upstreams = select_upstreams(cfg, domain, &count, route);
-    lenbuf[0] = (uint8_t) ((query_len >> 8) & 0xffu);
-    lenbuf[1] = (uint8_t) (query_len & 0xffu);
     for (i = 0; i < count; i++) {
-        uint8_t rlenbuf[2];
-        uint16_t rlen;
-        int fd = connect_upstream(&upstreams[i], SOCK_STREAM, cfg->timeout_ms);
-        if (fd < 0) {
-            continue;
+        ssize_t got = forward_tcp_to_upstream(&upstreams[i], cfg->timeout_ms,
+                query, query_len, response, response_len);
+        if (got > 0) {
+            return got;
         }
-        if (send(fd, lenbuf, 2, 0) != 2 || send(fd, query, query_len, 0) != (ssize_t) query_len) {
-            close(fd);
-            continue;
-        }
-        if (read_full(fd, rlenbuf, 2) != 2) {
-            close(fd);
-            continue;
-        }
-        rlen = (uint16_t) ((rlenbuf[0] << 8) | rlenbuf[1]);
-        if (rlen == 0 || rlen > response_len) {
-            close(fd);
-            continue;
-        }
-        if (read_full(fd, response, rlen) != rlen) {
-            close(fd);
-            continue;
-        }
-        close(fd);
-        return rlen;
     }
     return -1;
 }
@@ -1677,7 +1728,9 @@ static void handle_dns_query(const config_t *cfg, const uint8_t *query, size_t q
     }
     if (forwarded > 0) {
         *response_len = (size_t) forwarded;
-        cache_store(domain, qtype, response, *response_len);
+        if (!dns_response_truncated(response, *response_len)) {
+            cache_store(domain, qtype, response, *response_len);
+        }
         g_stats.allowed++;
         g_stats.upstream_successes++;
         *action_out = route;
@@ -1843,6 +1896,7 @@ static void write_health_response(int client) {
             "generation=%llu\nupstreams=%d\nsplit_upstreams=%d\nupstream_probe=%s\n"
             "upstream_probe_ms=%d\nupstream_probe_index=%d\nupstream_probe_rcode=%d\n"
             "queries=%llu\nblocked=%llu\nallowed=%llu\ncache_size=%d\ncache_entries=%d\n"
+            "upstream_tcp_fallbacks=%llu\nupstream_truncated_responses=%llu\n"
             "memory_rss_kb=%ld\nmemory_hwm_kb=%ld\ncpu_user_ms=%llu\n"
             "cpu_system_ms=%llu\ncpu_total_ms=%llu\n"
             "exact_index_size=%d\nsuffix_allow_trie_nodes=%d\nsuffix_block_trie_nodes=%d\n"
@@ -1862,6 +1916,8 @@ static void write_health_response(int client) {
             (unsigned long long) g_stats.allowed,
             g_cfg.cache_size,
             cache_entry_count(),
+            (unsigned long long) g_stats.upstream_tcp_fallbacks,
+            (unsigned long long) g_stats.upstream_truncated_responses,
             memory_rss_kb,
             memory_hwm_kb,
             (unsigned long long) cpu_user_ms,
@@ -1998,6 +2054,7 @@ static void handle_control(int fd) {
                 "cache_size=%d\ncache_entries=%d\ncache_hits=%llu\ncache_misses=%llu\n"
                 "cache_hit_rate_ppm=%llu\ncache_stores=%llu\ncache_expired=%llu\ncache_evictions=%llu\n"
                 "upstream_requests=%llu\nupstream_successes=%llu\nupstream_failures=%llu\n"
+                "upstream_tcp_fallbacks=%llu\nupstream_truncated_responses=%llu\n"
                 "avg_latency_ms=%llu\nmax_latency_ms=%llu\nupstream_avg_latency_ms=%llu\n"
                 "reloads=%llu\nexact_index_size=%d\nsuffix_allow_trie_nodes=%d\n"
                 "suffix_block_trie_nodes=%d\nrules_exact_allow=%d\nrules_suffix_allow=%d\nrules_exact_block=%d\n"
@@ -2031,6 +2088,8 @@ static void handle_control(int fd) {
                 (unsigned long long) g_stats.upstream_requests,
                 (unsigned long long) g_stats.upstream_successes,
                 (unsigned long long) g_stats.upstream_failures,
+                (unsigned long long) g_stats.upstream_tcp_fallbacks,
+                (unsigned long long) g_stats.upstream_truncated_responses,
                 (unsigned long long) div_u64(g_stats.total_latency_ms, g_stats.queries),
                 (unsigned long long) g_stats.max_latency_ms,
                 (unsigned long long) div_u64(g_stats.upstream_latency_ms, g_stats.upstream_requests),
