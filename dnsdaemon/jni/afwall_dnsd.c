@@ -31,6 +31,7 @@
 
 #define MAX_PACKET 4096
 #define MAX_DOMAIN 256
+#define MAX_LABEL 64
 #define MAX_RULES 32768
 #define EXACT_INDEX_SIZE 65536
 #define MAX_REGEX 128
@@ -74,6 +75,19 @@ typedef struct {
 } split_upstream_t;
 
 typedef struct {
+    char label[MAX_LABEL];
+    int first_child;
+    int next_sibling;
+    bool terminal;
+} suffix_trie_node_t;
+
+typedef struct {
+    suffix_trie_node_t *nodes;
+    int count;
+    int capacity;
+} suffix_trie_t;
+
+typedef struct {
     int listen_port;
     int strict_mode;
     int fail_open;
@@ -92,6 +106,8 @@ typedef struct {
     string_rule_t suffix_block[MAX_RULES];
     int exact_allow_index[EXACT_INDEX_SIZE];
     int exact_block_index[EXACT_INDEX_SIZE];
+    suffix_trie_t suffix_allow_trie;
+    suffix_trie_t suffix_block_trie;
     int exact_allow_count;
     int suffix_allow_count;
     int exact_block_count;
@@ -313,6 +329,25 @@ static void free_regex_rules(config_t *cfg) {
     }
 }
 
+static void free_suffix_trie(suffix_trie_t *trie) {
+    if (trie == NULL) {
+        return;
+    }
+    free(trie->nodes);
+    trie->nodes = NULL;
+    trie->count = 0;
+    trie->capacity = 0;
+}
+
+static void free_config_dynamic(config_t *cfg) {
+    if (cfg == NULL) {
+        return;
+    }
+    free_regex_rules(cfg);
+    free_suffix_trie(&cfg->suffix_allow_trie);
+    free_suffix_trie(&cfg->suffix_block_trie);
+}
+
 static bool add_string_rule(string_rule_t *rules, int *count, const char *value) {
     if (*count >= MAX_RULES || value == NULL || value[0] == '\0') {
         return false;
@@ -442,6 +477,164 @@ static bool exact_match_indexed(const string_rule_t *rules, const int *index, co
     return false;
 }
 
+static bool suffix_trie_reserve(suffix_trie_t *trie, int needed) {
+    int next_capacity;
+    suffix_trie_node_t *nodes;
+    if (trie->capacity >= needed) {
+        return true;
+    }
+    next_capacity = trie->capacity > 0 ? trie->capacity : 64;
+    while (next_capacity < needed) {
+        if (next_capacity > MAX_RULES * 8) {
+            next_capacity = needed;
+            break;
+        }
+        next_capacity *= 2;
+    }
+    nodes = (suffix_trie_node_t *) realloc(trie->nodes,
+            (size_t) next_capacity * sizeof(suffix_trie_node_t));
+    if (nodes == NULL) {
+        return false;
+    }
+    memset(nodes + trie->capacity, 0,
+            (size_t) (next_capacity - trie->capacity) * sizeof(suffix_trie_node_t));
+    trie->nodes = nodes;
+    trie->capacity = next_capacity;
+    return true;
+}
+
+static bool suffix_trie_init(suffix_trie_t *trie) {
+    memset(trie, 0, sizeof(*trie));
+    if (!suffix_trie_reserve(trie, 1)) {
+        return false;
+    }
+    trie->count = 1;
+    return true;
+}
+
+static int suffix_trie_find_child(const suffix_trie_t *trie, int parent, const char *label) {
+    int child;
+    if (trie == NULL || trie->nodes == NULL || parent < 0 || parent >= trie->count) {
+        return -1;
+    }
+    for (child = trie->nodes[parent].first_child; child != 0;
+            child = trie->nodes[child].next_sibling) {
+        if (strcmp(trie->nodes[child].label, label) == 0) {
+            return child;
+        }
+    }
+    return -1;
+}
+
+static int suffix_trie_add_child(suffix_trie_t *trie, int parent, const char *label) {
+    int child;
+    if (!suffix_trie_reserve(trie, trie->count + 1)) {
+        return -1;
+    }
+    child = trie->count++;
+    memset(&trie->nodes[child], 0, sizeof(trie->nodes[child]));
+    safe_copy(trie->nodes[child].label, sizeof(trie->nodes[child].label), label);
+    trie->nodes[child].next_sibling = trie->nodes[parent].first_child;
+    trie->nodes[parent].first_child = child;
+    return child;
+}
+
+static bool previous_domain_label(const char *domain, size_t *end, char *label,
+                                  size_t label_len, bool *done) {
+    size_t start;
+    size_t len;
+    if (domain == NULL || end == NULL || *end == 0 || label == NULL || label_len == 0) {
+        return false;
+    }
+    start = *end;
+    while (start > 0 && domain[start - 1] != '.') {
+        start--;
+    }
+    len = *end - start;
+    if (len == 0 || len >= label_len) {
+        return false;
+    }
+    memcpy(label, domain + start, len);
+    label[len] = '\0';
+    if (start == 0) {
+        *done = true;
+        *end = 0;
+    } else {
+        *done = false;
+        *end = start - 1;
+    }
+    return true;
+}
+
+static bool suffix_trie_insert(suffix_trie_t *trie, const char *suffix) {
+    char label[MAX_LABEL];
+    size_t end;
+    int node = 0;
+    bool done = false;
+    if (trie == NULL || trie->nodes == NULL || suffix == NULL || suffix[0] == '\0') {
+        return false;
+    }
+    end = strlen(suffix);
+    while (!done) {
+        int child;
+        if (!previous_domain_label(suffix, &end, label, sizeof(label), &done)) {
+            return false;
+        }
+        child = suffix_trie_find_child(trie, node, label);
+        if (child < 0) {
+            child = suffix_trie_add_child(trie, node, label);
+            if (child < 0) {
+                return false;
+            }
+        }
+        node = child;
+    }
+    trie->nodes[node].terminal = true;
+    return true;
+}
+
+static bool build_suffix_trie(const string_rule_t *rules, int count, suffix_trie_t *trie) {
+    int i;
+    free_suffix_trie(trie);
+    if (!suffix_trie_init(trie)) {
+        return false;
+    }
+    for (i = 0; i < count; i++) {
+        if (!suffix_trie_insert(trie, rules[i].value)) {
+            free_suffix_trie(trie);
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool suffix_trie_match(const suffix_trie_t *trie, const char *domain) {
+    char label[MAX_LABEL];
+    size_t end;
+    int node = 0;
+    bool done = false;
+    if (trie == NULL || trie->nodes == NULL || domain == NULL || domain[0] == '\0') {
+        return false;
+    }
+    end = strlen(domain);
+    /* Suffix rules used to scan linearly; this keeps the DNS hot path bounded by label depth. */
+    while (!done) {
+        int child;
+        if (!previous_domain_label(domain, &end, label, sizeof(label), &done)) {
+            return false;
+        }
+        child = suffix_trie_find_child(trie, node, label);
+        if (child < 0) {
+            return false;
+        }
+        node = child;
+        if (trie->nodes[node].terminal) {
+            return true;
+        }
+    }
+    return false;
+}
+
 static bool temp_match(const temp_rule_t *rules, int count, const char *domain, uint64_t now) {
     int i;
     for (i = 0; i < count; i++) {
@@ -453,17 +646,6 @@ static bool temp_match(const temp_rule_t *rules, int count, const char *domain, 
 }
 
 static bool domain_has_suffix(const char *domain, const char *suffix);
-
-static bool suffix_match(const string_rule_t *rules, int count, const char *domain) {
-    int i;
-    for (i = 0; i < count; i++) {
-        const char *suffix = rules[i].value;
-        if (domain_has_suffix(domain, suffix)) {
-            return true;
-        }
-    }
-    return false;
-}
 
 static bool domain_has_suffix(const char *domain, const char *suffix) {
     size_t domain_len;
@@ -496,7 +678,7 @@ static decision_t evaluate_domain(const config_t *cfg, const char *domain, const
     uint64_t now = now_seconds();
     bool temp_allow = temp_match(cfg->temp_allow, cfg->temp_allow_count, domain, now);
     bool exact_allow = exact_match_indexed(cfg->exact_allow, cfg->exact_allow_index, domain);
-    bool suffix_allow = suffix_match(cfg->suffix_allow, cfg->suffix_allow_count, domain);
+    bool suffix_allow = suffix_trie_match(&cfg->suffix_allow_trie, domain);
     bool regex_allow = regex_match_rules(cfg->regex_allow, cfg->regex_allow_count, domain);
     bool block = false;
 
@@ -506,7 +688,7 @@ static decision_t evaluate_domain(const config_t *cfg, const char *domain, const
     } else if (exact_match_indexed(cfg->exact_block, cfg->exact_block_index, domain)) {
         *reason = "exact_block";
         block = true;
-    } else if (suffix_match(cfg->suffix_block, cfg->suffix_block_count, domain)) {
+    } else if (suffix_trie_match(&cfg->suffix_block_trie, domain)) {
         *reason = "suffix_block";
         block = true;
     } else if (regex_match_rules(cfg->regex_block, cfg->regex_block_count, domain)) {
@@ -1156,7 +1338,11 @@ static bool load_config(const char *path, config_t *new_cfg) {
     if (!build_exact_index(new_cfg->exact_allow, new_cfg->exact_allow_count,
             new_cfg->exact_allow_index)
             || !build_exact_index(new_cfg->exact_block, new_cfg->exact_block_count,
-            new_cfg->exact_block_index)) {
+            new_cfg->exact_block_index)
+            || !build_suffix_trie(new_cfg->suffix_allow, new_cfg->suffix_allow_count,
+            &new_cfg->suffix_allow_trie)
+            || !build_suffix_trie(new_cfg->suffix_block, new_cfg->suffix_block_count,
+            &new_cfg->suffix_block_trie)) {
         return false;
     }
     new_cfg->generation = g_cfg.generation + 1;
@@ -1210,19 +1396,19 @@ static bool reload_config(void) {
         return false;
     }
     if (!load_config(g_config_path, next)) {
-        free_regex_rules(next);
+        free_config_dynamic(next);
         free(next);
         return false;
     }
     if (next->cache_size > 0) {
         next_cache = (cache_entry_t *) calloc((size_t) next->cache_size, sizeof(cache_entry_t));
         if (next_cache == NULL) {
-            free_regex_rules(next);
+            free_config_dynamic(next);
             free(next);
             return false;
         }
     }
-    free_regex_rules(&g_cfg);
+    free_config_dynamic(&g_cfg);
     g_cfg = *next;
     free(next);
     free(g_cache);
@@ -1528,7 +1714,7 @@ static void write_health_response(int client) {
             "generation=%llu\nupstreams=%d\nsplit_upstreams=%d\nupstream_probe=%s\n"
             "upstream_probe_ms=%d\nupstream_probe_index=%d\nupstream_probe_rcode=%d\n"
             "queries=%llu\nblocked=%llu\nallowed=%llu\ncache_size=%d\ncache_entries=%d\n"
-            "exact_index_size=%d\n"
+            "exact_index_size=%d\nsuffix_allow_trie_nodes=%d\nsuffix_block_trie_nodes=%d\n"
             "rules_total=%d\n",
             (long) getpid(),
             (unsigned long long) (now_seconds() - g_stats.start_time),
@@ -1546,6 +1732,8 @@ static void write_health_response(int client) {
             g_cfg.cache_size,
             cache_entry_count(),
             EXACT_INDEX_SIZE,
+            g_cfg.suffix_allow_trie.count,
+            g_cfg.suffix_block_trie.count,
             g_cfg.exact_allow_count + g_cfg.suffix_allow_count
                     + g_cfg.exact_block_count + g_cfg.suffix_block_count
                     + g_cfg.regex_allow_count + g_cfg.regex_block_count
@@ -1621,7 +1809,8 @@ static void handle_control(int fd) {
                 "cache_hit_rate_ppm=%llu\ncache_stores=%llu\ncache_expired=%llu\ncache_evictions=%llu\n"
                 "upstream_requests=%llu\nupstream_successes=%llu\nupstream_failures=%llu\n"
                 "avg_latency_ms=%llu\nmax_latency_ms=%llu\nupstream_avg_latency_ms=%llu\n"
-                "reloads=%llu\nexact_index_size=%d\nrules_exact_allow=%d\nrules_suffix_allow=%d\nrules_exact_block=%d\n"
+                "reloads=%llu\nexact_index_size=%d\nsuffix_allow_trie_nodes=%d\n"
+                "suffix_block_trie_nodes=%d\nrules_exact_allow=%d\nrules_suffix_allow=%d\nrules_exact_block=%d\n"
                 "rules_suffix_block=%d\nrules_regex_allow=%d\nrules_regex_block=%d\n"
                 "rules_temp_allow=%d\nrules_temp_block=%d\nsplit_upstreams=%d\n",
                 (long) getpid(),
@@ -1652,6 +1841,8 @@ static void handle_control(int fd) {
                 (unsigned long long) div_u64(g_stats.upstream_latency_ms, g_stats.upstream_requests),
                 (unsigned long long) g_stats.reloads,
                 EXACT_INDEX_SIZE,
+                g_cfg.suffix_allow_trie.count,
+                g_cfg.suffix_block_trie.count,
                 g_cfg.exact_allow_count,
                 g_cfg.suffix_allow_count,
                 g_cfg.exact_block_count,
@@ -1780,6 +1971,6 @@ int main(int argc, char **argv) {
     close(control_fd);
     unlink(g_cfg.control_socket);
     unlink(g_cfg.pid_file);
-    free_regex_rules(&g_cfg);
+    free_config_dynamic(&g_cfg);
     return 0;
 }
