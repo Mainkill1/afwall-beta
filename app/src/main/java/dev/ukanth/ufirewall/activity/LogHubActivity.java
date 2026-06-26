@@ -41,6 +41,7 @@ import java.util.zip.ZipOutputStream;
 import dev.ukanth.ufirewall.BuildConfig;
 import dev.ukanth.ufirewall.R;
 import dev.ukanth.ufirewall.Api;
+import dev.ukanth.ufirewall.dns.DnsHijackManager;
 import dev.ukanth.ufirewall.log.Log;
 import dev.ukanth.ufirewall.log.LogInfo;
 import dev.ukanth.ufirewall.service.RootCommand;
@@ -56,6 +57,7 @@ public class LogHubActivity extends AppCompatActivity {
     private static final int EXPORT_IPTABLES_IPV6 = 2;
     private static final int EXPORT_APPLICATION_LOG = 3;
     private static final int EXPORT_APPLICATION_ERRORS = 4;
+    private static final int EXPORT_DNS_QUERIES = 5;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -75,6 +77,7 @@ public class LogHubActivity extends AppCompatActivity {
         }
 
         findViewById(R.id.log_hub_blocked_requests).setOnClickListener(v -> openBlockedRequests());
+        findViewById(R.id.log_hub_dns_queries).setOnClickListener(v -> startActivity(new Intent(this, DnsQueriesActivity.class)));
         findViewById(R.id.log_hub_iptables).setOnClickListener(v -> startActivity(new Intent(this, RulesActivity.class)));
         findViewById(R.id.log_hub_diagnostics).setOnClickListener(v -> startActivity(new Intent(this, DiagnosticsActivity.class)));
         findViewById(R.id.log_hub_application_log).setOnClickListener(v -> startActivity(new Intent(this, ApplicationLogActivity.class)));
@@ -93,6 +96,8 @@ public class LogHubActivity extends AppCompatActivity {
 
         items.add(getString(R.string.log_hub_blocked_requests));
         itemValues.add(EXPORT_BLOCKED_REQUESTS);
+        items.add(getString(R.string.dns_queries_title));
+        itemValues.add(EXPORT_DNS_QUERIES);
         items.add(getString(R.string.export_logs_iptables_ipv4));
         itemValues.add(EXPORT_IPTABLES_IPV4);
         if (G.enableIPv6()) {
@@ -340,9 +345,20 @@ public class LogHubActivity extends AppCompatActivity {
                     appendExportSection(builder, getString(R.string.application_errors_title),
                             errors.trim().isEmpty() ? getString(R.string.application_errors_empty) : errors);
                     break;
+                case EXPORT_DNS_QUERIES:
+                    appendExportSection(builder, getString(R.string.dns_queries_title), buildDnsQueryExport());
+                    break;
             }
         }
         return builder.toString();
+    }
+
+    private String buildDnsQueryExport() {
+        StringBuilder dns = new StringBuilder();
+        for (DnsHijackManager.QueryEntry entry : DnsHijackManager.getRecentQueries(this)) {
+            dns.append(entry.displayLine()).append('\n');
+        }
+        return dns.toString();
     }
 
     private String fetchIptablesExport(boolean ipv6) {

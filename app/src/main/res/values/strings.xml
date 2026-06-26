@@ -341,6 +341,15 @@
     <string name="dns_diagnostics_reload_queued">DNS daemon reload requested.</string>
     <string name="dns_diagnostics_restart_queued">DNS daemon restart requested.</string>
     <string name="dns_diagnostics_stop_queued">DNS daemon stop requested.</string>
+    <string name="dns_queries_title">DNS Queries</string>
+    <string name="dns_queries_summary">View recent daemon DNS queries and quickly add allow or block rules.</string>
+    <string name="dns_queries_status">%1$d DNS queries loaded.</string>
+    <string name="dns_query_allow_exact">Allow this domain</string>
+    <string name="dns_query_allow_suffix">Allow this domain and subdomains</string>
+    <string name="dns_query_block_exact">Block this domain</string>
+    <string name="dns_query_block_suffix">Block this domain and subdomains</string>
+    <string name="dns_query_rule_added">DNS rule added and daemon reload requested.</string>
+    <string name="dns_query_rule_exists">DNS rule already exists.</string>
     <string name="log_prefs_title">Log</string>
     <string name="hideicons_pref_title">Hide app icons</string>
     <string name="hideicons_pref_summary_on">Improve performance by disabling app icons in the main view</string>

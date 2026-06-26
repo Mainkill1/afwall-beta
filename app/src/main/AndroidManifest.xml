@@ -163,6 +163,9 @@
             android:name=".activity.LogHubActivity"
             android:configChanges="orientation|keyboardHidden|screenSize|keyboard|locale|screenLayout"></activity>
         <activity
+            android:name=".activity.DnsQueriesActivity"
+            android:configChanges="orientation|keyboardHidden|screenSize|keyboard|locale|screenLayout"></activity>
+        <activity
             android:name=".activity.ApplicationErrorsActivity"
             android:configChanges="orientation|keyboardHidden|screenSize|keyboard|locale|screenLayout"></activity>
         <activity

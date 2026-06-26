@@ -40,6 +40,10 @@ public final class DnsHijackManager {
     private static final String CHAIN_V6 = "afwall-dns6";
     private static final String CHAIN_V6_PRE = "afwall-dns6-pre";
     private static final int DEFAULT_PORT = 5354;
+    public static final int RULE_ALLOW_EXACT = 1;
+    public static final int RULE_ALLOW_SUFFIX = 2;
+    public static final int RULE_BLOCK_EXACT = 3;
+    public static final int RULE_BLOCK_SUFFIX = 4;
 
     private DnsHijackManager() {
     }
@@ -142,6 +146,48 @@ public final class DnsHijackManager {
         return out.toString();
     }
 
+    public static List<QueryEntry> getRecentQueries(Context context) {
+        List<QueryEntry> entries = new ArrayList<>();
+        String logs = queryControl(context, "logs");
+        String[] lines = logs.split("\\r?\\n");
+        for (String line : lines) {
+            QueryEntry entry = QueryEntry.parse(line);
+            if (entry != null) {
+                entries.add(entry);
+            }
+        }
+        return entries;
+    }
+
+    public static boolean addRuleFromQuery(Context context, QueryEntry entry, int action) {
+        if (entry == null || !entry.hasDomain()) {
+            return false;
+        }
+        String domain = entry.domain;
+        boolean added;
+        switch (action) {
+            case RULE_ALLOW_EXACT:
+                added = G.appendDnsHijackAllowExact(domain);
+                break;
+            case RULE_ALLOW_SUFFIX:
+                added = G.appendDnsHijackAllowSuffix(domain);
+                break;
+            case RULE_BLOCK_EXACT:
+                added = G.appendDnsHijackBlockExact(domain);
+                break;
+            case RULE_BLOCK_SUFFIX:
+                added = G.appendDnsHijackBlockSuffix(domain);
+                break;
+            default:
+                return false;
+        }
+        if (added) {
+            ApplicationErrorLog.add(context, "DNS query action added rule for " + domain);
+            requestReload(context);
+        }
+        return added;
+    }
+
     public static List<String> buildRootDiagnosticsCommands(Context context) {
         List<String> commands = new ArrayList<>();
         String supervisor = shellQuote(supervisorPath(context));
@@ -220,6 +266,63 @@ public final class DnsHijackManager {
             return action;
         }
         return null;
+    }
+
+    public static final class QueryEntry {
+        public final long timestamp;
+        public final String action;
+        public final String domain;
+        public final String latency;
+
+        private QueryEntry(long timestamp, String action, String domain, String latency) {
+            this.timestamp = timestamp;
+            this.action = action;
+            this.domain = domain;
+            this.latency = latency;
+        }
+
+        private static QueryEntry parse(String line) {
+            if (line == null) {
+                return null;
+            }
+            String[] parts = line.trim().split("\\s+");
+            if (parts.length < 4) {
+                return null;
+            }
+            try {
+                long timestamp = Long.parseLong(parts[0]);
+                String action = parts[1];
+                String domain = normalizeDomain(parts[2]);
+                if (domain.isEmpty()) {
+                    return null;
+                }
+                return new QueryEntry(timestamp, action, domain, parts[3]);
+            } catch (NumberFormatException e) {
+                return null;
+            }
+        }
+
+        public boolean hasDomain() {
+            return domain != null && !domain.isEmpty() && !"unknown".equals(domain);
+        }
+
+        public String displayLine() {
+            return timestamp + "  " + action + "  " + domain + "  " + latency;
+        }
+    }
+
+    private static String normalizeDomain(String raw) {
+        if (raw == null) {
+            return "";
+        }
+        String domain = raw.trim().toLowerCase(Locale.US);
+        domain = domain.replaceFirst("^\\*\\.", "");
+        domain = domain.replaceFirst("^\\.", "");
+        domain = domain.replaceFirst("\\.$", "");
+        if (!domain.matches("^(?=.{1,253}$)([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")) {
+            return "";
+        }
+        return domain;
     }
 
     private static void appendRedirectRules(List<String> commands, boolean ipv6) {

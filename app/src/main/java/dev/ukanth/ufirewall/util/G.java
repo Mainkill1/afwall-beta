@@ -51,6 +51,7 @@ import dev.ukanth.ufirewall.MainActivity;
 import java.io.File;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
 import java.util.regex.Matcher;
@@ -323,6 +324,48 @@ public class G extends Application implements Application.ActivityLifecycleCallb
 
     public static String dnsHijackBlocklistUrls() {
         return gPrefs.getString(DNS_HIJACK_BLOCKLIST_URLS, "");
+    }
+
+    public static boolean appendDnsHijackAllowExact(String domain) {
+        return appendLinePreference(DNS_HIJACK_ALLOW_EXACT, domain);
+    }
+
+    public static boolean appendDnsHijackAllowSuffix(String domain) {
+        return appendLinePreference(DNS_HIJACK_ALLOW_SUFFIX, domain);
+    }
+
+    public static boolean appendDnsHijackBlockExact(String domain) {
+        return appendLinePreference(DNS_HIJACK_BLOCK_EXACT, domain);
+    }
+
+    public static boolean appendDnsHijackBlockSuffix(String domain) {
+        return appendLinePreference(DNS_HIJACK_BLOCK_SUFFIX, domain);
+    }
+
+    private static boolean appendLinePreference(String key, String rawValue) {
+        if (rawValue == null) {
+            return false;
+        }
+        String value = rawValue.trim().toLowerCase(java.util.Locale.US);
+        if (value.isEmpty()) {
+            return false;
+        }
+        LinkedHashSet<String> values = new LinkedHashSet<>();
+        String existing = gPrefs.getString(key, "");
+        if (existing != null) {
+            String[] lines = existing.split("[\\r\\n,]+");
+            for (String line : lines) {
+                String existingValue = line == null ? "" : line.trim().toLowerCase(java.util.Locale.US);
+                if (!existingValue.isEmpty()) {
+                    values.add(existingValue);
+                }
+            }
+        }
+        boolean added = values.add(value);
+        if (added) {
+            gPrefs.edit().putString(key, android.text.TextUtils.join("\n", values)).commit();
+        }
+        return added;
     }
 
     private static int readIntPreference(String key, int fallback, int min, int max) {
