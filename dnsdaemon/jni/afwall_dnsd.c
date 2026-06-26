@@ -32,6 +32,7 @@
 #define MAX_PACKET 4096
 #define MAX_DOMAIN 256
 #define MAX_RULES 32768
+#define EXACT_INDEX_SIZE 65536
 #define MAX_REGEX 128
 #define MAX_TEMP_RULES 1024
 #define MAX_UPSTREAMS 8
@@ -89,6 +90,8 @@ typedef struct {
     string_rule_t suffix_allow[MAX_RULES];
     string_rule_t exact_block[MAX_RULES];
     string_rule_t suffix_block[MAX_RULES];
+    int exact_allow_index[EXACT_INDEX_SIZE];
+    int exact_block_index[EXACT_INDEX_SIZE];
     int exact_allow_count;
     int suffix_allow_count;
     int exact_block_count;
@@ -394,12 +397,47 @@ static bool add_regex_rule(regex_rule_t *rules, int *count, const char *value) {
     return true;
 }
 
-static bool exact_match(const string_rule_t *rules, int count, const char *domain) {
+static bool build_exact_index(const string_rule_t *rules, int count, int *index) {
     int i;
+    memset(index, 0, sizeof(int) * EXACT_INDEX_SIZE);
     for (i = 0; i < count; i++) {
-        if (strcmp(rules[i].value, domain) == 0) {
+        uint32_t slot = hash_domain(rules[i].value, 0) % EXACT_INDEX_SIZE;
+        uint32_t probe;
+        for (probe = 0; probe < EXACT_INDEX_SIZE; probe++) {
+            int existing = index[slot];
+            if (existing == 0) {
+                index[slot] = i + 1;
+                break;
+            }
+            if (existing > 0 && existing <= count
+                    && strcmp(rules[existing - 1].value, rules[i].value) == 0) {
+                break;
+            }
+            slot = (slot + 1) % EXACT_INDEX_SIZE;
+        }
+        if (probe == EXACT_INDEX_SIZE) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool exact_match_indexed(const string_rule_t *rules, const int *index, const char *domain) {
+    uint32_t slot;
+    uint32_t probe;
+    if (domain == NULL || domain[0] == '\0') {
+        return false;
+    }
+    slot = hash_domain(domain, 0) % EXACT_INDEX_SIZE;
+    for (probe = 0; probe < EXACT_INDEX_SIZE; probe++) {
+        int ref = index[slot];
+        if (ref == 0) {
+            return false;
+        }
+        if (ref > 0 && ref <= MAX_RULES && strcmp(rules[ref - 1].value, domain) == 0) {
             return true;
         }
+        slot = (slot + 1) % EXACT_INDEX_SIZE;
     }
     return false;
 }
@@ -457,7 +495,7 @@ static bool regex_match_rules(const regex_rule_t *rules, int count, const char *
 static decision_t evaluate_domain(const config_t *cfg, const char *domain, const char **reason) {
     uint64_t now = now_seconds();
     bool temp_allow = temp_match(cfg->temp_allow, cfg->temp_allow_count, domain, now);
-    bool exact_allow = exact_match(cfg->exact_allow, cfg->exact_allow_count, domain);
+    bool exact_allow = exact_match_indexed(cfg->exact_allow, cfg->exact_allow_index, domain);
     bool suffix_allow = suffix_match(cfg->suffix_allow, cfg->suffix_allow_count, domain);
     bool regex_allow = regex_match_rules(cfg->regex_allow, cfg->regex_allow_count, domain);
     bool block = false;
@@ -465,7 +503,7 @@ static decision_t evaluate_domain(const config_t *cfg, const char *domain, const
     if (temp_match(cfg->temp_block, cfg->temp_block_count, domain, now)) {
         *reason = "temp_block";
         block = true;
-    } else if (exact_match(cfg->exact_block, cfg->exact_block_count, domain)) {
+    } else if (exact_match_indexed(cfg->exact_block, cfg->exact_block_index, domain)) {
         *reason = "exact_block";
         block = true;
     } else if (suffix_match(cfg->suffix_block, cfg->suffix_block_count, domain)) {
@@ -1115,6 +1153,12 @@ static bool load_config(const char *path, config_t *new_cfg) {
         new_cfg->upstreams[0].port = 53;
         new_cfg->upstream_count = 1;
     }
+    if (!build_exact_index(new_cfg->exact_allow, new_cfg->exact_allow_count,
+            new_cfg->exact_allow_index)
+            || !build_exact_index(new_cfg->exact_block, new_cfg->exact_block_count,
+            new_cfg->exact_block_index)) {
+        return false;
+    }
     new_cfg->generation = g_cfg.generation + 1;
     return true;
 }
@@ -1166,6 +1210,7 @@ static bool reload_config(void) {
         return false;
     }
     if (!load_config(g_config_path, next)) {
+        free_regex_rules(next);
         free(next);
         return false;
     }
@@ -1483,6 +1528,7 @@ static void write_health_response(int client) {
             "generation=%llu\nupstreams=%d\nsplit_upstreams=%d\nupstream_probe=%s\n"
             "upstream_probe_ms=%d\nupstream_probe_index=%d\nupstream_probe_rcode=%d\n"
             "queries=%llu\nblocked=%llu\nallowed=%llu\ncache_size=%d\ncache_entries=%d\n"
+            "exact_index_size=%d\n"
             "rules_total=%d\n",
             (long) getpid(),
             (unsigned long long) (now_seconds() - g_stats.start_time),
@@ -1499,6 +1545,7 @@ static void write_health_response(int client) {
             (unsigned long long) g_stats.allowed,
             g_cfg.cache_size,
             cache_entry_count(),
+            EXACT_INDEX_SIZE,
             g_cfg.exact_allow_count + g_cfg.suffix_allow_count
                     + g_cfg.exact_block_count + g_cfg.suffix_block_count
                     + g_cfg.regex_allow_count + g_cfg.regex_block_count
@@ -1574,7 +1621,7 @@ static void handle_control(int fd) {
                 "cache_hit_rate_ppm=%llu\ncache_stores=%llu\ncache_expired=%llu\ncache_evictions=%llu\n"
                 "upstream_requests=%llu\nupstream_successes=%llu\nupstream_failures=%llu\n"
                 "avg_latency_ms=%llu\nmax_latency_ms=%llu\nupstream_avg_latency_ms=%llu\n"
-                "reloads=%llu\nrules_exact_allow=%d\nrules_suffix_allow=%d\nrules_exact_block=%d\n"
+                "reloads=%llu\nexact_index_size=%d\nrules_exact_allow=%d\nrules_suffix_allow=%d\nrules_exact_block=%d\n"
                 "rules_suffix_block=%d\nrules_regex_allow=%d\nrules_regex_block=%d\n"
                 "rules_temp_allow=%d\nrules_temp_block=%d\nsplit_upstreams=%d\n",
                 (long) getpid(),
@@ -1604,6 +1651,7 @@ static void handle_control(int fd) {
                 (unsigned long long) g_stats.max_latency_ms,
                 (unsigned long long) div_u64(g_stats.upstream_latency_ms, g_stats.upstream_requests),
                 (unsigned long long) g_stats.reloads,
+                EXACT_INDEX_SIZE,
                 g_cfg.exact_allow_count,
                 g_cfg.suffix_allow_count,
                 g_cfg.exact_block_count,
