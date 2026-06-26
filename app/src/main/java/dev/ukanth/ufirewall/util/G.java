@@ -403,6 +403,10 @@ public class G extends Application implements Application.ActivityLifecycleCallb
         return dnsPolicyPrefs().getString(DNS_HIJACK_BLOCKLIST_URLS, "");
     }
 
+    public static boolean appendDnsHijackBlocklistUrl(String url) {
+        return appendLinePreference(dnsPolicyPrefs(), DNS_HIJACK_BLOCKLIST_URLS, url);
+    }
+
     public static boolean dnsHijackScheduledBlocklistUpdates() {
         return dnsPolicyPrefs().getBoolean(DNS_HIJACK_SCHEDULED_BLOCKLIST_UPDATES, false);
     }

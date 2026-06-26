@@ -223,6 +223,12 @@
             android:summary="@string/dns_hijack_blocklist_urls_summary"
             android:title="@string/dns_hijack_blocklist_urls_title" />
 
+        <Preference
+            android:dependency="enableDnsHijack"
+            android:key="dnsHijackBlocklistPresets"
+            android:summary="@string/dns_hijack_blocklist_presets_summary"
+            android:title="@string/dns_hijack_blocklist_presets_title" />
+
         <CheckBoxPreference
             android:defaultValue="false"
             android:dependency="enableDnsHijack"

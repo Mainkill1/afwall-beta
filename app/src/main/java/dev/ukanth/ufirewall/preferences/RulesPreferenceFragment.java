@@ -20,6 +20,8 @@ import android.preference.SwitchPreference;
 import com.afollestad.materialdialogs.MaterialDialog;
 
 import java.io.File;
+import java.util.ArrayList;
+import java.util.Locale;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -75,6 +77,14 @@ public class RulesPreferenceFragment extends PreferenceFragment implements
         if (pasteBlocklist != null) {
             pasteBlocklist.setOnPreferenceClickListener(preference -> {
                 showDnsBlocklistPasteDialog();
+                return true;
+            });
+        }
+
+        Preference blocklistPresets = findPreference("dnsHijackBlocklistPresets");
+        if (blocklistPresets != null) {
+            blocklistPresets.setOnPreferenceClickListener(preference -> {
+                showDnsBlocklistPresetDialog();
                 return true;
             });
         }
@@ -259,6 +269,79 @@ public class RulesPreferenceFragment extends PreferenceFragment implements
         ClipData.Item item = clipboard.getPrimaryClip().getItemAt(0);
         CharSequence text = item == null ? null : item.coerceToText(ctx);
         return text == null ? "" : text.toString();
+    }
+
+    private void showDnsBlocklistPresetDialog() {
+        if (getActivity() == null) {
+            return;
+        }
+        String[] names = getResources().getStringArray(R.array.dns_hijack_blocklist_preset_names);
+        String[] urls = getResources().getStringArray(R.array.dns_hijack_blocklist_preset_urls);
+        new MaterialDialog.Builder(getActivity())
+                .title(R.string.dns_hijack_blocklist_presets_title)
+                .content(R.string.dns_hijack_blocklist_presets_dialog_summary)
+                .items(names)
+                .itemsCallbackMultiChoice(selectedPresetIndices(urls), (dialog, which, text) -> {
+                    int added = 0;
+                    int existing = 0;
+                    for (int index : which) {
+                        if (index < 0 || index >= urls.length) {
+                            continue;
+                        }
+                        if (G.appendDnsHijackBlocklistUrl(urls[index])) {
+                            added++;
+                        } else {
+                            existing++;
+                        }
+                    }
+                    DnsBlocklistUpdateReceiver.scheduleOrCancel(ctx);
+                    showDnsBlocklistPresetResult(added, existing);
+                    return true;
+                })
+                .positiveText(R.string.add)
+                .negativeText(R.string.Cancel)
+                .show();
+    }
+
+    private Integer[] selectedPresetIndices(String[] urls) {
+        ArrayList<Integer> selected = new ArrayList<>();
+        String configured = G.dnsHijackBlocklistUrls();
+        if (configured == null || configured.trim().isEmpty()) {
+            return null;
+        }
+        for (int i = 0; i < urls.length; i++) {
+            if (containsConfiguredBlocklistUrl(configured, urls[i])) {
+                selected.add(i);
+            }
+        }
+        return selected.isEmpty() ? null : selected.toArray(new Integer[0]);
+    }
+
+    private boolean containsConfiguredBlocklistUrl(String configured, String url) {
+        String normalizedUrl = url == null ? "" : url.trim().toLowerCase(Locale.US);
+        if (normalizedUrl.isEmpty()) {
+            return false;
+        }
+        String[] entries = configured.split("[\\r\\n,]+");
+        for (String entry : entries) {
+            String normalizedEntry = entry == null ? "" : entry.trim().toLowerCase(Locale.US);
+            if (normalizedUrl.equals(normalizedEntry)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private void showDnsBlocklistPresetResult(int added, int existing) {
+        if (getActivity() == null) {
+            return;
+        }
+        new MaterialDialog.Builder(getActivity())
+                .title(R.string.dns_hijack_blocklist_presets_title)
+                .content(getString(R.string.dns_hijack_blocklist_presets_result,
+                        added, existing))
+                .positiveText(R.string.OK)
+                .show();
     }
 
     private void runDnsBlocklistRollback() {
