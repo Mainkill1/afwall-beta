@@ -12,6 +12,10 @@ import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.net.DatagramPacket;
+import java.net.DatagramSocket;
+import java.net.InetAddress;
+import java.net.SocketTimeoutException;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
@@ -208,6 +212,18 @@ public final class DnsHijackManager {
         return entries;
     }
 
+    public static String benchmarkUpstreams(Context context) {
+        String daemonResult = queryControl(context, "benchmark");
+        if (daemonResult.startsWith("benchmark=1")) {
+            ApplicationErrorLog.add(context, "DNS upstream benchmark completed through daemon control socket");
+            return daemonResult;
+        }
+
+        ApplicationErrorLog.add(context, "DNS upstream benchmark falling back to app UDP probes: "
+                + daemonResult.trim());
+        return benchmarkUpstreamsDirect();
+    }
+
     public static boolean addRuleFromQuery(Context context, QueryEntry entry, int action) {
         if (entry == null || !entry.hasDomain()) {
             return false;
@@ -310,6 +326,89 @@ public final class DnsHijackManager {
         }
     }
 
+    private static String benchmarkUpstreamsDirect() {
+        StringBuilder out = new StringBuilder();
+        List<UpstreamTarget> targets = parseUpstreamTargets(G.dnsHijackUpstreams());
+        int timeoutMs = Math.min(Math.max(G.dnsHijackTimeoutMs(), 250), 1000);
+        byte[] query = buildBenchmarkQuery();
+
+        out.append("benchmark=1\n");
+        out.append("source=app_direct_udp\n");
+        out.append("upstreams=").append(targets.size()).append('\n');
+        out.append("timeout_ms=").append(timeoutMs).append('\n');
+        if (targets.isEmpty()) {
+            out.append("error=no_upstreams_configured\n");
+            return out.toString();
+        }
+
+        for (int i = 0; i < targets.size(); i++) {
+            UpstreamTarget target = targets.get(i);
+            long start = System.nanoTime();
+            int latencyMs = -1;
+            int bytes = -1;
+            int rcode = -1;
+            String status = "fail";
+            try (DatagramSocket socket = new DatagramSocket()) {
+                socket.setSoTimeout(timeoutMs);
+                InetAddress address = InetAddress.getByName(target.host);
+                DatagramPacket request = new DatagramPacket(query, query.length, address, target.port);
+                socket.send(request);
+                byte[] response = new byte[512];
+                DatagramPacket reply = new DatagramPacket(response, response.length);
+                socket.receive(reply);
+                latencyMs = (int) ((System.nanoTime() - start) / 1000000L);
+                bytes = reply.getLength();
+                rcode = bytes >= 4 ? response[3] & 0x0f : -1;
+                status = "ok";
+            } catch (SocketTimeoutException e) {
+                latencyMs = (int) ((System.nanoTime() - start) / 1000000L);
+                status = "timeout";
+            } catch (IOException | RuntimeException e) {
+                latencyMs = (int) ((System.nanoTime() - start) / 1000000L);
+                status = "error";
+            }
+            out.append("upstream[").append(i).append("]=")
+                    .append(target.host).append(':').append(target.port)
+                    .append(" status=").append(status)
+                    .append(" latency_ms=").append(latencyMs)
+                    .append(" rcode=").append(rcode)
+                    .append(" bytes=").append(bytes)
+                    .append('\n');
+        }
+        return out.toString();
+    }
+
+    private static byte[] buildBenchmarkQuery() {
+        byte[] query = new byte[] {
+                0x42, 0x53, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00,
+                0x00, 0x00, 0x00, 0x00,
+                0x07, 'e', 'x', 'a', 'm', 'p', 'l', 'e',
+                0x03, 'c', 'o', 'm',
+                0x00,
+                0x00, 0x01,
+                0x00, 0x01
+        };
+        int id = (int) (System.currentTimeMillis() & 0xffff);
+        query[0] = (byte) ((id >> 8) & 0xff);
+        query[1] = (byte) (id & 0xff);
+        return query;
+    }
+
+    private static List<UpstreamTarget> parseUpstreamTargets(String raw) {
+        List<UpstreamTarget> targets = new ArrayList<>();
+        if (raw == null) {
+            return targets;
+        }
+        String[] lines = raw.split("[\\r\\n,]+");
+        for (String line : lines) {
+            UpstreamTarget target = UpstreamTarget.parse(line);
+            if (target != null) {
+                targets.add(target);
+            }
+        }
+        return targets;
+    }
+
     private static void appendFileInfo(StringBuilder out, String label, File file) {
         out.append(label).append('=').append(file.getAbsolutePath());
         out.append(" exists=").append(file.exists());
@@ -387,6 +486,56 @@ public final class DnsHijackManager {
 
         public String displayLine() {
             return timestamp + "  " + action + "  " + domain + "  " + latency;
+        }
+    }
+
+    private static final class UpstreamTarget {
+        private final String host;
+        private final int port;
+
+        private UpstreamTarget(String host, int port) {
+            this.host = host;
+            this.port = port;
+        }
+
+        private static UpstreamTarget parse(String raw) {
+            if (raw == null) {
+                return null;
+            }
+            String value = raw.trim();
+            String host = value;
+            int port = 53;
+            if (value.isEmpty() || value.startsWith("#")) {
+                return null;
+            }
+            if (value.startsWith("[") && value.contains("]")) {
+                int end = value.indexOf(']');
+                host = value.substring(1, end);
+                if (end + 2 < value.length() && value.charAt(end + 1) == ':') {
+                    port = parsePort(value.substring(end + 2), port);
+                }
+            } else {
+                int firstColon = value.indexOf(':');
+                int lastColon = value.lastIndexOf(':');
+                if (firstColon > 0 && firstColon == lastColon) {
+                    host = value.substring(0, firstColon);
+                    port = parsePort(value.substring(firstColon + 1), port);
+                }
+            }
+            host = host.trim();
+            if (host.isEmpty()) {
+                return null;
+            }
+            return new UpstreamTarget(host, port);
+        }
+
+        private static int parsePort(String raw, int fallback) {
+            try {
+                int parsed = Integer.parseInt(raw.trim());
+                return parsed > 0 && parsed <= 65535 ? parsed : fallback;
+            } catch (NumberFormatException e) {
+                return fallback;
+            }
         }
     }
 

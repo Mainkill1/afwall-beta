@@ -790,6 +790,24 @@ static ssize_t forward_udp_probe(const config_t *cfg, const uint8_t *query, size
     return -1;
 }
 
+static ssize_t forward_udp_probe_one(const upstream_t *upstream, int timeout_ms,
+                                     const uint8_t *query, size_t query_len,
+                                     uint8_t *response, size_t response_len) {
+    int fd;
+    ssize_t got;
+    fd = connect_upstream(upstream, SOCK_DGRAM, timeout_ms);
+    if (fd < 0) {
+        return -1;
+    }
+    if (send(fd, query, query_len, 0) < 0) {
+        close(fd);
+        return -1;
+    }
+    got = recv(fd, response, response_len, 0);
+    close(fd);
+    return got;
+}
+
 static ssize_t read_full(int fd, uint8_t *buf, size_t len) {
     size_t got = 0;
     while (got < len) {
@@ -1343,6 +1361,52 @@ static void write_health_response(int client) {
                     + g_cfg.temp_allow_count + g_cfg.temp_block_count);
 }
 
+static void write_benchmark_response(int client) {
+    uint8_t query[MAX_PACKET];
+    size_t query_len;
+    int timeout_ms;
+    int i;
+
+    query_len = build_health_query(query, sizeof(query));
+    timeout_ms = g_cfg.timeout_ms < 1000 ? g_cfg.timeout_ms : 1000;
+    if (timeout_ms < 250) {
+        timeout_ms = 250;
+    }
+
+    write_control_response(client, "benchmark=1\nupstreams=%d\ntimeout_ms=%d\n",
+            g_cfg.upstream_count, timeout_ms);
+    if (query_len == 0) {
+        write_control_response(client, "error=unable_to_build_query\n");
+        return;
+    }
+
+    for (i = 0; i < g_cfg.upstream_count; i++) {
+        uint8_t response[MAX_PACKET];
+        struct timeval start;
+        struct timeval end;
+        ssize_t response_len;
+        int latency_ms;
+        int rcode;
+
+        gettimeofday(&start, NULL);
+        response_len = forward_udp_probe_one(&g_cfg.upstreams[i], timeout_ms, query, query_len,
+                response, sizeof(response));
+        gettimeofday(&end, NULL);
+        latency_ms = elapsed_ms(&start, &end);
+        rcode = response_len > 0 ? response_rcode(response, (size_t) response_len) : -1;
+
+        write_control_response(client,
+                "upstream[%d]=%s:%d status=%s latency_ms=%d rcode=%d bytes=%ld\n",
+                i,
+                g_cfg.upstreams[i].host,
+                g_cfg.upstreams[i].port,
+                response_len > 0 ? "ok" : "fail",
+                latency_ms,
+                rcode,
+                (long) response_len);
+    }
+}
+
 static void handle_control(int fd) {
     int client = accept(fd, NULL, NULL);
     char cmd[128];
@@ -1406,6 +1470,8 @@ static void handle_control(int fd) {
                 g_cfg.temp_block_count);
     } else if (strcmp(cmd, "health") == 0) {
         write_health_response(client);
+    } else if (strcmp(cmd, "benchmark") == 0) {
+        write_benchmark_response(client);
     } else if (strcmp(cmd, "reload") == 0) {
         if (reload_config()) {
             write_control_response(client, "ok reload generation=%llu\n", (unsigned long long) g_cfg.generation);

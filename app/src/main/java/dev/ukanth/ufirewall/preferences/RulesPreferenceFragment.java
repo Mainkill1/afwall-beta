@@ -77,6 +77,14 @@ public class RulesPreferenceFragment extends PreferenceFragment implements
             });
         }
 
+        Preference benchmarkUpstreams = findPreference("dnsHijackBenchmarkUpstreams");
+        if (benchmarkUpstreams != null) {
+            benchmarkUpstreams.setOnPreferenceClickListener(preference -> {
+                runDnsUpstreamBenchmark();
+                return true;
+            });
+        }
+
         Preference rollbackBlocklist = findPreference("dnsHijackRollbackBlocklist");
         if (rollbackBlocklist != null) {
             rollbackBlocklist.setOnPreferenceClickListener(preference -> {
@@ -215,6 +223,26 @@ public class RulesPreferenceFragment extends PreferenceFragment implements
 
     private void runDnsBlocklistRollback() {
         runBlocklistTask(() -> DnsBlocklistManager.restorePrevious(ctx));
+    }
+
+    private void runDnsUpstreamBenchmark() {
+        new Thread(() -> {
+            String result = DnsHijackManager.benchmarkUpstreams(ctx);
+            new Handler(Looper.getMainLooper()).post(() -> showDnsBenchmarkResult(result));
+        }).start();
+    }
+
+    private void showDnsBenchmarkResult(String result) {
+        if (getActivity() == null) {
+            return;
+        }
+        new MaterialDialog.Builder(getActivity())
+                .title(R.string.dns_hijack_benchmark_upstreams_title)
+                .content(result == null || result.trim().isEmpty()
+                        ? getString(R.string.dns_hijack_benchmark_empty)
+                        : result)
+                .positiveText(R.string.OK)
+                .show();
     }
 
     private void saveDnsProfilePolicy() {

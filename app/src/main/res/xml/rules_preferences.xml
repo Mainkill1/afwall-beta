@@ -91,6 +91,12 @@
             android:summary="@string/dns_hijack_upstreams_summary"
             android:title="@string/dns_hijack_upstreams_title" />
 
+        <Preference
+            android:dependency="enableDnsHijack"
+            android:key="dnsHijackBenchmarkUpstreams"
+            android:summary="@string/dns_hijack_benchmark_upstreams_summary"
+            android:title="@string/dns_hijack_benchmark_upstreams_title" />
+
         <CheckBoxPreference
             android:defaultValue="true"
             android:dependency="enableDnsHijack"
