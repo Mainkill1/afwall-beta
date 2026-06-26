@@ -438,6 +438,25 @@ public final class DnsHijackManager {
         return values;
     }
 
+    private static Map<String, String> parseExtras(String[] parts, int startIndex) {
+        Map<String, String> values = new HashMap<>();
+        if (parts == null || parts.length <= startIndex) {
+            return values;
+        }
+        for (int i = startIndex; i < parts.length; i++) {
+            String part = parts[i];
+            if (part == null) {
+                continue;
+            }
+            int separator = part.indexOf('=');
+            if (separator <= 0 || separator >= part.length() - 1) {
+                continue;
+            }
+            values.put(part.substring(0, separator), part.substring(separator + 1));
+        }
+        return values;
+    }
+
     private static String firstValue(Map<String, String> preferred,
                                      Map<String, String> fallback,
                                      String key) {
@@ -457,6 +476,39 @@ public final class DnsHijackManager {
         } catch (NumberFormatException e) {
             return fallback;
         }
+    }
+
+    private static String emptyFallback(String value, String fallback) {
+        return value == null || value.trim().isEmpty() ? fallback : value.trim();
+    }
+
+    private static String qtypeName(String value) {
+        long numeric = parseLong(value, -1L);
+        if (numeric == 1L) {
+            return "A";
+        }
+        if (numeric == 2L) {
+            return "NS";
+        }
+        if (numeric == 5L) {
+            return "CNAME";
+        }
+        if (numeric == 15L) {
+            return "MX";
+        }
+        if (numeric == 16L) {
+            return "TXT";
+        }
+        if (numeric == 28L) {
+            return "AAAA";
+        }
+        if (numeric == 33L) {
+            return "SRV";
+        }
+        if (numeric == 65L) {
+            return "HTTPS";
+        }
+        return numeric > 0L ? String.valueOf(numeric) : "unknown";
     }
 
     private static String sanitizeHistoryFilter(String filter) {
@@ -908,12 +960,24 @@ public final class DnsHijackManager {
         public final String action;
         public final String domain;
         public final String latency;
+        public final String transport;
+        public final String qtype;
+        public final String result;
+        public final String rule;
+        public final String upstream;
 
-        private QueryEntry(long timestamp, String action, String domain, String latency) {
+        private QueryEntry(long timestamp, String action, String domain, String latency,
+                           String transport, String qtype, String result, String rule,
+                           String upstream) {
             this.timestamp = timestamp;
             this.action = action;
             this.domain = domain;
             this.latency = latency;
+            this.transport = emptyFallback(transport, "unknown");
+            this.qtype = qtypeName(emptyFallback(qtype, "0"));
+            this.result = emptyFallback(result, action);
+            this.rule = emptyFallback(rule, action);
+            this.upstream = emptyFallback(upstream, "unknown");
         }
 
         private static QueryEntry parse(String line) {
@@ -931,7 +995,11 @@ public final class DnsHijackManager {
                 if (domain.isEmpty()) {
                     return null;
                 }
-                return new QueryEntry(timestamp, action, domain, parts[3]);
+                Map<String, String> extras = parseExtras(parts, 4);
+                return new QueryEntry(timestamp, action, domain, parts[3],
+                        extras.get("transport"), extras.get("qtype"),
+                        extras.get("result"), extras.get("rule"),
+                        extras.get("upstream"));
             } catch (NumberFormatException e) {
                 return null;
             }
@@ -942,7 +1010,12 @@ public final class DnsHijackManager {
         }
 
         public String displayLine() {
-            return timestamp + "  " + action + "  " + domain + "  " + latency;
+            return timestamp + "  " + action + "  " + domain + "  " + latency
+                    + "  transport=" + transport
+                    + "  qtype=" + qtype
+                    + "  result=" + result
+                    + "  rule=" + rule
+                    + "  upstream=" + upstream;
         }
     }
 

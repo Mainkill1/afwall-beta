@@ -196,7 +196,9 @@ public class DnsQueriesActivity extends AppCompatActivity {
         String time = entry.timestamp > 0
                 ? new SimpleDateFormat("HH:mm:ss", Locale.US).format(new Date(entry.timestamp * 1000L))
                 : "--:--:--";
-        return time + "  " + entry.action + "  " + entry.domain + "  " + entry.latency;
+        return time + "  " + entry.result + "  " + entry.domain + "  " + entry.latency
+                + "\n" + entry.transport.toUpperCase(Locale.US) + " " + entry.qtype
+                + "  rule=" + entry.rule + "  upstream=" + entry.upstream;
     }
 
     private void showQueryActions(DnsHijackManager.QueryEntry entry) {

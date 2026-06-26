@@ -169,6 +169,11 @@ typedef struct {
     uint64_t seq;
     char domain[MAX_DOMAIN];
     char action[32];
+    char transport[8];
+    char result[16];
+    char rule[32];
+    char upstream[32];
+    uint16_t qtype;
     int latency_ms;
     uint64_t timestamp;
 } log_entry_t;
@@ -416,11 +421,18 @@ static int cache_entry_count_by_type(bool negative) {
     return count;
 }
 
-static void add_log(const char *domain, const char *action, int latency_ms) {
+static void add_log(const char *domain, const char *action, const char *transport,
+                    uint16_t qtype, const char *result, const char *rule,
+                    const char *upstream, int latency_ms) {
     log_entry_t *entry = &g_logs[g_log_pos % LOG_RING];
     entry->seq = ++g_log_seq;
     safe_copy(entry->domain, sizeof(entry->domain), domain);
     safe_copy(entry->action, sizeof(entry->action), action);
+    safe_copy(entry->transport, sizeof(entry->transport), transport);
+    safe_copy(entry->result, sizeof(entry->result), result);
+    safe_copy(entry->rule, sizeof(entry->rule), rule);
+    safe_copy(entry->upstream, sizeof(entry->upstream), upstream);
+    entry->qtype = qtype;
     entry->latency_ms = latency_ms;
     entry->timestamp = now_seconds();
     g_log_pos = (g_log_pos + 1) % LOG_RING;
@@ -450,11 +462,16 @@ static void flush_logs(void) {
         for (i = 0; i < LOG_RING; i++) {
             const log_entry_t *entry = &g_logs[i];
             if (entry->seq == seq) {
-                fprintf(fp, "%llu %s %s %dms\n",
+                fprintf(fp, "%llu %s %s %dms transport=%s qtype=%u result=%s rule=%s upstream=%s\n",
                         (unsigned long long) entry->timestamp,
                         entry->action,
                         entry->domain,
-                        entry->latency_ms);
+                        entry->latency_ms,
+                        entry->transport,
+                        (unsigned int) entry->qtype,
+                        entry->result,
+                        entry->rule,
+                        entry->upstream);
                 break;
             }
         }
@@ -1830,13 +1847,15 @@ static int create_control_socket(const char *path) {
     return fd;
 }
 
-static void finish_dns_query(const char *domain, const char *action, const struct timeval *start) {
+static void finish_dns_query(const char *domain, const char *action, const char *transport,
+                             uint16_t qtype, const char *result, const char *rule,
+                             const char *upstream, const struct timeval *start) {
     struct timeval end;
     int latency_ms;
     gettimeofday(&end, NULL);
     latency_ms = elapsed_ms(start, &end);
     record_query_latency(latency_ms);
-    add_log(domain, action, latency_ms);
+    add_log(domain, action, transport, qtype, result, rule, upstream, latency_ms);
 }
 
 static void handle_dns_query(const config_t *cfg, const uint8_t *query, size_t query_len,
@@ -1852,6 +1871,7 @@ static void handle_dns_query(const config_t *cfg, const uint8_t *query, size_t q
     struct timeval upstream_end;
     int upstream_latency_ms;
     bool cache_negative = false;
+    const char *transport = tcp ? "tcp" : "udp";
     gettimeofday(&start, NULL);
     g_stats.queries++;
     if (tcp) {
@@ -1864,14 +1884,16 @@ static void handle_dns_query(const config_t *cfg, const uint8_t *query, size_t q
         *action_out = "invalid";
         g_stats.invalid_queries++;
         g_stats.blocked++;
-        finish_dns_query("unknown", "invalid", &start);
+        finish_dns_query("unknown", "invalid", transport, qtype,
+                "block", "parse", "none", &start);
         return;
     }
     if (evaluate_domain(cfg, domain, &reason) == DECISION_BLOCK) {
         *response_len = build_block_response(query, query_len, response, MAX_PACKET);
         g_stats.blocked++;
         *action_out = reason;
-        finish_dns_query(domain, reason, &start);
+        finish_dns_query(domain, reason, transport, qtype,
+                "block", reason, "none", &start);
         return;
     }
     if (cache_lookup(domain, qtype, query, response, response_len, &cache_negative)) {
@@ -1883,7 +1905,8 @@ static void handle_dns_query(const config_t *cfg, const uint8_t *query, size_t q
         }
         g_stats.allowed++;
         *action_out = cache_negative ? "cache_negative" : "cache";
-        finish_dns_query(domain, *action_out, &start);
+        finish_dns_query(domain, *action_out, transport, qtype,
+                "allow", *action_out, "cache", &start);
         return;
     }
     g_stats.cache_misses++;
@@ -1905,7 +1928,8 @@ static void handle_dns_query(const config_t *cfg, const uint8_t *query, size_t q
         g_stats.allowed++;
         g_stats.upstream_successes++;
         *action_out = route;
-        finish_dns_query(domain, route, &start);
+        finish_dns_query(domain, route, transport, qtype,
+                "allow", "upstream", route, &start);
         return;
     }
     g_stats.upstream_failures++;
@@ -1913,13 +1937,16 @@ static void handle_dns_query(const config_t *cfg, const uint8_t *query, size_t q
         *response_len = 0;
         *action_out = "upstream_failed";
         g_stats.fail_open_drops++;
+        finish_dns_query(domain, *action_out, transport, qtype,
+                "fail_open", "upstream_failed", route, &start);
     } else {
         *response_len = build_block_response(query, query_len, response, MAX_PACKET);
         g_stats.blocked++;
         *action_out = "fail_closed";
         g_stats.fail_closed_blocks++;
+        finish_dns_query(domain, *action_out, transport, qtype,
+                "block", "fail_closed", route, &start);
     }
-    finish_dns_query(domain, *action_out, &start);
 }
 
 static void handle_udp(int fd) {
@@ -1944,7 +1971,8 @@ static void handle_udp(int fd) {
         sendto(fd, response, response_len, 0, (struct sockaddr *) &peer, peer_len);
     }
     if (response_len == 0 && !g_cfg.fail_open) {
-        add_log("unknown", "no_response", elapsed_ms(&start, &end));
+        add_log("unknown", "no_response", "udp", 0,
+                "block", "no_response", "none", elapsed_ms(&start, &end));
     }
 }
 
@@ -2314,11 +2342,17 @@ static void handle_control(int fd) {
             if (g_logs[idx].timestamp == 0) {
                 continue;
             }
-            write_control_response(client, "%llu %s %s %dms\n",
+            write_control_response(client,
+                    "%llu %s %s %dms transport=%s qtype=%u result=%s rule=%s upstream=%s\n",
                     (unsigned long long) g_logs[idx].timestamp,
                     g_logs[idx].action,
                     g_logs[idx].domain,
-                    g_logs[idx].latency_ms);
+                    g_logs[idx].latency_ms,
+                    g_logs[idx].transport,
+                    (unsigned int) g_logs[idx].qtype,
+                    g_logs[idx].result,
+                    g_logs[idx].rule,
+                    g_logs[idx].upstream);
         }
     } else if (strcmp(cmd, "history") == 0) {
         write_history_response(client, "");
