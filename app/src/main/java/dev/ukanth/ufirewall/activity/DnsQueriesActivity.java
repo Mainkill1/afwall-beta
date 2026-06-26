@@ -32,6 +32,8 @@ public class DnsQueriesActivity extends AppCompatActivity {
 
     private static final int MENU_REFRESH = 1;
     private static final int MENU_COPY = 2;
+    private static final int MENU_SEARCH = 3;
+    private static final int MENU_TOGGLE_HISTORY = 4;
     private static final long REFRESH_MS = 2500L;
 
     private final Handler handler = new Handler(Looper.getMainLooper());
@@ -39,12 +41,16 @@ public class DnsQueriesActivity extends AppCompatActivity {
     private final List<DnsHijackManager.QueryEntry> entries = new ArrayList<>();
     private ArrayAdapter<String> adapter;
     private TextView status;
+    private boolean showHistory;
+    private String historyFilter = "";
 
     private final Runnable autoRefresh = new Runnable() {
         @Override
         public void run() {
-            loadQueries(false);
-            handler.postDelayed(this, REFRESH_MS);
+            if (!showHistory) {
+                loadQueries(false);
+                handler.postDelayed(this, REFRESH_MS);
+            }
         }
     };
 
@@ -75,7 +81,9 @@ public class DnsQueriesActivity extends AppCompatActivity {
     @Override
     protected void onResume() {
         super.onResume();
-        handler.postDelayed(autoRefresh, REFRESH_MS);
+        if (!showHistory) {
+            handler.postDelayed(autoRefresh, REFRESH_MS);
+        }
     }
 
     @Override
@@ -93,6 +101,9 @@ public class DnsQueriesActivity extends AppCompatActivity {
     @Override
     public boolean onCreateOptionsMenu(Menu menu) {
         menu.add(0, MENU_REFRESH, 0, R.string.refresh).setIcon(R.drawable.ic_refresh);
+        menu.add(0, MENU_SEARCH, 0, R.string.Search).setIcon(R.drawable.ic_search);
+        menu.add(0, MENU_TOGGLE_HISTORY, 0,
+                showHistory ? R.string.dns_queries_live : R.string.dns_queries_history);
         menu.add(0, MENU_COPY, 0, R.string.copy).setIcon(R.drawable.ic_copy);
         return true;
     }
@@ -105,6 +116,12 @@ public class DnsQueriesActivity extends AppCompatActivity {
                 return true;
             case MENU_REFRESH:
                 loadQueries(true);
+                return true;
+            case MENU_SEARCH:
+                showSearchDialog();
+                return true;
+            case MENU_TOGGLE_HISTORY:
+                setHistoryMode(!showHistory);
                 return true;
             case MENU_COPY:
                 Api.copyToClipboard(this, buildTextDump());
@@ -121,13 +138,17 @@ public class DnsQueriesActivity extends AppCompatActivity {
         if (showLoading) {
             status.setText(R.string.loading);
         }
+        final boolean useHistory = showHistory;
+        final String filter = historyFilter;
         executor.execute(() -> {
-            List<DnsHijackManager.QueryEntry> latest = DnsHijackManager.getRecentQueries(this);
-            runOnUiThread(() -> updateQueries(latest));
+            List<DnsHijackManager.QueryEntry> latest = useHistory
+                    ? DnsHijackManager.getHistoricalQueries(this, filter)
+                    : DnsHijackManager.getRecentQueries(this);
+            runOnUiThread(() -> updateQueries(latest, useHistory, filter));
         });
     }
 
-    private void updateQueries(List<DnsHijackManager.QueryEntry> latest) {
+    private void updateQueries(List<DnsHijackManager.QueryEntry> latest, boolean history, String filter) {
         entries.clear();
         adapter.clear();
         for (int i = latest.size() - 1; i >= 0; i--) {
@@ -136,7 +157,16 @@ public class DnsQueriesActivity extends AppCompatActivity {
             adapter.add(formatEntry(entry));
         }
         adapter.notifyDataSetChanged();
-        status.setText(getString(R.string.dns_queries_status, latest.size()));
+        if (history) {
+            if (filter == null || filter.trim().isEmpty()) {
+                status.setText(getString(R.string.dns_queries_history_status, latest.size()));
+            } else {
+                status.setText(getString(R.string.dns_queries_history_filter_status,
+                        latest.size(), filter.trim()));
+            }
+        } else {
+            status.setText(getString(R.string.dns_queries_status, latest.size()));
+        }
     }
 
     private String formatEntry(DnsHijackManager.QueryEntry entry) {
@@ -193,6 +223,33 @@ public class DnsQueriesActivity extends AppCompatActivity {
         Api.setRulesUpToDate(false);
         Api.toast(this, getString(added ? R.string.dns_query_rule_added : R.string.dns_query_rule_exists));
         loadQueries(false);
+    }
+
+    private void setHistoryMode(boolean enabled) {
+        showHistory = enabled;
+        if (showHistory) {
+            handler.removeCallbacks(autoRefresh);
+        } else {
+            historyFilter = "";
+            handler.removeCallbacks(autoRefresh);
+            handler.postDelayed(autoRefresh, REFRESH_MS);
+        }
+        invalidateOptionsMenu();
+        loadQueries(true);
+    }
+
+    private void showSearchDialog() {
+        new MaterialDialog.Builder(this)
+                .title(R.string.Search)
+                .input(getString(R.string.dns_queries_search_hint), historyFilter, (dialog, input) -> {
+                    historyFilter = input == null ? "" : input.toString().trim();
+                    showHistory = true;
+                    handler.removeCallbacks(autoRefresh);
+                    invalidateOptionsMenu();
+                    loadQueries(true);
+                })
+                .negativeText(R.string.Cancel)
+                .show();
     }
 
     private String buildTextDump() {

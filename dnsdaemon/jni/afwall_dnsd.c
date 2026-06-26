@@ -41,6 +41,8 @@
 #define DEFAULT_CACHE_SIZE 1024
 #define MAX_CACHE_SIZE 4096
 #define LOG_RING 256
+#define LOG_HISTORY_LIMIT 512
+#define LOG_LINE_MAX 512
 #define DEFAULT_PORT 5354
 #define DEFAULT_TIMEOUT_MS 2500
 
@@ -313,6 +315,38 @@ static bool read_proc_cpu_ticks(uint64_t *user_ticks, uint64_t *system_ticks) {
         *system_ticks = system;
     }
     return field >= 15;
+}
+
+static bool ascii_contains_ci(const char *haystack, const char *needle) {
+    size_t needle_len;
+    const char *p;
+    if (needle == NULL || needle[0] == '\0') {
+        return true;
+    }
+    if (haystack == NULL) {
+        return false;
+    }
+    needle_len = strlen(needle);
+    if (needle_len == 0) {
+        return true;
+    }
+    for (p = haystack; *p != '\0'; p++) {
+        size_t i;
+        for (i = 0; i < needle_len; i++) {
+            unsigned char hc = (unsigned char) p[i];
+            unsigned char nc = (unsigned char) needle[i];
+            if (hc == '\0') {
+                return false;
+            }
+            if (tolower(hc) != tolower(nc)) {
+                break;
+            }
+        }
+        if (i == needle_len) {
+            return true;
+        }
+    }
+    return false;
 }
 
 static uint64_t cpu_ticks_to_ms(uint64_t ticks) {
@@ -1888,6 +1922,46 @@ static void write_benchmark_response(int client) {
     }
 }
 
+static void write_history_response(int client, const char *filter) {
+    FILE *fp;
+    char line[LOG_LINE_MAX];
+    char (*matches)[LOG_LINE_MAX];
+    int count = 0;
+    int pos = 0;
+    int i;
+
+    if (g_cfg.log_file[0] == '\0') {
+        return;
+    }
+    fp = fopen(g_cfg.log_file, "r");
+    if (fp == NULL) {
+        return;
+    }
+    matches = (char (*)[LOG_LINE_MAX]) calloc(LOG_HISTORY_LIMIT, LOG_LINE_MAX);
+    if (matches == NULL) {
+        fclose(fp);
+        return;
+    }
+    while (fgets(line, sizeof(line), fp) != NULL) {
+        trim(line);
+        if (line[0] == '\0' || !ascii_contains_ci(line, filter)) {
+            continue;
+        }
+        safe_copy(matches[pos], LOG_LINE_MAX, line);
+        pos = (pos + 1) % LOG_HISTORY_LIMIT;
+        if (count < LOG_HISTORY_LIMIT) {
+            count++;
+        }
+    }
+    fclose(fp);
+
+    for (i = 0; i < count; i++) {
+        int idx = (pos - count + i + LOG_HISTORY_LIMIT) % LOG_HISTORY_LIMIT;
+        write_control_response(client, "%s\n", matches[idx]);
+    }
+    free(matches);
+}
+
 static void handle_control(int fd) {
     int client = accept(fd, NULL, NULL);
     char cmd[128];
@@ -1996,6 +2070,12 @@ static void handle_control(int fd) {
                     g_logs[idx].domain,
                     g_logs[idx].latency_ms);
         }
+    } else if (strcmp(cmd, "history") == 0) {
+        write_history_response(client, "");
+    } else if (strncmp(cmd, "history ", 8) == 0) {
+        char *filter = cmd + 8;
+        trim(filter);
+        write_history_response(client, filter);
     } else if (strcmp(cmd, "stop") == 0) {
         write_control_response(client, "ok stopping\n");
         g_running = 0;

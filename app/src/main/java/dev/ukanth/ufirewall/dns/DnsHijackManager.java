@@ -224,16 +224,13 @@ public final class DnsHijackManager {
     }
 
     public static List<QueryEntry> getRecentQueries(Context context) {
-        List<QueryEntry> entries = new ArrayList<>();
-        String logs = queryControl(context, "logs");
-        String[] lines = logs.split("\\r?\\n");
-        for (String line : lines) {
-            QueryEntry entry = QueryEntry.parse(line);
-            if (entry != null) {
-                entries.add(entry);
-            }
-        }
-        return entries;
+        return parseQueryEntries(queryControl(context, "logs"));
+    }
+
+    public static List<QueryEntry> getHistoricalQueries(Context context, String filter) {
+        String cleanFilter = sanitizeHistoryFilter(filter);
+        String command = cleanFilter.isEmpty() ? "history" : "history " + cleanFilter;
+        return parseQueryEntries(queryControl(context, command));
     }
 
     public static String benchmarkUpstreams(Context context) {
@@ -348,6 +345,33 @@ public final class DnsHijackManager {
         } catch (IOException e) {
             return "control socket error: " + e.getMessage() + "\n";
         }
+    }
+
+    private static List<QueryEntry> parseQueryEntries(String raw) {
+        List<QueryEntry> entries = new ArrayList<>();
+        if (raw == null) {
+            return entries;
+        }
+        String[] lines = raw.split("\\r?\\n");
+        for (String line : lines) {
+            QueryEntry entry = QueryEntry.parse(line);
+            if (entry != null) {
+                entries.add(entry);
+            }
+        }
+        return entries;
+    }
+
+    private static String sanitizeHistoryFilter(String filter) {
+        if (filter == null) {
+            return "";
+        }
+        String clean = filter.trim().replace('\n', ' ').replace('\r', ' ');
+        clean = clean.replaceAll("\\s+", " ");
+        if (clean.length() > 80) {
+            clean = clean.substring(0, 80);
+        }
+        return clean;
     }
 
     private static String benchmarkUpstreamsDirect() {

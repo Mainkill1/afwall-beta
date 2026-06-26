@@ -376,6 +376,11 @@
     <string name="dns_queries_title">DNS Queries</string>
     <string name="dns_queries_summary">View recent daemon DNS queries and quickly add allow or block rules.</string>
     <string name="dns_queries_status">%1$d DNS queries loaded.</string>
+    <string name="dns_queries_history">History</string>
+    <string name="dns_queries_live">Live</string>
+    <string name="dns_queries_history_status">%1$d historical DNS queries loaded.</string>
+    <string name="dns_queries_history_filter_status">%1$d historical DNS queries matched \"%2$s\".</string>
+    <string name="dns_queries_search_hint">Domain, action, or latency</string>
     <string name="dns_query_allow_exact">Allow this domain</string>
     <string name="dns_query_allow_suffix">Allow this domain and subdomains</string>
     <string name="dns_query_temp_allow">Temporarily allow this domain</string>
