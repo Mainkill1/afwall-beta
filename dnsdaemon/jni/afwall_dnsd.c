@@ -69,9 +69,16 @@ typedef struct {
     uint64_t expires_at;
 } temp_rule_t;
 
+typedef enum {
+    UPSTREAM_PROTO_AUTO = 0,
+    UPSTREAM_PROTO_UDP = 1,
+    UPSTREAM_PROTO_TCP = 2
+} upstream_protocol_t;
+
 typedef struct {
     char host[128];
     int port;
+    upstream_protocol_t protocol;
 } upstream_t;
 
 typedef struct {
@@ -1201,6 +1208,18 @@ static int connect_upstream(const upstream_t *upstream, int socktype, int timeou
     return fd;
 }
 
+static const char *upstream_protocol_name(upstream_protocol_t protocol) {
+    switch (protocol) {
+        case UPSTREAM_PROTO_UDP:
+            return "udp";
+        case UPSTREAM_PROTO_TCP:
+            return "tcp";
+        case UPSTREAM_PROTO_AUTO:
+        default:
+            return "auto";
+    }
+}
+
 static const upstream_t *select_upstreams(const config_t *cfg, const char *domain,
                                           int *count, const char **route) {
     int i;
@@ -1231,6 +1250,9 @@ static bool dns_response_truncated(const uint8_t *response, size_t response_len)
 static ssize_t forward_tcp_to_upstream(const upstream_t *upstream, int timeout_ms,
                                        const uint8_t *query, size_t query_len,
                                        uint8_t *response, size_t response_len);
+static ssize_t forward_udp_to_upstream(const upstream_t *upstream, int timeout_ms,
+                                       const uint8_t *query, size_t query_len,
+                                       uint8_t *response, size_t response_len);
 
 static ssize_t forward_udp(const config_t *cfg, const char *domain, const uint8_t *query,
                            size_t query_len, uint8_t *response, size_t response_len,
@@ -1243,21 +1265,31 @@ static ssize_t forward_udp(const config_t *cfg, const char *domain, const uint8_
     const upstream_t *upstreams = select_upstreams(cfg, domain, &count, route);
     split_route = route != NULL && *route != NULL && strcmp(*route, "split_upstream") == 0;
     for (i = 0; i < count; i++) {
-        int fd = connect_upstream(&upstreams[i], SOCK_DGRAM, cfg->timeout_ms);
+        bool udp_only = upstreams[i].protocol == UPSTREAM_PROTO_UDP;
         ssize_t got;
-        if (fd < 0) {
+        if (upstreams[i].protocol == UPSTREAM_PROTO_TCP) {
+            got = forward_tcp_to_upstream(&upstreams[i], cfg->timeout_ms,
+                    query, query_len, response, response_len);
+            if (got > 0) {
+                if (route != NULL) {
+                    *route = split_route ? "split_upstream_tcp" : "upstream_tcp";
+                }
+                return got;
+            }
             continue;
         }
-        if (send(fd, query, query_len, 0) < 0) {
-            close(fd);
-            continue;
-        }
-        got = recv(fd, response, response_len, 0);
-        close(fd);
+        got = forward_udp_to_upstream(&upstreams[i], cfg->timeout_ms,
+                query, query_len, response, response_len);
         if (got > 0) {
             if (dns_response_truncated(response, (size_t) got)) {
                 ssize_t tcp_got;
                 g_stats.upstream_truncated_responses++;
+                if (udp_only) {
+                    if (route != NULL) {
+                        *route = split_route ? "split_upstream_udp" : "upstream_udp";
+                    }
+                    return got;
+                }
                 if (truncated_len < 0 && (size_t) got <= sizeof(truncated_response)) {
                     memcpy(truncated_response, response, (size_t) got);
                     truncated_len = got;
@@ -1273,6 +1305,9 @@ static ssize_t forward_udp(const config_t *cfg, const char *domain, const uint8_
                 }
                 continue;
             }
+            if (udp_only && route != NULL) {
+                *route = split_route ? "split_upstream_udp" : "upstream_udp";
+            }
             return got;
         }
     }
@@ -1283,41 +1318,9 @@ static ssize_t forward_udp(const config_t *cfg, const char *domain, const uint8_
     return -1;
 }
 
-static ssize_t forward_udp_probe(const config_t *cfg, const uint8_t *query, size_t query_len,
-                                 uint8_t *response, size_t response_len, int *upstream_index) {
-    int i;
-    int timeout_ms = cfg->timeout_ms < 1000 ? cfg->timeout_ms : 1000;
-    if (timeout_ms < 250) {
-        timeout_ms = 250;
-    }
-    if (upstream_index != NULL) {
-        *upstream_index = -1;
-    }
-    for (i = 0; i < cfg->upstream_count; i++) {
-        int fd = connect_upstream(&cfg->upstreams[i], SOCK_DGRAM, timeout_ms);
-        ssize_t got;
-        if (fd < 0) {
-            continue;
-        }
-        if (send(fd, query, query_len, 0) < 0) {
-            close(fd);
-            continue;
-        }
-        got = recv(fd, response, response_len, 0);
-        close(fd);
-        if (got > 0) {
-            if (upstream_index != NULL) {
-                *upstream_index = i;
-            }
-            return got;
-        }
-    }
-    return -1;
-}
-
-static ssize_t forward_udp_probe_one(const upstream_t *upstream, int timeout_ms,
-                                     const uint8_t *query, size_t query_len,
-                                     uint8_t *response, size_t response_len) {
+static ssize_t forward_udp_to_upstream(const upstream_t *upstream, int timeout_ms,
+                                       const uint8_t *query, size_t query_len,
+                                       uint8_t *response, size_t response_len) {
     int fd;
     ssize_t got;
     fd = connect_upstream(upstream, SOCK_DGRAM, timeout_ms);
@@ -1331,6 +1334,43 @@ static ssize_t forward_udp_probe_one(const upstream_t *upstream, int timeout_ms,
     got = recv(fd, response, response_len, 0);
     close(fd);
     return got;
+}
+
+static ssize_t forward_udp_probe(const config_t *cfg, const uint8_t *query, size_t query_len,
+                                 uint8_t *response, size_t response_len, int *upstream_index) {
+    int i;
+    int timeout_ms = cfg->timeout_ms < 1000 ? cfg->timeout_ms : 1000;
+    if (timeout_ms < 250) {
+        timeout_ms = 250;
+    }
+    if (upstream_index != NULL) {
+        *upstream_index = -1;
+    }
+    for (i = 0; i < cfg->upstream_count; i++) {
+        ssize_t got = cfg->upstreams[i].protocol == UPSTREAM_PROTO_TCP
+                ? forward_tcp_to_upstream(&cfg->upstreams[i], timeout_ms,
+                query, query_len, response, response_len)
+                : forward_udp_to_upstream(&cfg->upstreams[i], timeout_ms,
+                query, query_len, response, response_len);
+        if (got > 0) {
+            if (upstream_index != NULL) {
+                *upstream_index = i;
+            }
+            return got;
+        }
+    }
+    return -1;
+}
+
+static ssize_t forward_udp_probe_one(const upstream_t *upstream, int timeout_ms,
+                                     const uint8_t *query, size_t query_len,
+                                     uint8_t *response, size_t response_len) {
+    if (upstream->protocol == UPSTREAM_PROTO_TCP) {
+        return forward_tcp_to_upstream(upstream, timeout_ms, query, query_len,
+                response, response_len);
+    }
+    return forward_udp_to_upstream(upstream, timeout_ms, query, query_len,
+            response, response_len);
 }
 
 static bool dns_response_truncated(const uint8_t *response, size_t response_len) {
@@ -1391,15 +1431,27 @@ static ssize_t forward_tcp(const config_t *cfg, const char *domain, const uint8_
                            const char **route) {
     int i;
     int count = 0;
+    bool split_route = false;
     const upstream_t *upstreams;
     if (query_len > 65535) {
         return -1;
     }
     upstreams = select_upstreams(cfg, domain, &count, route);
+    split_route = route != NULL && *route != NULL && strcmp(*route, "split_upstream") == 0;
     for (i = 0; i < count; i++) {
-        ssize_t got = forward_tcp_to_upstream(&upstreams[i], cfg->timeout_ms,
+        ssize_t got = upstreams[i].protocol == UPSTREAM_PROTO_UDP
+                ? forward_udp_to_upstream(&upstreams[i], cfg->timeout_ms,
+                query, query_len, response, response_len)
+                : forward_tcp_to_upstream(&upstreams[i], cfg->timeout_ms,
                 query, query_len, response, response_len);
         if (got > 0) {
+            if (route != NULL) {
+                if (upstreams[i].protocol == UPSTREAM_PROTO_UDP) {
+                    *route = split_route ? "split_upstream_udp" : "upstream_udp";
+                } else if (upstreams[i].protocol == UPSTREAM_PROTO_TCP) {
+                    *route = split_route ? "split_upstream_tcp" : "upstream_tcp";
+                }
+            }
             return got;
         }
     }
@@ -1416,29 +1468,53 @@ static void default_config(config_t *cfg) {
     cfg->upstream_count = 1;
     safe_copy(cfg->upstreams[0].host, sizeof(cfg->upstreams[0].host), "1.1.1.1");
     cfg->upstreams[0].port = 53;
+    cfg->upstreams[0].protocol = UPSTREAM_PROTO_AUTO;
 }
 
 static bool parse_upstream_value(const char *value, upstream_t *upstream) {
-    const char *colon;
+    char line[256];
+    char *target;
+    char *first_colon;
+    char *last_colon;
     if (value == NULL || value[0] == '\0' || upstream == NULL) {
         return false;
     }
     memset(upstream, 0, sizeof(*upstream));
-    colon = strrchr(value, ':');
-    if (colon != NULL && colon[1] != '\0') {
-        char host[128];
-        size_t host_len = (size_t) (colon - value);
-        if (host_len >= sizeof(host)) {
+    upstream->protocol = UPSTREAM_PROTO_AUTO;
+    upstream->port = 53;
+    safe_copy(line, sizeof(line), value);
+    trim(line);
+    target = line;
+    if (strncmp(target, "udp://", 6) == 0) {
+        upstream->protocol = UPSTREAM_PROTO_UDP;
+        target += 6;
+    } else if (strncmp(target, "tcp://", 6) == 0) {
+        upstream->protocol = UPSTREAM_PROTO_TCP;
+        target += 6;
+    }
+    trim(target);
+    if (target[0] == '[') {
+        char *end = strchr(target, ']');
+        if (end == NULL || end == target + 1) {
             return false;
         }
-        memcpy(host, value, host_len);
-        host[host_len] = '\0';
-        safe_copy(upstream->host, sizeof(upstream->host), host);
-        upstream->port = atoi(colon + 1);
+        *end = '\0';
+        safe_copy(upstream->host, sizeof(upstream->host), target + 1);
+        if (end[1] == ':' && end[2] != '\0') {
+            upstream->port = atoi(end + 2);
+        }
     } else {
-        safe_copy(upstream->host, sizeof(upstream->host), value);
-        upstream->port = 53;
+        first_colon = strchr(target, ':');
+        last_colon = strrchr(target, ':');
+        if (first_colon != NULL && first_colon == last_colon && first_colon[1] != '\0') {
+            *first_colon = '\0';
+            safe_copy(upstream->host, sizeof(upstream->host), target);
+            upstream->port = atoi(first_colon + 1);
+        } else {
+            safe_copy(upstream->host, sizeof(upstream->host), target);
+        }
     }
+    trim(upstream->host);
     if (upstream->port <= 0 || upstream->port > 65535) {
         upstream->port = 53;
     }
@@ -1590,6 +1666,7 @@ static bool load_config(const char *path, config_t *new_cfg) {
     if (new_cfg->upstream_count == 0) {
         safe_copy(new_cfg->upstreams[0].host, sizeof(new_cfg->upstreams[0].host), "1.1.1.1");
         new_cfg->upstreams[0].port = 53;
+        new_cfg->upstreams[0].protocol = UPSTREAM_PROTO_AUTO;
         new_cfg->upstream_count = 1;
     }
     if (!build_exact_index(new_cfg->exact_allow, new_cfg->exact_allow_count,
@@ -2070,10 +2147,11 @@ static void write_benchmark_response(int client) {
         rcode = response_len > 0 ? response_rcode(response, (size_t) response_len) : -1;
 
         write_control_response(client,
-                "upstream[%d]=%s:%d status=%s latency_ms=%d rcode=%d bytes=%ld\n",
+                "upstream[%d]=%s:%d protocol=%s status=%s latency_ms=%d rcode=%d bytes=%ld\n",
                 i,
                 g_cfg.upstreams[i].host,
                 g_cfg.upstreams[i].port,
+                upstream_protocol_name(g_cfg.upstreams[i].protocol),
                 response_len > 0 ? "ok" : "fail",
                 latency_ms,
                 rcode,

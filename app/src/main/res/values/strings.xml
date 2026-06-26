@@ -304,12 +304,12 @@
     <string name="dns_hijack_port_title">Local DNS daemon port</string>
     <string name="dns_hijack_port_summary">Port used by the local root DNS daemon. Reapply firewall rules after changing this.</string>
     <string name="dns_hijack_upstreams_title">Upstream DNS servers</string>
-    <string name="dns_hijack_upstreams_summary">One upstream per line, using host:port format.</string>
+    <string name="dns_hijack_upstreams_summary">One upstream per line. Use host:port, udp://host:port, tcp://host:port, or bracketed IPv6.</string>
     <string name="dns_hijack_benchmark_upstreams_title">Benchmark upstream DNS</string>
     <string name="dns_hijack_benchmark_upstreams_summary">Probe configured upstream resolvers and report per-server latency.</string>
     <string name="dns_hijack_benchmark_empty">No benchmark result was returned.</string>
     <string name="dns_hijack_split_upstreams_title">Split DNS routes</string>
-    <string name="dns_hijack_split_upstreams_summary">Route matching domains to dedicated upstreams, one per line, such as corp.example=10.0.0.53:53.</string>
+    <string name="dns_hijack_split_upstreams_summary">Route matching domains to dedicated upstreams, one per line, such as corp.example=tcp://10.0.0.53:53.</string>
     <string name="dns_hijack_capture_uids_title">Limit DNS capture to UIDs</string>
     <string name="dns_hijack_capture_uids_summary">Optional app UID list. When set, only listed UIDs are redirected through DNS filtering.</string>
     <string name="dns_hijack_bypass_uids_title">Bypass DNS capture for UIDs</string>

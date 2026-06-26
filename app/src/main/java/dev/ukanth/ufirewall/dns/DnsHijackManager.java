@@ -16,6 +16,8 @@ import java.io.OutputStream;
 import java.net.DatagramPacket;
 import java.net.DatagramSocket;
 import java.net.InetAddress;
+import java.net.InetSocketAddress;
+import java.net.Socket;
 import java.net.SocketTimeoutException;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
@@ -487,38 +489,85 @@ public final class DnsHijackManager {
         for (int i = 0; i < targets.size(); i++) {
             UpstreamTarget target = targets.get(i);
             long start = System.nanoTime();
-            int latencyMs = -1;
-            int bytes = -1;
-            int rcode = -1;
-            String status = "fail";
-            try (DatagramSocket socket = new DatagramSocket()) {
-                socket.setSoTimeout(timeoutMs);
-                InetAddress address = InetAddress.getByName(target.host);
-                DatagramPacket request = new DatagramPacket(query, query.length, address, target.port);
-                socket.send(request);
-                byte[] response = new byte[512];
-                DatagramPacket reply = new DatagramPacket(response, response.length);
-                socket.receive(reply);
-                latencyMs = (int) ((System.nanoTime() - start) / 1000000L);
-                bytes = reply.getLength();
-                rcode = bytes >= 4 ? response[3] & 0x0f : -1;
-                status = "ok";
-            } catch (SocketTimeoutException e) {
-                latencyMs = (int) ((System.nanoTime() - start) / 1000000L);
-                status = "timeout";
-            } catch (IOException | RuntimeException e) {
-                latencyMs = (int) ((System.nanoTime() - start) / 1000000L);
-                status = "error";
-            }
+            ProbeResult result = probeUpstreamDirect(target, timeoutMs, query);
+            int latencyMs = (int) ((System.nanoTime() - start) / 1000000L);
             out.append("upstream[").append(i).append("]=")
                     .append(target.host).append(':').append(target.port)
-                    .append(" status=").append(status)
+                    .append(" protocol=").append(target.protocol)
+                    .append(" status=").append(result.status)
                     .append(" latency_ms=").append(latencyMs)
-                    .append(" rcode=").append(rcode)
-                    .append(" bytes=").append(bytes)
+                    .append(" rcode=").append(result.rcode)
+                    .append(" bytes=").append(result.bytes)
                     .append('\n');
         }
         return out.toString();
+    }
+
+    private static ProbeResult probeUpstreamDirect(UpstreamTarget target, int timeoutMs, byte[] query) {
+        if ("tcp".equals(target.protocol)) {
+            return probeTcpUpstreamDirect(target, timeoutMs, query);
+        }
+        return probeUdpUpstreamDirect(target, timeoutMs, query);
+    }
+
+    private static ProbeResult probeUdpUpstreamDirect(UpstreamTarget target, int timeoutMs, byte[] query) {
+        try (DatagramSocket socket = new DatagramSocket()) {
+            socket.setSoTimeout(timeoutMs);
+            InetAddress address = InetAddress.getByName(target.host);
+            DatagramPacket request = new DatagramPacket(query, query.length, address, target.port);
+            socket.send(request);
+            byte[] response = new byte[512];
+            DatagramPacket reply = new DatagramPacket(response, response.length);
+            socket.receive(reply);
+            int bytes = reply.getLength();
+            return new ProbeResult("ok", bytes, bytes >= 4 ? response[3] & 0x0f : -1);
+        } catch (SocketTimeoutException e) {
+            return new ProbeResult("timeout", -1, -1);
+        } catch (IOException | RuntimeException e) {
+            return new ProbeResult("error", -1, -1);
+        }
+    }
+
+    private static ProbeResult probeTcpUpstreamDirect(UpstreamTarget target, int timeoutMs, byte[] query) {
+        try (Socket socket = new Socket()) {
+            socket.connect(new InetSocketAddress(InetAddress.getByName(target.host), target.port), timeoutMs);
+            socket.setSoTimeout(timeoutMs);
+            OutputStream output = socket.getOutputStream();
+            output.write((query.length >> 8) & 0xff);
+            output.write(query.length & 0xff);
+            output.write(query);
+            output.flush();
+            InputStream input = socket.getInputStream();
+            int high = input.read();
+            int low = input.read();
+            if (high < 0 || low < 0) {
+                return new ProbeResult("error", -1, -1);
+            }
+            int expected = (high << 8) | low;
+            if (expected <= 0 || expected > 4096) {
+                return new ProbeResult("error", -1, -1);
+            }
+            byte[] response = new byte[expected];
+            int read = readFully(input, response, expected);
+            return new ProbeResult(read == expected ? "ok" : "error",
+                    read, read >= 4 ? response[3] & 0x0f : -1);
+        } catch (SocketTimeoutException e) {
+            return new ProbeResult("timeout", -1, -1);
+        } catch (IOException | RuntimeException e) {
+            return new ProbeResult("error", -1, -1);
+        }
+    }
+
+    private static int readFully(InputStream input, byte[] response, int expected) throws IOException {
+        int offset = 0;
+        while (offset < expected) {
+            int read = input.read(response, offset, expected - offset);
+            if (read < 0) {
+                break;
+            }
+            offset += read;
+        }
+        return offset;
     }
 
     private static byte[] buildBenchmarkQuery() {
@@ -907,13 +956,27 @@ public final class DnsHijackManager {
         }
     }
 
+    private static final class ProbeResult {
+        private final String status;
+        private final int bytes;
+        private final int rcode;
+
+        private ProbeResult(String status, int bytes, int rcode) {
+            this.status = status;
+            this.bytes = bytes;
+            this.rcode = rcode;
+        }
+    }
+
     private static final class UpstreamTarget {
         private final String host;
         private final int port;
+        private final String protocol;
 
-        private UpstreamTarget(String host, int port) {
+        private UpstreamTarget(String host, int port, String protocol) {
             this.host = host;
             this.port = port;
+            this.protocol = protocol;
         }
 
         private static UpstreamTarget parse(String raw) {
@@ -923,8 +986,18 @@ public final class DnsHijackManager {
             String value = raw.trim();
             String host = value;
             int port = 53;
+            String protocol = "auto";
             if (value.isEmpty() || value.startsWith("#")) {
                 return null;
+            }
+            if (value.regionMatches(true, 0, "udp://", 0, 6)) {
+                protocol = "udp";
+                value = value.substring(6).trim();
+                host = value;
+            } else if (value.regionMatches(true, 0, "tcp://", 0, 6)) {
+                protocol = "tcp";
+                value = value.substring(6).trim();
+                host = value;
             }
             if (value.startsWith("[") && value.contains("]")) {
                 int end = value.indexOf(']');
@@ -944,7 +1017,7 @@ public final class DnsHijackManager {
             if (host.isEmpty()) {
                 return null;
             }
-            return new UpstreamTarget(host, port);
+            return new UpstreamTarget(host, port, protocol);
         }
 
         private static int parsePort(String raw, int fallback) {
