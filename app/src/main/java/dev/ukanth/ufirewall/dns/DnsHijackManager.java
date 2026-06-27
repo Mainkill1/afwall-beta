@@ -113,6 +113,7 @@ public final class DnsHijackManager {
         }
         appendRedirectRules(commands, ipv6);
         commands.add("#LITERAL# " + buildNftFallbackRestoreCommand(context, ipv6));
+        commands.add("#LITERAL# " + buildRedirectInstallVerificationCommand(context, ipv6));
     }
 
     public static void appendPurgeCommands(Context context, List<String> commands, boolean ipv6) {
@@ -1132,6 +1133,82 @@ public final class DnsHijackManager {
                 + "; then echo " + key + "=1; else echo " + key + "=0; fi";
     }
 
+    private static String buildIptablesRedirectHealthyCondition(String iptables, String chain,
+                                                                String preChain, int port) {
+        List<String> checks = new ArrayList<>();
+        checks.add(buildIptablesRuleCheck(iptables, "OUTPUT", "udp", chain));
+        checks.add(buildIptablesRuleCheck(iptables, "OUTPUT", "tcp", chain));
+        checks.add(buildIptablesRuleCheck(iptables, "PREROUTING", "udp", preChain));
+        checks.add(buildIptablesRuleCheck(iptables, "PREROUTING", "tcp", preChain));
+        checks.add(buildIptablesRedirectTargetCheck(iptables, chain, "udp", port));
+        checks.add(buildIptablesRedirectTargetCheck(iptables, chain, "tcp", port));
+        checks.add(buildIptablesRedirectTargetCheck(iptables, preChain, "udp", port));
+        checks.add(buildIptablesRedirectTargetCheck(iptables, preChain, "tcp", port));
+        return joinShellChecks(checks);
+    }
+
+    private static String buildRedirectInstallVerificationCommand(Context context, boolean ipv6) {
+        String iptables = shellQuote(Api.getBinaryPath(context, ipv6));
+        String chain = ipv6 ? CHAIN_V6 : CHAIN_V4;
+        String preChain = ipv6 ? CHAIN_V6_PRE : CHAIN_V4_PRE;
+        String family = ipv6 ? "ip6" : "ip";
+        String table = ipv6 ? NFT_TABLE_V6 : NFT_TABLE_V4;
+        int port = G.dnsHijackPort(DEFAULT_PORT);
+        String iptablesReady = buildIptablesRedirectHealthyCondition(iptables, chain, preChain, port);
+        String nftReady = buildNftRedirectHealthyCondition(family, table, port);
+        String label = ipv6 ? "IPv6" : "IPv4";
+        return "if ( " + iptablesReady + " ) || ( " + nftReady + " ); then true; else "
+                + "echo 'DNS redirect install verification failed for " + label + "'; false; fi; #";
+    }
+
+    private static String buildIptablesRuleCheck(String iptables, String parentChain,
+                                                 String protocol, String targetChain) {
+        String pattern = "-p " + protocol + " .*--dport 53.*-j " + targetChain;
+        return iptables + " -t nat -S " + shellQuote(parentChain)
+                + " 2>/dev/null | grep -q -- " + shellQuote(pattern);
+    }
+
+    private static String buildIptablesRedirectTargetCheck(String iptables, String chain,
+                                                           String protocol, int port) {
+        String pattern = "-p " + protocol + " .*--dport 53.*-j REDIRECT.*--to-ports " + port;
+        return iptables + " -t nat -S " + shellQuote(chain)
+                + " 2>/dev/null | grep -q -- " + shellQuote(pattern);
+    }
+
+    private static String buildNftRedirectHealthyCondition(String family, String table, int port) {
+        List<String> checks = new ArrayList<>();
+        checks.add("command -v nft >/dev/null 2>&1");
+        checks.add("nft list table " + shellQuote(family) + " " + shellQuote(table)
+                + " >/dev/null 2>&1");
+        checks.add(buildNftRedirectCheck(family, table, NFT_OUTPUT, "udp", port));
+        checks.add(buildNftRedirectCheck(family, table, NFT_OUTPUT, "tcp", port));
+        checks.add(buildNftRedirectCheck(family, table, NFT_PREROUTING, "udp", port));
+        checks.add(buildNftRedirectCheck(family, table, NFT_PREROUTING, "tcp", port));
+        return joinShellChecks(checks);
+    }
+
+    private static String buildNftRedirectCheck(String family, String table, String chain,
+                                                String protocol, int port) {
+        String pattern = protocol + " dport 53.*redirect to :" + port;
+        return "nft list chain " + shellQuote(family) + " " + shellQuote(table)
+                + " " + shellQuote(chain)
+                + " 2>/dev/null | grep -q -- " + shellQuote(pattern);
+    }
+
+    private static String joinShellChecks(List<String> checks) {
+        StringBuilder command = new StringBuilder();
+        for (String check : checks) {
+            if (check == null || check.trim().isEmpty()) {
+                continue;
+            }
+            if (command.length() > 0) {
+                command.append(" && ");
+            }
+            command.append(check);
+        }
+        return command.length() == 0 ? "false" : command.toString();
+    }
+
     private static String buildNftTableStatusCommand(String key, String family, String table) {
         return "if command -v nft >/dev/null 2>&1 && nft list table "
                 + shellQuote(family) + " " + shellQuote(table)
@@ -1896,27 +1973,34 @@ public final class DnsHijackManager {
     }
 
     private static boolean appendOutputPolicyRules(List<String> commands, String appendCommand, int port) {
+        return appendOutputPolicyRules(commands, appendCommand, port, false);
+    }
+
+    private static boolean appendOutputPolicyRules(List<String> commands, String appendCommand,
+                                                   int port, boolean tolerant) {
         List<Integer> bypassUids = parseUidList(G.dnsHijackBypassUids());
         List<Integer> captureUids = parseUidList(G.dnsHijackCaptureUids());
         List<String> bypassInterfaces = parseInterfaceList(G.dnsHijackBypassInterfaces());
         List<String> captureInterfaces = parseInterfaceList(G.dnsHijackCaptureInterfaces());
         for (String iface : bypassInterfaces) {
-            commands.add(appendCommand + " -o " + iface + " -j RETURN");
+            appendIptablesPolicyCommand(commands, appendCommand + " -o " + iface + " -j RETURN",
+                    tolerant);
         }
         for (Integer uid : bypassUids) {
-            commands.add(appendCommand + " -m owner --uid-owner " + uid + " -j RETURN");
+            appendIptablesPolicyCommand(commands,
+                    appendCommand + " -m owner --uid-owner " + uid + " -j RETURN", tolerant);
         }
         if (captureUids.isEmpty() && captureInterfaces.isEmpty()) {
             return false;
         }
         if (captureUids.isEmpty()) {
             for (String iface : captureInterfaces) {
-                appendOutputRedirect(commands, appendCommand, port, null, iface);
+                appendOutputRedirect(commands, appendCommand, port, null, iface, tolerant);
             }
         } else if (captureInterfaces.isEmpty()) {
             for (Integer uid : captureUids) {
                 if (!bypassUids.contains(uid)) {
-                    appendOutputRedirect(commands, appendCommand, port, uid, null);
+                    appendOutputRedirect(commands, appendCommand, port, uid, null, tolerant);
                 }
             }
         } else {
@@ -1926,17 +2010,23 @@ public final class DnsHijackManager {
                 }
                 for (Integer uid : captureUids) {
                     if (!bypassUids.contains(uid)) {
-                        appendOutputRedirect(commands, appendCommand, port, uid, iface);
+                        appendOutputRedirect(commands, appendCommand, port, uid, iface, tolerant);
                     }
                 }
             }
         }
-        commands.add(appendCommand + " -j RETURN");
+        appendIptablesPolicyCommand(commands, appendCommand + " -j RETURN", tolerant);
         return true;
     }
 
     private static void appendOutputRedirect(List<String> commands, String appendCommand,
                                              int port, Integer uid, String iface) {
+        appendOutputRedirect(commands, appendCommand, port, uid, iface, false);
+    }
+
+    private static void appendOutputRedirect(List<String> commands, String appendCommand,
+                                             int port, Integer uid, String iface,
+                                             boolean tolerant) {
         String matcher = "";
         if (iface != null) {
             matcher += " -o " + iface;
@@ -1944,15 +2034,25 @@ public final class DnsHijackManager {
         if (uid != null) {
             matcher += " -m owner --uid-owner " + uid;
         }
-        commands.add(appendCommand + matcher + " -p udp --dport 53 -j REDIRECT --to-ports " + port);
-        commands.add(appendCommand + matcher + " -p tcp --dport 53 -j REDIRECT --to-ports " + port);
+        appendIptablesPolicyCommand(commands,
+                appendCommand + matcher + " -p udp --dport 53 -j REDIRECT --to-ports " + port,
+                tolerant);
+        appendIptablesPolicyCommand(commands,
+                appendCommand + matcher + " -p tcp --dport 53 -j REDIRECT --to-ports " + port,
+                tolerant);
     }
 
     private static boolean appendPreroutingPolicyRules(List<String> commands, String appendCommand, int port) {
+        return appendPreroutingPolicyRules(commands, appendCommand, port, false);
+    }
+
+    private static boolean appendPreroutingPolicyRules(List<String> commands, String appendCommand,
+                                                       int port, boolean tolerant) {
         List<String> bypassInterfaces = parseInterfaceList(G.dnsHijackBypassInterfaces());
         List<String> captureInterfaces = parseInterfaceList(G.dnsHijackCaptureInterfaces());
         for (String iface : bypassInterfaces) {
-            commands.add(appendCommand + " -i " + iface + " -j RETURN");
+            appendIptablesPolicyCommand(commands, appendCommand + " -i " + iface + " -j RETURN",
+                    tolerant);
         }
         if (captureInterfaces.isEmpty()) {
             return false;
@@ -1961,23 +2061,36 @@ public final class DnsHijackManager {
             if (bypassInterfaces.contains(iface)) {
                 continue;
             }
-            commands.add(appendCommand + " -i " + iface + " -p udp --dport 53 -j REDIRECT --to-ports " + port);
-            commands.add(appendCommand + " -i " + iface + " -p tcp --dport 53 -j REDIRECT --to-ports " + port);
+            appendIptablesPolicyCommand(commands,
+                    appendCommand + " -i " + iface
+                            + " -p udp --dport 53 -j REDIRECT --to-ports " + port,
+                    tolerant);
+            appendIptablesPolicyCommand(commands,
+                    appendCommand + " -i " + iface
+                            + " -p tcp --dport 53 -j REDIRECT --to-ports " + port,
+                    tolerant);
         }
-        commands.add(appendCommand + " -j RETURN");
+        appendIptablesPolicyCommand(commands, appendCommand + " -j RETURN", tolerant);
         return true;
+    }
+
+    private static void appendIptablesPolicyCommand(List<String> commands, String command,
+                                                    boolean tolerant) {
+        commands.add(tolerant ? command + " >/dev/null 2>&1 || true" : command);
     }
 
     private static String buildNftFallbackRestoreCommand(Context context, boolean ipv6) {
         String iptables = shellQuote(Api.getBinaryPath(context, ipv6));
         String chain = ipv6 ? CHAIN_V6 : CHAIN_V4;
+        String preChain = ipv6 ? CHAIN_V6_PRE : CHAIN_V4_PRE;
         String family = ipv6 ? "ip6" : "ip";
         String table = ipv6 ? NFT_TABLE_V6 : NFT_TABLE_V4;
         int port = G.dnsHijackPort(DEFAULT_PORT);
-        return "if command -v nft >/dev/null 2>&1 && ! " + iptables
-                + " -t nat -S " + chain + " >/dev/null 2>&1; then "
-                + buildNftRestoreCommands(family, table, String.valueOf(port))
-                + "fi; true";
+        return "if command -v nft >/dev/null 2>&1; then if ! ( "
+                + buildIptablesRedirectHealthyCondition(iptables, chain, preChain, port)
+                + " ); then " + buildNftRestoreCommands(family, table, String.valueOf(port))
+                + "else nft delete table " + family + " " + table
+                + " >/dev/null 2>&1 || true; fi; fi; true";
     }
 
     private static String buildNftPurgeCommand() {
@@ -2618,6 +2731,10 @@ public final class DnsHijackManager {
         commands.add(iptables + " " + args + " >/dev/null 2>&1 || true");
     }
 
+    private static void appendTolerantIptables(List<String> commands, String iptables, String args) {
+        commands.add(iptables + " " + args + " >/dev/null 2>&1 || true");
+    }
+
     private static void appendDirectStopCommand(Context context, List<String> commands) {
         if (context == null) {
             return;
@@ -2634,30 +2751,38 @@ public final class DnsHijackManager {
         String chain = ipv6 ? CHAIN_V6 : CHAIN_V4;
         String preChain = ipv6 ? CHAIN_V6_PRE : CHAIN_V4_PRE;
 
-        commands.add(iptables + " -t nat -D OUTPUT -p udp --dport 53 -j " + chain + " >/dev/null 2>&1 || true");
-        commands.add(iptables + " -t nat -D OUTPUT -p tcp --dport 53 -j " + chain + " >/dev/null 2>&1 || true");
-        commands.add(iptables + " -t nat -D PREROUTING -p udp --dport 53 -j " + preChain + " >/dev/null 2>&1 || true");
-        commands.add(iptables + " -t nat -D PREROUTING -p tcp --dport 53 -j " + preChain + " >/dev/null 2>&1 || true");
-        commands.add(iptables + " -t nat -N " + chain + " >/dev/null 2>&1 || true");
-        commands.add(iptables + " -t nat -N " + preChain + " >/dev/null 2>&1 || true");
-        commands.add(iptables + " -t nat -F " + chain);
-        commands.add(iptables + " -t nat -F " + preChain);
-        commands.add(iptables + " -t nat -A " + chain + " -o lo -j RETURN");
-        commands.add(iptables + " -t nat -A " + chain + " -m owner --uid-owner 0 -j RETURN");
-        if (!appendOutputPolicyRules(commands, iptables + " -t nat -A " + chain, port)) {
-            commands.add(iptables + " -t nat -A " + chain + " -p udp --dport 53 -j REDIRECT --to-ports " + port);
-            commands.add(iptables + " -t nat -A " + chain + " -p tcp --dport 53 -j REDIRECT --to-ports " + port);
+        appendTolerantIptables(commands, iptables, "-t nat -D OUTPUT -p udp --dport 53 -j " + chain);
+        appendTolerantIptables(commands, iptables, "-t nat -D OUTPUT -p tcp --dport 53 -j " + chain);
+        appendTolerantIptables(commands, iptables, "-t nat -D PREROUTING -p udp --dport 53 -j " + preChain);
+        appendTolerantIptables(commands, iptables, "-t nat -D PREROUTING -p tcp --dport 53 -j " + preChain);
+        appendTolerantIptables(commands, iptables, "-t nat -N " + chain);
+        appendTolerantIptables(commands, iptables, "-t nat -N " + preChain);
+        appendTolerantIptables(commands, iptables, "-t nat -F " + chain);
+        appendTolerantIptables(commands, iptables, "-t nat -F " + preChain);
+        appendTolerantIptables(commands, iptables, "-t nat -A " + chain + " -o lo -j RETURN");
+        appendTolerantIptables(commands, iptables, "-t nat -A " + chain + " -m owner --uid-owner 0 -j RETURN");
+        if (!appendOutputPolicyRules(commands, iptables + " -t nat -A " + chain, port, true)) {
+            appendTolerantIptables(commands, iptables,
+                    "-t nat -A " + chain + " -p udp --dport 53 -j REDIRECT --to-ports " + port);
+            appendTolerantIptables(commands, iptables,
+                    "-t nat -A " + chain + " -p tcp --dport 53 -j REDIRECT --to-ports " + port);
         }
-        commands.add(iptables + " -t nat -A " + preChain + " -i lo -j RETURN");
-        if (!appendPreroutingPolicyRules(commands, iptables + " -t nat -A " + preChain, port)) {
-            commands.add(iptables + " -t nat -A " + preChain + " -p udp --dport 53 -j REDIRECT --to-ports " + port);
-            commands.add(iptables + " -t nat -A " + preChain + " -p tcp --dport 53 -j REDIRECT --to-ports " + port);
+        appendTolerantIptables(commands, iptables, "-t nat -A " + preChain + " -i lo -j RETURN");
+        if (!appendPreroutingPolicyRules(commands, iptables + " -t nat -A " + preChain,
+                port, true)) {
+            appendTolerantIptables(commands, iptables,
+                    "-t nat -A " + preChain + " -p udp --dport 53 -j REDIRECT --to-ports " + port);
+            appendTolerantIptables(commands, iptables,
+                    "-t nat -A " + preChain + " -p tcp --dport 53 -j REDIRECT --to-ports " + port);
         }
-        commands.add(iptables + " -t nat -I OUTPUT 1 -p udp --dport 53 -j " + chain);
-        commands.add(iptables + " -t nat -I OUTPUT 1 -p tcp --dport 53 -j " + chain);
-        commands.add(iptables + " -t nat -I PREROUTING 1 -p udp --dport 53 -j " + preChain);
-        commands.add(iptables + " -t nat -I PREROUTING 1 -p tcp --dport 53 -j " + preChain);
+        appendTolerantIptables(commands, iptables, "-t nat -I OUTPUT 1 -p udp --dport 53 -j " + chain);
+        appendTolerantIptables(commands, iptables, "-t nat -I OUTPUT 1 -p tcp --dport 53 -j " + chain);
+        appendTolerantIptables(commands, iptables,
+                "-t nat -I PREROUTING 1 -p udp --dport 53 -j " + preChain);
+        appendTolerantIptables(commands, iptables,
+                "-t nat -I PREROUTING 1 -p tcp --dport 53 -j " + preChain);
         commands.add(buildNftFallbackRestoreCommand(context, ipv6));
+        commands.add(buildRedirectInstallVerificationCommand(context, ipv6));
     }
 
     private static void appendRedirectRules(List<String> commands, boolean ipv6) {
@@ -3139,13 +3264,47 @@ public final class DnsHijackManager {
     private static String buildBootNftFallbackRestore(boolean ipv6, int port) {
         String tool = ipv6 ? "ip6t" : "ipt";
         String chainVariable = ipv6 ? "$CHAIN6" : "$CHAIN4";
+        String preChainVariable = ipv6 ? "$PRE6" : "$PRE4";
         String family = ipv6 ? "ip6" : "ip";
         String table = ipv6 ? NFT_TABLE_V6 : NFT_TABLE_V4;
-        return "  if command -v nft >/dev/null 2>&1 && ! " + tool
-                + " -t nat -S \"" + chainVariable + "\" >/dev/null 2>&1; then\n"
-                + "    log_msg 'DNS nftables fallback restore starting for " + family + "'\n"
-                + "    ( " + buildNftRestoreCommands(family, table, String.valueOf(port)) + " ) >> \"$LOG\" 2>&1\n"
+        return "  if command -v nft >/dev/null 2>&1; then\n"
+                + "    if ! ( " + buildBootIptablesRedirectHealthyCondition(tool,
+                chainVariable, preChainVariable, port) + " ); then\n"
+                + "      log_msg 'DNS nftables fallback restore starting for " + family + "'\n"
+                + "      ( " + buildNftRestoreCommands(family, table, String.valueOf(port)) + " ) >> \"$LOG\" 2>&1\n"
+                + "    else\n"
+                + "      nft delete table " + family + " " + table + " >/dev/null 2>&1 || true\n"
+                + "    fi\n"
                 + "  fi\n";
+    }
+
+    private static String buildBootIptablesRedirectHealthyCondition(String tool, String chainVariable,
+                                                                    String preChainVariable,
+                                                                    int port) {
+        List<String> checks = new ArrayList<>();
+        checks.add(buildBootIptablesRuleCheck(tool, "OUTPUT", "udp", chainVariable));
+        checks.add(buildBootIptablesRuleCheck(tool, "OUTPUT", "tcp", chainVariable));
+        checks.add(buildBootIptablesRuleCheck(tool, "PREROUTING", "udp", preChainVariable));
+        checks.add(buildBootIptablesRuleCheck(tool, "PREROUTING", "tcp", preChainVariable));
+        checks.add(buildBootIptablesRedirectTargetCheck(tool, chainVariable, "udp", port));
+        checks.add(buildBootIptablesRedirectTargetCheck(tool, chainVariable, "tcp", port));
+        checks.add(buildBootIptablesRedirectTargetCheck(tool, preChainVariable, "udp", port));
+        checks.add(buildBootIptablesRedirectTargetCheck(tool, preChainVariable, "tcp", port));
+        return joinShellChecks(checks);
+    }
+
+    private static String buildBootIptablesRuleCheck(String tool, String parentChain,
+                                                     String protocol, String targetChainVariable) {
+        return tool + " -t nat -S " + parentChain
+                + " 2>/dev/null | grep -q -- \"-p " + protocol
+                + " .*--dport 53.*-j " + targetChainVariable + "\"";
+    }
+
+    private static String buildBootIptablesRedirectTargetCheck(String tool, String chainVariable,
+                                                               String protocol, int port) {
+        return tool + " -t nat -S \"" + chainVariable + "\""
+                + " 2>/dev/null | grep -q -- \"-p " + protocol
+                + " .*--dport 53.*-j REDIRECT.*--to-ports " + port + "\"";
     }
 
     private static String buildLifecycleCleanupScript(Context context, File dir) {
