@@ -67,6 +67,8 @@ public final class DnsHijackManager {
     public static final int RULE_TEMP_BLOCK = 6;
     public static final int RULE_APP_ALLOW_EXACT = 7;
     public static final int RULE_APP_BLOCK_EXACT = 8;
+    public static final int RULE_APP_ALLOW_SUFFIX = 9;
+    public static final int RULE_APP_BLOCK_SUFFIX = 10;
     private static final long TEMP_RULE_DURATION_SECONDS = 15L * 60L;
 
     private DnsHijackManager() {
@@ -282,6 +284,8 @@ public final class DnsHijackManager {
                 .append(G.dnsHijackBlocklistUpdateIntervalHours()).append('\n');
         out.append("app_allow_exact_entries=").append(countLines(G.dnsHijackAppAllowExact())).append('\n');
         out.append("app_block_exact_entries=").append(countLines(G.dnsHijackAppBlockExact())).append('\n');
+        out.append("app_allow_suffix_entries=").append(countLines(G.dnsHijackAppAllowSuffix())).append('\n');
+        out.append("app_block_suffix_entries=").append(countLines(G.dnsHijackAppBlockSuffix())).append('\n');
         out.append("temporary_allow_entries=").append(countLines(G.dnsHijackTempAllow())).append('\n');
         out.append("temporary_block_entries=").append(countLines(G.dnsHijackTempBlock())).append('\n');
         out.append("\n[blocklists]\n");
@@ -418,6 +422,12 @@ public final class DnsHijackManager {
                 break;
             case RULE_APP_BLOCK_EXACT:
                 added = G.appendDnsHijackAppBlockExact(parseQueryUid(entry), domain);
+                break;
+            case RULE_APP_ALLOW_SUFFIX:
+                added = G.appendDnsHijackAppAllowSuffix(parseQueryUid(entry), domain);
+                break;
+            case RULE_APP_BLOCK_SUFFIX:
+                added = G.appendDnsHijackAppBlockSuffix(parseQueryUid(entry), domain);
                 break;
             default:
                 return false;
@@ -1624,6 +1634,8 @@ public final class DnsHijackManager {
         appendConfigEntries(config, "block_suffix", G.dnsHijackBlockSuffix());
         appendConfigEntries(config, "app_allow_exact", G.dnsHijackAppAllowExact());
         appendConfigEntries(config, "app_block_exact", G.dnsHijackAppBlockExact());
+        appendConfigEntries(config, "app_allow_suffix", G.dnsHijackAppAllowSuffix());
+        appendConfigEntries(config, "app_block_suffix", G.dnsHijackAppBlockSuffix());
         appendConfigEntries(config, "allow_regex", G.dnsHijackAllowRegex());
         appendConfigEntries(config, "block_regex", G.dnsHijackBlockRegex());
         appendConfigEntries(config, "temp_allow", G.dnsHijackTempAllow());

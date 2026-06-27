@@ -151,6 +151,21 @@ typedef struct {
 } suffix_trie_t;
 
 typedef struct {
+    char label[MAX_LABEL];
+    int first_child;
+    int next_sibling;
+    int *uids;
+    int uid_count;
+    int uid_capacity;
+} app_suffix_trie_node_t;
+
+typedef struct {
+    app_suffix_trie_node_t *nodes;
+    int count;
+    int capacity;
+} app_suffix_trie_t;
+
+typedef struct {
     int listen_port;
     int strict_mode;
     int fail_open;
@@ -177,6 +192,8 @@ typedef struct {
     string_rule_list_t suffix_block;
     app_exact_rule_list_t app_exact_allow;
     app_exact_rule_list_t app_exact_block;
+    app_exact_rule_list_t app_suffix_allow;
+    app_exact_rule_list_t app_suffix_block;
     int *app_exact_allow_index;
     int app_exact_allow_index_size;
     int *app_exact_block_index;
@@ -187,6 +204,8 @@ typedef struct {
     int exact_block_index_size;
     suffix_trie_t suffix_allow_trie;
     suffix_trie_t suffix_block_trie;
+    app_suffix_trie_t app_suffix_allow_trie;
+    app_suffix_trie_t app_suffix_block_trie;
     regex_rule_list_t regex_allow;
     regex_rule_list_t regex_block;
     temp_rule_t temp_allow[MAX_TEMP_RULES];
@@ -738,6 +757,23 @@ static void free_suffix_trie(suffix_trie_t *trie) {
     trie->capacity = 0;
 }
 
+static void free_app_suffix_trie(app_suffix_trie_t *trie) {
+    int i;
+    if (trie == NULL) {
+        return;
+    }
+    for (i = 0; i < trie->count; i++) {
+        free(trie->nodes[i].uids);
+        trie->nodes[i].uids = NULL;
+        trie->nodes[i].uid_count = 0;
+        trie->nodes[i].uid_capacity = 0;
+    }
+    free(trie->nodes);
+    trie->nodes = NULL;
+    trie->count = 0;
+    trie->capacity = 0;
+}
+
 static void free_string_rule_list(string_rule_list_t *list) {
     if (list == NULL) {
         return;
@@ -790,6 +826,8 @@ static void free_config_dynamic(config_t *cfg) {
     free_string_rule_list(&cfg->suffix_block);
     free_app_exact_rule_list(&cfg->app_exact_allow);
     free_app_exact_rule_list(&cfg->app_exact_block);
+    free_app_exact_rule_list(&cfg->app_suffix_allow);
+    free_app_exact_rule_list(&cfg->app_suffix_block);
     free(cfg->app_exact_allow_index);
     cfg->app_exact_allow_index = NULL;
     cfg->app_exact_allow_index_size = 0;
@@ -804,6 +842,8 @@ static void free_config_dynamic(config_t *cfg) {
     cfg->exact_block_index_size = 0;
     free_suffix_trie(&cfg->suffix_allow_trie);
     free_suffix_trie(&cfg->suffix_block_trie);
+    free_app_suffix_trie(&cfg->app_suffix_allow_trie);
+    free_app_suffix_trie(&cfg->app_suffix_block_trie);
 }
 
 static bool reserve_string_rule_list(string_rule_list_t *list, int needed) {
@@ -877,7 +917,7 @@ static bool reserve_app_exact_rule_list(app_exact_rule_list_t *list, int needed)
     return true;
 }
 
-static bool add_app_exact_rule(app_exact_rule_list_t *rules, const char *value) {
+static bool add_app_domain_rule(app_exact_rule_list_t *rules, const char *value) {
     char line[512];
     char *separator;
     char *uid_text;
@@ -1359,6 +1399,188 @@ static bool suffix_trie_match(const suffix_trie_t *trie, const char *domain) {
     return false;
 }
 
+static bool app_suffix_trie_reserve(app_suffix_trie_t *trie, int needed) {
+    int next_capacity;
+    app_suffix_trie_node_t *nodes;
+    if (trie->capacity >= needed) {
+        return true;
+    }
+    next_capacity = trie->capacity > 0 ? trie->capacity : 64;
+    while (next_capacity < needed) {
+        if (next_capacity > INT_MAX / 2) {
+            return false;
+        }
+        next_capacity *= 2;
+    }
+    nodes = (app_suffix_trie_node_t *) realloc(trie->nodes,
+            (size_t) next_capacity * sizeof(app_suffix_trie_node_t));
+    if (nodes == NULL) {
+        return false;
+    }
+    memset(nodes + trie->capacity, 0,
+            (size_t) (next_capacity - trie->capacity) * sizeof(app_suffix_trie_node_t));
+    trie->nodes = nodes;
+    trie->capacity = next_capacity;
+    return true;
+}
+
+static bool app_suffix_trie_init(app_suffix_trie_t *trie) {
+    memset(trie, 0, sizeof(*trie));
+    if (!app_suffix_trie_reserve(trie, 1)) {
+        return false;
+    }
+    trie->count = 1;
+    return true;
+}
+
+static int app_suffix_trie_find_child(const app_suffix_trie_t *trie, int parent,
+                                      const char *label) {
+    int child;
+    if (trie == NULL || trie->nodes == NULL || parent < 0 || parent >= trie->count) {
+        return -1;
+    }
+    for (child = trie->nodes[parent].first_child; child != 0;
+            child = trie->nodes[child].next_sibling) {
+        if (strcmp(trie->nodes[child].label, label) == 0) {
+            return child;
+        }
+    }
+    return -1;
+}
+
+static int app_suffix_trie_add_child(app_suffix_trie_t *trie, int parent,
+                                     const char *label) {
+    int child;
+    if (!app_suffix_trie_reserve(trie, trie->count + 1)) {
+        return -1;
+    }
+    child = trie->count++;
+    memset(&trie->nodes[child], 0, sizeof(trie->nodes[child]));
+    safe_copy(trie->nodes[child].label, sizeof(trie->nodes[child].label), label);
+    trie->nodes[child].next_sibling = trie->nodes[parent].first_child;
+    trie->nodes[parent].first_child = child;
+    return child;
+}
+
+static bool app_suffix_trie_node_add_uid(app_suffix_trie_node_t *node, int uid) {
+    int next_capacity;
+    int *uids;
+    int i;
+    if (node == NULL || uid == UID_UNKNOWN) {
+        return false;
+    }
+    for (i = 0; i < node->uid_count; i++) {
+        if (node->uids[i] == uid) {
+            return true;
+        }
+    }
+    if (node->uid_capacity <= node->uid_count) {
+        if (node->uid_capacity > INT_MAX / 2) {
+            return false;
+        }
+        next_capacity = node->uid_capacity <= 0 ? 4 : node->uid_capacity * 2;
+        if (next_capacity < node->uid_count + 1) {
+            next_capacity = node->uid_count + 1;
+        }
+        uids = (int *) realloc(node->uids, (size_t) next_capacity * sizeof(int));
+        if (uids == NULL) {
+            return false;
+        }
+        node->uids = uids;
+        node->uid_capacity = next_capacity;
+    }
+    node->uids[node->uid_count++] = uid;
+    return true;
+}
+
+static bool app_suffix_trie_node_has_uid(const app_suffix_trie_node_t *node, int uid) {
+    int i;
+    if (node == NULL || uid == UID_UNKNOWN) {
+        return false;
+    }
+    for (i = 0; i < node->uid_count; i++) {
+        if (node->uids[i] == uid) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool app_suffix_trie_insert(app_suffix_trie_t *trie, int uid,
+                                   const char *suffix) {
+    char label[MAX_LABEL];
+    size_t end;
+    int node = 0;
+    bool done = false;
+    if (trie == NULL || trie->nodes == NULL || uid == UID_UNKNOWN
+            || suffix == NULL || suffix[0] == '\0') {
+        return false;
+    }
+    end = strlen(suffix);
+    while (!done) {
+        int child;
+        if (!previous_domain_label(suffix, &end, label, sizeof(label), &done)) {
+            return false;
+        }
+        child = app_suffix_trie_find_child(trie, node, label);
+        if (child < 0) {
+            child = app_suffix_trie_add_child(trie, node, label);
+            if (child < 0) {
+                return false;
+            }
+        }
+        node = child;
+    }
+    return app_suffix_trie_node_add_uid(&trie->nodes[node], uid);
+}
+
+static bool build_app_suffix_trie(const app_exact_rule_list_t *rules,
+                                  app_suffix_trie_t *trie) {
+    int i;
+    if (rules == NULL) {
+        return false;
+    }
+    free_app_suffix_trie(trie);
+    if (!app_suffix_trie_init(trie)) {
+        return false;
+    }
+    for (i = 0; i < rules->count; i++) {
+        if (!app_suffix_trie_insert(trie, rules->items[i].uid, rules->items[i].domain)) {
+            free_app_suffix_trie(trie);
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool app_suffix_trie_match(const app_suffix_trie_t *trie, int uid,
+                                  const char *domain) {
+    char label[MAX_LABEL];
+    size_t end;
+    int node = 0;
+    bool done = false;
+    if (trie == NULL || trie->nodes == NULL || uid == UID_UNKNOWN
+            || domain == NULL || domain[0] == '\0') {
+        return false;
+    }
+    end = strlen(domain);
+    while (!done) {
+        int child;
+        if (!previous_domain_label(domain, &end, label, sizeof(label), &done)) {
+            return false;
+        }
+        child = app_suffix_trie_find_child(trie, node, label);
+        if (child < 0) {
+            return false;
+        }
+        node = child;
+        if (app_suffix_trie_node_has_uid(&trie->nodes[node], uid)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 static bool temp_match(const temp_rule_t *rules, int count, const char *domain, uint64_t now) {
     int i;
     for (i = 0; i < count; i++) {
@@ -1408,6 +1630,7 @@ static decision_t evaluate_domain(const config_t *cfg, const char *domain, int u
     bool temp_allow = temp_match(cfg->temp_allow, cfg->temp_allow_count, domain, now);
     bool app_allow = app_exact_match_indexed(&cfg->app_exact_allow,
             cfg->app_exact_allow_index, cfg->app_exact_allow_index_size, uid, domain);
+    bool app_suffix_allow = app_suffix_trie_match(&cfg->app_suffix_allow_trie, uid, domain);
     bool exact_allow = exact_match_indexed(&cfg->exact_allow, cfg->exact_allow_index,
             cfg->exact_allow_index_size, domain);
     bool suffix_allow = suffix_trie_match(&cfg->suffix_allow_trie, domain);
@@ -1420,6 +1643,9 @@ static decision_t evaluate_domain(const config_t *cfg, const char *domain, int u
     } else if (app_exact_match_indexed(&cfg->app_exact_block, cfg->app_exact_block_index,
             cfg->app_exact_block_index_size, uid, domain)) {
         *reason = "app_exact_block";
+        block = true;
+    } else if (app_suffix_trie_match(&cfg->app_suffix_block_trie, uid, domain)) {
+        *reason = "app_suffix_block";
         block = true;
     } else if (exact_match_indexed(&cfg->exact_block, cfg->exact_block_index,
             cfg->exact_block_index_size, domain)) {
@@ -1442,6 +1668,10 @@ static decision_t evaluate_domain(const config_t *cfg, const char *domain, int u
     }
     if (app_allow) {
         *reason = "app_exact_allow";
+        return DECISION_ALLOW;
+    }
+    if (app_suffix_allow) {
+        *reason = "app_suffix_allow";
         return DECISION_ALLOW;
     }
     if (exact_allow) {
@@ -2813,12 +3043,22 @@ static bool load_config(const char *path, config_t *new_cfg) {
                 return false;
             }
         } else if (strcmp(key, "app_allow_exact") == 0) {
-            if (!add_app_exact_rule(&new_cfg->app_exact_allow, value)) {
+            if (!add_app_domain_rule(&new_cfg->app_exact_allow, value)) {
                 fclose(fp);
                 return false;
             }
         } else if (strcmp(key, "app_block_exact") == 0) {
-            if (!add_app_exact_rule(&new_cfg->app_exact_block, value)) {
+            if (!add_app_domain_rule(&new_cfg->app_exact_block, value)) {
+                fclose(fp);
+                return false;
+            }
+        } else if (strcmp(key, "app_allow_suffix") == 0) {
+            if (!add_app_domain_rule(&new_cfg->app_suffix_allow, value)) {
+                fclose(fp);
+                return false;
+            }
+        } else if (strcmp(key, "app_block_suffix") == 0) {
+            if (!add_app_domain_rule(&new_cfg->app_suffix_block, value)) {
                 fclose(fp);
                 return false;
             }
@@ -2865,7 +3105,11 @@ static bool load_config(const char *path, config_t *new_cfg) {
             || !build_app_exact_index(&new_cfg->app_exact_block,
             &new_cfg->app_exact_block_index, &new_cfg->app_exact_block_index_size)
             || !build_suffix_trie(&new_cfg->suffix_allow, &new_cfg->suffix_allow_trie)
-            || !build_suffix_trie(&new_cfg->suffix_block, &new_cfg->suffix_block_trie)) {
+            || !build_suffix_trie(&new_cfg->suffix_block, &new_cfg->suffix_block_trie)
+            || !build_app_suffix_trie(&new_cfg->app_suffix_allow,
+            &new_cfg->app_suffix_allow_trie)
+            || !build_app_suffix_trie(&new_cfg->app_suffix_block,
+            &new_cfg->app_suffix_block_trie)) {
         return false;
     }
     prepare_udp_upstream_sockets(new_cfg);
@@ -3488,7 +3732,9 @@ static void write_health_response(int client) {
             "exact_allow_index_size=%d\nexact_block_index_size=%d\n"
             "app_exact_allow_index_size=%d\napp_exact_block_index_size=%d\n"
             "suffix_allow_trie_nodes=%d\nsuffix_block_trie_nodes=%d\n"
+            "app_suffix_allow_trie_nodes=%d\napp_suffix_block_trie_nodes=%d\n"
             "rules_app_exact_allow=%d\nrules_app_exact_block=%d\n"
+            "rules_app_suffix_allow=%d\nrules_app_suffix_block=%d\n"
             "rules_total=%d\n",
             (long) getpid(),
             (unsigned long long) (now_seconds() - g_stats.start_time),
@@ -3550,13 +3796,18 @@ static void write_health_response(int client) {
             g_cfg.app_exact_block_index_size,
             g_cfg.suffix_allow_trie.count,
             g_cfg.suffix_block_trie.count,
+            g_cfg.app_suffix_allow_trie.count,
+            g_cfg.app_suffix_block_trie.count,
             g_cfg.app_exact_allow.count,
             g_cfg.app_exact_block.count,
+            g_cfg.app_suffix_allow.count,
+            g_cfg.app_suffix_block.count,
             g_cfg.exact_allow.count + g_cfg.suffix_allow.count
                     + g_cfg.exact_block.count + g_cfg.suffix_block.count
                     + g_cfg.regex_allow.count + g_cfg.regex_block.count
                     + g_cfg.temp_allow_count + g_cfg.temp_block_count
-                    + g_cfg.app_exact_allow.count + g_cfg.app_exact_block.count);
+                    + g_cfg.app_exact_allow.count + g_cfg.app_exact_block.count
+                    + g_cfg.app_suffix_allow.count + g_cfg.app_suffix_block.count);
 }
 
 static void write_benchmark_response(int client) {
@@ -3713,8 +3964,11 @@ static void handle_control(int fd) {
                 "reloads=%llu\nexact_allow_index_size=%d\nexact_block_index_size=%d\n"
                 "app_exact_allow_index_size=%d\napp_exact_block_index_size=%d\n"
                 "suffix_allow_trie_nodes=%d\n"
-                "suffix_block_trie_nodes=%d\nrules_exact_allow=%d\nrules_suffix_allow=%d\nrules_exact_block=%d\n"
-                "rules_suffix_block=%d\nrules_app_exact_allow=%d\nrules_app_exact_block=%d\n"
+                "suffix_block_trie_nodes=%d\napp_suffix_allow_trie_nodes=%d\n"
+                "app_suffix_block_trie_nodes=%d\nrules_exact_allow=%d\nrules_suffix_allow=%d\n"
+                "rules_exact_block=%d\nrules_suffix_block=%d\n"
+                "rules_app_exact_allow=%d\nrules_app_exact_block=%d\n"
+                "rules_app_suffix_allow=%d\nrules_app_suffix_block=%d\n"
                 "rules_regex_allow=%d\nrules_regex_block=%d\n"
                 "rules_temp_allow=%d\nrules_temp_block=%d\nsplit_upstreams=%d\n",
                 (long) getpid(),
@@ -3789,12 +4043,16 @@ static void handle_control(int fd) {
                 g_cfg.app_exact_block_index_size,
                 g_cfg.suffix_allow_trie.count,
                 g_cfg.suffix_block_trie.count,
+                g_cfg.app_suffix_allow_trie.count,
+                g_cfg.app_suffix_block_trie.count,
                 g_cfg.exact_allow.count,
                 g_cfg.suffix_allow.count,
                 g_cfg.exact_block.count,
                 g_cfg.suffix_block.count,
                 g_cfg.app_exact_allow.count,
                 g_cfg.app_exact_block.count,
+                g_cfg.app_suffix_allow.count,
+                g_cfg.app_suffix_block.count,
                 g_cfg.regex_allow.count,
                 g_cfg.regex_block.count,
                 g_cfg.temp_allow_count,

@@ -225,6 +225,8 @@ public class DnsQueriesActivity extends AppCompatActivity {
         if (parseQueryUid(entry) >= 0) {
             addQueryAction(labels, actions, R.string.dns_query_app_allow_exact,
                     DnsHijackManager.RULE_APP_ALLOW_EXACT);
+            addQueryAction(labels, actions, R.string.dns_query_app_allow_suffix,
+                    DnsHijackManager.RULE_APP_ALLOW_SUFFIX);
         }
         addQueryAction(labels, actions, R.string.dns_query_block_exact,
                 DnsHijackManager.RULE_BLOCK_EXACT);
@@ -235,6 +237,8 @@ public class DnsQueriesActivity extends AppCompatActivity {
         if (parseQueryUid(entry) >= 0) {
             addQueryAction(labels, actions, R.string.dns_query_app_block_exact,
                     DnsHijackManager.RULE_APP_BLOCK_EXACT);
+            addQueryAction(labels, actions, R.string.dns_query_app_block_suffix,
+                    DnsHijackManager.RULE_APP_BLOCK_SUFFIX);
         }
         addQueryAction(labels, actions, R.string.dns_query_view_rule,
                 QUERY_ACTION_VIEW_RULE);
@@ -279,6 +283,9 @@ public class DnsQueriesActivity extends AppCompatActivity {
             case DnsHijackManager.RULE_APP_ALLOW_EXACT:
                 action = DnsHijackManager.RULE_APP_ALLOW_EXACT;
                 break;
+            case DnsHijackManager.RULE_APP_ALLOW_SUFFIX:
+                action = DnsHijackManager.RULE_APP_ALLOW_SUFFIX;
+                break;
             case DnsHijackManager.RULE_BLOCK_EXACT:
                 action = DnsHijackManager.RULE_BLOCK_EXACT;
                 break;
@@ -290,6 +297,9 @@ public class DnsQueriesActivity extends AppCompatActivity {
                 break;
             case DnsHijackManager.RULE_APP_BLOCK_EXACT:
                 action = DnsHijackManager.RULE_APP_BLOCK_EXACT;
+                break;
+            case DnsHijackManager.RULE_APP_BLOCK_SUFFIX:
+                action = DnsHijackManager.RULE_APP_BLOCK_SUFFIX;
                 break;
             default:
                 return;
