@@ -81,6 +81,9 @@ public class RootShellService2 extends Service {
         }
         state.exitCode = exitCode;
         state.done = true;
+        if (exitCode != 0) {
+            ApplicationErrorLog.add(mContext, buildRootCommandFailureMessage(state, exitCode));
+        }
         if (state.cb != null) {
             state.cb.cbFunc(state);
         }
@@ -191,16 +194,8 @@ public class RootShellService2 extends Service {
                     }
 
                     rootSession2.addCommand(command, 0, (Shell.OnCommandResultListener2) (commandCode, exitCode, output, STDERR) -> {
-                                ListIterator<String> iter = output.listIterator();
-                                while (iter.hasNext()) {
-                                    String line = iter.next();
-                                    if (line != null && !line.equals("")) {
-                                        if (state.res != null) {
-                                            state.res.append(line).append("\n");
-                                        }
-                                        state.lastCommandResult.append(line).append("\n");
-                                    }
-                                }
+                                appendCommandOutput(state, output, false);
+                                appendCommandOutput(state, STDERR, true);
                                 // Special handling for exit code 126 (command not executable) - fallback to system iptables
                                 if (exitCode == 126 && shouldFallbackToSystem(state)) {
                                     Log.w(TAG, "Built-in iptables failed with exit 126, attempting fallback to system iptables");
@@ -250,6 +245,44 @@ public class RootShellService2 extends Service {
             rootState = ShellState2.READY;
             runNextSubmission();
         }
+    }
+
+    private void appendCommandOutput(final RootCommand state, List<String> lines, boolean stderr) {
+        if (state == null || lines == null) {
+            return;
+        }
+        ListIterator<String> iter = lines.listIterator();
+        while (iter.hasNext()) {
+            String line = iter.next();
+            if (line == null || line.equals("")) {
+                continue;
+            }
+            String formatted = stderr ? "stderr: " + line : line;
+            if (state.res != null) {
+                state.res.append(formatted).append("\n");
+            }
+            if (state.lastCommandResult != null) {
+                state.lastCommandResult.append(formatted).append("\n");
+            }
+        }
+    }
+
+    private String buildRootCommandFailureMessage(final RootCommand state, int exitCode) {
+        String command = state != null && state.lastCommand != null
+                ? state.lastCommand
+                : "root shell command";
+        StringBuilder message = new StringBuilder("Root command failed");
+        message.append(" (exit ").append(exitCode).append("): ").append(command);
+        if (state != null && state.lastCommandResult != null) {
+            String result = state.lastCommandResult.toString().trim().replace('\n', ' ');
+            if (!result.isEmpty()) {
+                if (result.length() > 240) {
+                    result = result.substring(0, 240);
+                }
+                message.append(" output=").append(result);
+            }
+        }
+        return message.toString();
     }
 
     private void sendUpdate(final RootCommand state2) {
