@@ -1659,6 +1659,7 @@ static decision_t evaluate_domain(const config_t *cfg, const char *domain, int u
                                   const char **reason) {
     uint64_t now = now_seconds();
     bool temp_allow = temp_match(cfg->temp_allow, cfg->temp_allow_count, domain, now);
+    bool temp_block = temp_match(cfg->temp_block, cfg->temp_block_count, domain, now);
     bool app_allow = app_exact_match_indexed(&cfg->app_exact_allow,
             cfg->app_exact_allow_index, cfg->app_exact_allow_index_size, uid, domain);
     bool app_suffix_allow = app_suffix_trie_match(&cfg->app_suffix_allow_trie, uid, domain);
@@ -1668,7 +1669,7 @@ static decision_t evaluate_domain(const config_t *cfg, const char *domain, int u
     bool regex_allow = regex_match_rules(&cfg->regex_allow, domain);
     bool block = false;
 
-    if (temp_match(cfg->temp_block, cfg->temp_block_count, domain, now)) {
+    if (temp_block) {
         *reason = "temp_block";
         block = true;
     } else if (app_exact_match_indexed(&cfg->app_exact_block, cfg->app_exact_block_index,
@@ -1696,6 +1697,11 @@ static decision_t evaluate_domain(const config_t *cfg, const char *domain, int u
     if (temp_allow) {
         *reason = "temp_allow";
         return DECISION_ALLOW;
+    }
+    if (temp_block) {
+        /* Temporary blocks are local user overrides and must not be bypassed by saved allowlists. */
+        *reason = "temp_block";
+        return DECISION_BLOCK;
     }
     if (app_allow) {
         *reason = "app_exact_allow";
