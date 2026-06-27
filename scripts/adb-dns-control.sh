@@ -34,6 +34,9 @@ Environment:
   ADB       adb executable, default: adb
   PACKAGE   AFWall package name, default: dev.ukanth.ufirewall
   WORK_DIR  DNS daemon work dir override
+
+The helper prefers the daemon Unix control socket and falls back to the
+loopback TCP control port when AFWall's ADB DNS diagnostics setting is active.
 EOF
 }
 
@@ -97,7 +100,36 @@ find_unix_nc() {
     return 1
 }
 
-send_control() {
+find_tcp_nc() {
+    if adb_su "toybox nc --help >/dev/null 2>&1"; then
+        printf '%s\n' 'toybox nc'
+        return 0
+    fi
+    if adb_su "command -v nc >/dev/null 2>&1"; then
+        printf '%s\n' 'nc'
+        return 0
+    fi
+    return 1
+}
+
+read_control_tcp_port() {
+    local work_dir="$1"
+    local config="$work_dir/afwall_dnsd.conf"
+    local value
+    value=$(adb_su "sed -n 's/^control_tcp_port=//p' $(shell_quote "$config") | head -n 1" \
+        2>/dev/null | tr -d '\r' || true)
+    case "$value" in
+        ''|*[!0-9]*)
+            return 1
+            ;;
+    esac
+    if [ "$value" -le 0 ] || [ "$value" -gt 65535 ]; then
+        return 1
+    fi
+    printf '%s\n' "$value"
+}
+
+send_control_unix() {
     local work_dir="$1"
     local nc_cmd="$2"
     local control_command="$3"
@@ -108,6 +140,40 @@ send_control() {
 if [ -z \"\$TOKEN\" ]; then echo 'probe_error=token_unreadable'; exit 1; fi; \
 printf 'token %s\n%s\n' \"\$TOKEN\" $(shell_quote "$control_command") \
 | $nc_cmd -U $(shell_quote "$socket") 2>&1" | tr -d '\r'
+}
+
+send_control_tcp() {
+    local work_dir="$1"
+    local nc_cmd="$2"
+    local port="$3"
+    local control_command="$4"
+    local token="$work_dir/afwall_dnsd.control"
+
+    adb_su "TOKEN=\$(cat $(shell_quote "$token") 2>/dev/null || true); \
+if [ -z \"\$TOKEN\" ]; then echo 'probe_error=token_unreadable'; exit 1; fi; \
+printf 'token %s\n%s\n' \"\$TOKEN\" $(shell_quote "$control_command") \
+| $nc_cmd 127.0.0.1 $(shell_quote "$port") 2>&1" | tr -d '\r'
+}
+
+status_allows_debug() {
+    local status="$1"
+    printf '%s\n' "$status" | grep -q '^running=1' \
+        && printf '%s\n' "$status" | grep -q '^control_adb_debug_enabled=1$'
+}
+
+send_selected_control() {
+    local control_command="$1"
+    case "$TRANSPORT" in
+        unix)
+            send_control_unix "$WORK_DIR" "$NC_CMD" "$control_command"
+            ;;
+        tcp)
+            send_control_tcp "$WORK_DIR" "$NC_CMD" "$TCP_PORT" "$control_command"
+            ;;
+        *)
+            die "internal error: no selected control transport"
+            ;;
+    esac
 }
 
 validate_control_command() {
@@ -199,18 +265,38 @@ if ! adb_su "id" 2>/dev/null | grep -q 'uid=0'; then
 fi
 
 WORK_DIR="$(detect_work_dir)" || die "AFWall DNS work dir not found; enable DNS protection and start the service first"
-NC_CMD="$(find_unix_nc)" || die "no Unix-domain nc client with -U support found on device"
+TRANSPORT=""
+NC_CMD=""
+TCP_PORT=""
+STATUS=""
 
-STATUS="$(send_control "$WORK_DIR" "$NC_CMD" status || true)"
-if printf '%s\n' "$STATUS" | grep -q '^error unauthorized'; then
-    die "daemon rejected root control; enable AFWall's ADB DNS diagnostics setting and reload/repair DNS"
+if NC_CANDIDATE="$(find_unix_nc)"; then
+    STATUS="$(send_control_unix "$WORK_DIR" "$NC_CANDIDATE" status || true)"
+    if status_allows_debug "$STATUS"; then
+        TRANSPORT="unix"
+        NC_CMD="$NC_CANDIDATE"
+    fi
 fi
-if ! printf '%s\n' "$STATUS" | grep -q '^control_adb_debug_enabled=1$'; then
-    die "ADB DNS diagnostics setting is not active in the running daemon"
+
+if [ -z "$TRANSPORT" ]; then
+    if TCP_PORT="$(read_control_tcp_port "$WORK_DIR")" && NC_CANDIDATE="$(find_tcp_nc)"; then
+        STATUS="$(send_control_tcp "$WORK_DIR" "$NC_CANDIDATE" "$TCP_PORT" status || true)"
+        if status_allows_debug "$STATUS"; then
+            TRANSPORT="tcp"
+            NC_CMD="$NC_CANDIDATE"
+        fi
+    fi
+fi
+
+if [ -z "$TRANSPORT" ]; then
+    if printf '%s\n' "$STATUS" | grep -q '^error unauthorized'; then
+        die "daemon rejected root control; enable AFWall's ADB DNS diagnostics setting and reload/repair DNS"
+    fi
+    die "no usable daemon control transport found; enable ADB DNS diagnostics and ensure Unix nc -U or loopback TCP nc is available"
 fi
 
 if [ "$COMMAND" = "status" ] || [ "$COMMAND" = "stats" ]; then
     printf '%s\n' "$STATUS"
 else
-    send_control "$WORK_DIR" "$NC_CMD" "$CONTROL_COMMAND"
+    send_selected_control "$CONTROL_COMMAND"
 fi

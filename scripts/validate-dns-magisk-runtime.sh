@@ -71,7 +71,8 @@ Optional recovery checks:
                           verifies redirects are removed and the service restores.
   --adb-debug-control-check
                           Expect AFWall's ADB DNS diagnostics setting to be enabled
-                          and verify root-over-ADB can run token-authenticated status.
+                          and verify root-over-ADB can run token-authenticated status
+                          over the Unix socket or loopback TCP fallback.
 EOF
 }
 
@@ -544,6 +545,50 @@ find_unix_nc() {
     return 1
 }
 
+find_tcp_nc() {
+    if adb_su "toybox nc --help >/dev/null 2>&1"; then
+        printf '%s\n' 'toybox nc'
+        return 0
+    fi
+    if adb_su "command -v nc >/dev/null 2>&1"; then
+        printf '%s\n' 'nc'
+        return 0
+    fi
+    return 1
+}
+
+read_control_tcp_port() {
+    local work_dir="$1"
+    local config="$work_dir/afwall_dnsd.conf"
+    local value
+    value=$(adb_su "sed -n 's/^control_tcp_port=//p' $(shell_quote "$config") | head -n 1" \
+        2>/dev/null | tr -d '\r' || true)
+    case "$value" in
+        ''|*[!0-9]*)
+            return 1
+            ;;
+    esac
+    if [ "$value" -le 0 ] || [ "$value" -gt 65535 ]; then
+        return 1
+    fi
+    printf '%s\n' "$value"
+}
+
+send_root_control_unix() {
+    local work_dir="$1"
+    local nc_cmd="$2"
+    local control_command="$3"
+    adb_su "TOKEN=\$(cat $(shell_quote "$work_dir/afwall_dnsd.control") 2>/dev/null); printf 'token %s\n%s\n' \"\$TOKEN\" $(shell_quote "$control_command") | $nc_cmd -U $(shell_quote "$work_dir/afwall_dnsd.sock") 2>&1 || true"
+}
+
+send_root_control_tcp() {
+    local work_dir="$1"
+    local nc_cmd="$2"
+    local port="$3"
+    local control_command="$4"
+    adb_su "TOKEN=\$(cat $(shell_quote "$work_dir/afwall_dnsd.control") 2>/dev/null); printf 'token %s\n%s\n' \"\$TOKEN\" $(shell_quote "$control_command") | $nc_cmd 127.0.0.1 $(shell_quote "$port") 2>&1 || true"
+}
+
 check_external_control_rejection() {
     local work_dir="$1"
     local nc_cmd
@@ -563,20 +608,39 @@ check_external_control_rejection() {
 check_adb_debug_control_allowed() {
     local work_dir="$1"
     local nc_cmd
+    local tcp_port
+    local transport=""
     local response_file="$OUT_DIR/$CURRENT_PHASE-adb-debug-root-control-response.txt"
     local bad_response_file="$OUT_DIR/$CURRENT_PHASE-adb-debug-bad-token-response.txt"
-    if ! nc_cmd=$(find_unix_nc); then
-        warn "no Unix-domain nc client found on device; ADB debug control probe skipped"
+    if nc_cmd=$(find_unix_nc); then
+        send_root_control_unix "$work_dir" "$nc_cmd" status > "$response_file" || true
+        if grep -q '^running=1' "$response_file" \
+            && grep -q '^control_adb_debug_enabled=1$' "$response_file"; then
+            transport="unix"
+        fi
+    fi
+    if [ -z "$transport" ]; then
+        if tcp_port=$(read_control_tcp_port "$work_dir") && nc_cmd=$(find_tcp_nc); then
+            send_root_control_tcp "$work_dir" "$nc_cmd" "$tcp_port" status > "$response_file" || true
+            if grep -q '^running=1' "$response_file" \
+                && grep -q '^control_adb_debug_enabled=1$' "$response_file"; then
+                transport="tcp"
+            fi
+        fi
+    fi
+    if [ "$transport" = "unix" ]; then
+        pass "root-over-ADB debug control probe succeeded over Unix socket"
+        adb_su "printf 'token %s\nstatus\n' '0000000000000000000000000000000000000000000000000000000000000000' | $nc_cmd -U $(shell_quote "$work_dir/afwall_dnsd.sock") 2>&1 || true" > "$bad_response_file" || true
+    elif [ "$transport" = "tcp" ]; then
+        pass "root-over-ADB debug control probe succeeded over loopback TCP"
+        adb_su "printf 'token %s\nstatus\n' '0000000000000000000000000000000000000000000000000000000000000000' | $nc_cmd 127.0.0.1 $(shell_quote "$tcp_port") 2>&1 || true" > "$bad_response_file" || true
+    else
+        if [ ! -s "$response_file" ]; then
+            echo "probe_error=no_usable_unix_or_tcp_control_transport" > "$response_file"
+        fi
+        fail "root-over-ADB debug control probe failed or setting is disabled; see $response_file"
         return
     fi
-    adb_su "TOKEN=\$(cat '$work_dir/afwall_dnsd.control' 2>/dev/null); printf 'token %s\nstatus\n' \"\$TOKEN\" | $nc_cmd -U '$work_dir/afwall_dnsd.sock' 2>&1 || true" > "$response_file" || true
-    if grep -q '^running=1' "$response_file" \
-        && grep -q '^control_adb_debug_enabled=1$' "$response_file"; then
-        pass "root-over-ADB debug control probe succeeded"
-    else
-        fail "root-over-ADB debug control probe failed or setting is disabled; see $response_file"
-    fi
-    adb_su "printf 'token %s\nstatus\n' '0000000000000000000000000000000000000000000000000000000000000000' | $nc_cmd -U '$work_dir/afwall_dnsd.sock' 2>&1 || true" > "$bad_response_file" || true
     if grep -q '^error unauthorized' "$bad_response_file"; then
         pass "root-over-ADB debug control still rejects a bad token"
     else

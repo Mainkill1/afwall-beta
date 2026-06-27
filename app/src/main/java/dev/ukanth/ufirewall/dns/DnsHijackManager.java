@@ -557,6 +557,11 @@ public final class DnsHijackManager {
                 .append('\n');
         out.append("boot_persistence_pref=").append(G.dnsHijackBootPersistence()).append('\n');
         out.append("adb_debug_control_pref=").append(G.dnsHijackAdbDebugControl()).append('\n');
+        out.append("adb_debug_control_tcp_port=")
+                .append(G.dnsHijackAdbDebugControl()
+                        ? debugControlTcpPort(G.dnsHijackPort(DEFAULT_PORT))
+                        : 0)
+                .append('\n');
         out.append("expected_magisk_script_version=").append(MAGISK_SCRIPT_VERSION).append('\n');
         out.append("expected_magisk_module_version=").append(MAGISK_MODULE_VERSION).append('\n');
         out.append("boot_restore_ipv6_enabled=").append(G.enableIPv6()).append('\n');
@@ -770,6 +775,11 @@ public final class DnsHijackManager {
                 "fail_open_control_supported"), -1L);
         long adbDebugControl = parseLong(firstValue(statusValues, healthValues,
                 "control_adb_debug_enabled"), G.dnsHijackAdbDebugControl() ? 1L : 0L);
+        long controlTcpPort = parseLong(firstValue(statusValues, healthValues,
+                "control_tcp_port"), G.dnsHijackAdbDebugControl()
+                ? debugControlTcpPort(G.dnsHijackPort(DEFAULT_PORT)) : 0L);
+        long controlTcpListener = parseLong(firstValue(statusValues, healthValues,
+                "control_tcp_listener"), 0L);
         long cleanupIptablesSafe = parseLong(firstValue(statusValues, healthValues,
                 "cleanup_iptables_safe"), -1L);
         long cleanupIp6tablesSafe = parseLong(firstValue(statusValues, healthValues,
@@ -874,6 +884,10 @@ public final class DnsHijackManager {
         String controlLine = "Control socket: app-only"
                 + (adbDebugControl == 1L ? " + ADB diagnostics" : "")
                 + " | token auth required";
+        if (adbDebugControl == 1L && controlTcpPort > 0L) {
+            controlLine += " | TCP 127.0.0.1:" + controlTcpPort + " "
+                    + listenerLabel(controlTcpListener == 1L);
+        }
         String routingScopeLine = preroutingRedirectExpected()
                 ? "DNS scope: local and forwarded port-53 capture"
                 : "DNS scope: UID-scoped app-owned port-53 sockets; Android system resolver traffic may use a system UID";
@@ -1168,6 +1182,11 @@ public final class DnsHijackManager {
         out.append("daemon_control_adb_debug_enabled=")
                 .append(G.dnsHijackAdbDebugControl()).append('\n');
         out.append("daemon_control_adb_debug_note=when enabled, use adb shell su -c with the app-owned token file; diagnostics never print the token\n");
+        out.append("daemon_control_adb_debug_tcp=")
+                .append(G.dnsHijackAdbDebugControl()
+                        ? "127.0.0.1:" + debugControlTcpPort(G.dnsHijackPort(DEFAULT_PORT))
+                        : "disabled")
+                .append('\n');
         out.append("daemon_socket_mark=").append(DAEMON_SOCKET_MARK).append('\n');
         out.append("daemon_mark_output_bypass=enabled_to_prevent_daemon_upstream_recursion\n");
         out.append("daemon_mark_filter_bypass=enabled_for_daemon_upstream_packets\n");
@@ -4409,6 +4428,9 @@ public final class DnsHijackManager {
         config.append("control_token=").append(controlToken).append('\n');
         config.append("control_adb_debug=").append(G.dnsHijackAdbDebugControl() ? "1" : "0")
                 .append('\n');
+        config.append("control_tcp_port=").append(G.dnsHijackAdbDebugControl()
+                ? debugControlTcpPort(G.dnsHijackPort(DEFAULT_PORT))
+                : 0).append('\n');
         config.append("pid_file=").append(new File(dir, PID).getAbsolutePath()).append('\n');
         config.append("heartbeat_file=").append(new File(dir, HEARTBEAT).getAbsolutePath()).append('\n');
         config.append("mark_status_file=").append(new File(dir, MARK_STATUS).getAbsolutePath()).append('\n');
@@ -4451,6 +4473,10 @@ public final class DnsHijackManager {
         appendConfigFile(config, "block_suffix_file", DnsBlocklistManager.suffixBlockFile(context));
 
         return config.toString();
+    }
+
+    private static int debugControlTcpPort(int dnsPort) {
+        return dnsPort >= 65535 ? dnsPort - 1 : dnsPort + 1;
     }
 
     private static void appendSafeSearchConfigEntries(Context context, StringBuilder config) {

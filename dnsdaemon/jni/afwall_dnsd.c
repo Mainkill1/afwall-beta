@@ -220,6 +220,7 @@ typedef struct {
     int dnssec_auth_required;
     int control_socket_uid;
     int control_adb_debug;
+    int control_tcp_port;
     char control_socket[256];
     char control_token[128];
     char log_file[256];
@@ -406,6 +407,8 @@ static int g_udp_listener_v6_ready = 0;
 static int g_tcp_listener_v4_ready = 0;
 static int g_tcp_listener_v6_ready = 0;
 static int g_control_listener_ready = 0;
+static int g_control_tcp_listener_ready = 0;
+static int g_control_tcp_fd = -1;
 static int g_socket_mark_supported = 0;
 static int g_socket_mark_errno = 0;
 
@@ -3804,6 +3807,7 @@ static void default_config(config_t *cfg) {
     cfg->dnssec_request = 0;
     cfg->control_socket_uid = -1;
     cfg->control_adb_debug = 0;
+    cfg->control_tcp_port = 0;
     safe_copy(cfg->control_socket, sizeof(cfg->control_socket), "/data/local/tmp/afwall_dnsd.sock");
     safe_copy(cfg->iptables_path, sizeof(cfg->iptables_path), "iptables");
     safe_copy(cfg->ip6tables_path, sizeof(cfg->ip6tables_path), "ip6tables");
@@ -4024,6 +4028,9 @@ static bool load_config(const char *path, config_t *new_cfg) {
             safe_copy(new_cfg->control_token, sizeof(new_cfg->control_token), value);
         } else if (strcmp(key, "control_adb_debug") == 0) {
             new_cfg->control_adb_debug = atoi(value) != 0;
+        } else if (strcmp(key, "control_tcp_port") == 0) {
+            int port = atoi(value);
+            new_cfg->control_tcp_port = port > 0 && port <= 65535 ? port : 0;
         } else if (strcmp(key, "event_log_file") == 0) {
             safe_copy(new_cfg->event_log_file, sizeof(new_cfg->event_log_file), value);
         } else if (strcmp(key, "log_file") == 0) {
@@ -4457,6 +4464,7 @@ static void write_validate_response(int client) {
             "tcp_listener_v4=%d\ntcp_listener_v6=%d\n"
             "control_socket_configured=%d\ncontrol_socket_uid=%d\ncontrol_auth_configured=%d\n"
             "control_peer_uid_enforced=%d\ncontrol_adb_debug_enabled=%d\n"
+            "control_tcp_port=%d\ncontrol_tcp_listener=%d\n"
             "fail_open_control_supported=1\n"
             "cleanup_iptables_safe=%d\ncleanup_ip6tables_safe=%d\n"
             "pid_file_configured=%d\nheartbeat_file_configured=%d\n"
@@ -4499,6 +4507,8 @@ static void write_validate_response(int client) {
             valid_control_token_value(candidate->control_token) ? 1 : 0,
             control_peer_uid_enforced(candidate->control_socket_uid),
             candidate->control_adb_debug,
+            candidate->control_tcp_port,
+            g_control_tcp_listener_ready,
             cleanup_tool_ready(candidate->iptables_path, "iptables"),
             cleanup_tool_ready(candidate->ip6tables_path, "ip6tables"),
             candidate->pid_file[0] != '\0' ? 1 : 0,
@@ -4691,6 +4701,50 @@ static int create_control_socket(const char *path, int owner_uid) {
                 path, errno);
     }
     return fd;
+}
+
+static int create_control_tcp_socket(int port) {
+    int fd;
+    int on = 1;
+    struct sockaddr_in addr;
+    if (port <= 0 || port > 65535) {
+        return -1;
+    }
+    fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) {
+        return -1;
+    }
+    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on));
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    addr.sin_port = htons((uint16_t) port);
+    if (bind(fd, (struct sockaddr *) &addr, sizeof(addr)) != 0 || listen(fd, 4) != 0) {
+        close(fd);
+        return -1;
+    }
+    return fd;
+}
+
+static void refresh_control_tcp_listener(void) {
+    if (g_control_tcp_fd >= 0) {
+        close(g_control_tcp_fd);
+        g_control_tcp_fd = -1;
+        g_control_tcp_listener_ready = 0;
+    }
+    if (!g_cfg.control_adb_debug || g_cfg.control_tcp_port <= 0) {
+        return;
+    }
+    g_control_tcp_fd = create_control_tcp_socket(g_cfg.control_tcp_port);
+    if (g_control_tcp_fd < 0) {
+        write_event_log("warn",
+                "ADB debug TCP control listener unavailable port=%d errno=%d",
+                g_cfg.control_tcp_port, errno);
+        return;
+    }
+    g_control_tcp_listener_ready = 1;
+    write_event_log("info", "ADB debug TCP control listener ready port=%d",
+            g_cfg.control_tcp_port);
 }
 
 static bool control_peer_authorized(int client, const config_t *cfg) {
@@ -5399,6 +5453,7 @@ static void write_health_response(int client) {
             "tcp_listener_v4=%d\ntcp_listener_v6=%d\n"
             "control_socket_uid=%d\ncontrol_peer_uid_enforced=%d\n"
             "control_adb_debug_enabled=%d\n"
+            "control_tcp_port=%d\ncontrol_tcp_listener=%d\n"
             "fail_open_control_supported=1\n"
             "cleanup_iptables_safe=%d\ncleanup_ip6tables_safe=%d\n"
             "generation=%llu\nupstreams=%d\nsplit_upstreams=%d\nupstream_probe=%s\n"
@@ -5460,6 +5515,8 @@ static void write_health_response(int client) {
             g_cfg.control_socket_uid,
             control_peer_uid_enforced(g_cfg.control_socket_uid),
             g_cfg.control_adb_debug,
+            g_cfg.control_tcp_port,
+            g_control_tcp_listener_ready,
             cleanup_tool_ready(g_cfg.iptables_path, "iptables"),
             cleanup_tool_ready(g_cfg.ip6tables_path, "ip6tables"),
             (unsigned long long) g_cfg.generation,
@@ -5663,7 +5720,7 @@ static void write_history_response(int client, const char *filter) {
     free(matches);
 }
 
-static void handle_control(int fd) {
+static void handle_control(int fd, bool require_peer_auth) {
     int client = accept(fd, NULL, NULL);
     char request[512];
     char cmd[256];
@@ -5673,10 +5730,20 @@ static void handle_control(int fd) {
     if (client < 0) {
         return;
     }
-    if (!control_peer_authorized(client, &g_cfg)) {
+    if (require_peer_auth) {
+        if (!control_peer_authorized(client, &g_cfg)) {
+            write_control_response(client, "error unauthorized\n");
+            close(client);
+            return;
+        }
+    } else if (!g_cfg.control_adb_debug) {
         write_control_response(client, "error unauthorized\n");
+        write_event_log("warn", "TCP control peer rejected because ADB diagnostics are disabled");
         close(client);
         return;
+    } else {
+        write_event_log("warn", "ADB debug TCP control peer accepted on loopback port=%d",
+                g_cfg.control_tcp_port);
     }
     set_socket_timeout(client, CLIENT_TIMEOUT_MS);
     n = recv(client, request, sizeof(request) - 1, 0);
@@ -5737,6 +5804,7 @@ static void handle_control(int fd) {
                 "tcp_listener_v4=%d\ntcp_listener_v6=%d\n"
                 "control_socket_uid=%d\ncontrol_peer_uid_enforced=%d\n"
                 "control_adb_debug_enabled=%d\n"
+                "control_tcp_port=%d\ncontrol_tcp_listener=%d\n"
                 "fail_open_control_supported=1\n"
                 "cleanup_iptables_safe=%d\ncleanup_ip6tables_safe=%d\n"
                 "queries=%llu\nudp_queries=%llu\ntcp_queries=%llu\ninvalid_queries=%llu\n"
@@ -5804,6 +5872,8 @@ static void handle_control(int fd) {
                 g_cfg.control_socket_uid,
                 control_peer_uid_enforced(g_cfg.control_socket_uid),
                 g_cfg.control_adb_debug,
+                g_cfg.control_tcp_port,
+                g_control_tcp_listener_ready,
                 cleanup_tool_ready(g_cfg.iptables_path, "iptables"),
                 cleanup_tool_ready(g_cfg.ip6tables_path, "ip6tables"),
                 (unsigned long long) g_stats.queries,
@@ -5931,6 +6001,7 @@ static void handle_control(int fd) {
         write_validate_response(client);
     } else if (strcmp(cmd, "reload") == 0) {
         if (reload_config()) {
+            refresh_control_tcp_listener();
             write_control_response(client, "ok reload generation=%llu\n", (unsigned long long) g_cfg.generation);
         } else {
             write_control_response(client, "error reload active_generation=%llu reload_failures=%llu\n",
@@ -6105,6 +6176,7 @@ int main(int argc, char **argv) {
         fprintf(stderr, "failed to create listeners on port %d\n", g_cfg.listen_port);
         return 1;
     }
+    refresh_control_tcp_listener();
     g_udp_listener_v4_ready = udp4_fd >= 0 ? 1 : 0;
     g_udp_listener_v6_ready = udp6_fd >= 0 ? 1 : 0;
     g_tcp_listener_v4_ready = tcp4_fd >= 0 ? 1 : 0;
@@ -6112,24 +6184,30 @@ int main(int argc, char **argv) {
     g_udp_listener_ready = g_udp_listener_v4_ready;
     g_tcp_listener_ready = g_tcp_listener_v4_ready;
     g_control_listener_ready = 1;
+    g_control_tcp_listener_ready = g_control_tcp_fd >= 0 ? 1 : 0;
     /* Publish the PID only after listeners exist so supervisors do not accept a half-start. */
     write_pid_file();
     write_heartbeat_file();
     last_heartbeat = now_seconds();
     start_log_thread();
     write_event_log("info",
-            "daemon listeners ready port=%d udp4=%d udp6=%d tcp4=%d tcp6=%d control=1 pid=%ld",
+            "daemon listeners ready port=%d udp4=%d udp6=%d tcp4=%d tcp6=%d control=1 control_tcp=%d control_tcp_port=%d pid=%ld",
             g_cfg.listen_port,
             g_udp_listener_v4_ready,
             g_udp_listener_v6_ready,
             g_tcp_listener_v4_ready,
             g_tcp_listener_v6_ready,
+            g_control_tcp_listener_ready,
+            g_cfg.control_tcp_port,
             (long) getpid());
     while (g_running) {
         fd_set readfds;
         struct timeval timeout;
         uint64_t heartbeat_now;
         int maxfd = control_fd;
+        int ready_control_tcp_fd = -1;
+        bool control_ready;
+        bool control_tcp_ready;
         int ready;
         if (g_reload_requested) {
             g_reload_requested = 0;
@@ -6137,6 +6215,8 @@ int main(int argc, char **argv) {
                 write_event_log("error", "daemon reload signal failed active_generation=%llu failures=%llu",
                         (unsigned long long) g_cfg.generation,
                         (unsigned long long) g_stats.reload_failures);
+            } else {
+                refresh_control_tcp_listener();
             }
         }
         FD_ZERO(&readfds);
@@ -6149,6 +6229,9 @@ int main(int argc, char **argv) {
             FD_SET(tcp6_fd, &readfds);
         }
         FD_SET(control_fd, &readfds);
+        if (g_control_tcp_fd >= 0) {
+            FD_SET(g_control_tcp_fd, &readfds);
+        }
         timeout.tv_sec = 1;
         timeout.tv_usec = 0;
         if (udp4_fd > maxfd) {
@@ -6163,12 +6246,22 @@ int main(int argc, char **argv) {
         if (tcp6_fd > maxfd) {
             maxfd = tcp6_fd;
         }
+        if (g_control_tcp_fd > maxfd) {
+            maxfd = g_control_tcp_fd;
+        }
         ready = select(maxfd + 1, &readfds, NULL, NULL, &timeout);
         if (ready < 0) {
             if (errno == EINTR) {
                 continue;
             }
             break;
+        }
+        control_ready = FD_ISSET(control_fd, &readfds);
+        if (g_control_tcp_fd >= 0 && FD_ISSET(g_control_tcp_fd, &readfds)) {
+            ready_control_tcp_fd = g_control_tcp_fd;
+            control_tcp_ready = true;
+        } else {
+            control_tcp_ready = false;
         }
         if (FD_ISSET(udp4_fd, &readfds)) {
             int drained = 0;
@@ -6199,8 +6292,11 @@ int main(int argc, char **argv) {
         if (tcp6_fd >= 0 && FD_ISSET(tcp6_fd, &readfds)) {
             handle_tcp(tcp6_fd);
         }
-        if (FD_ISSET(control_fd, &readfds)) {
-            handle_control(control_fd);
+        if (control_ready) {
+            handle_control(control_fd, true);
+        }
+        if (control_tcp_ready && g_control_tcp_fd == ready_control_tcp_fd) {
+            handle_control(ready_control_tcp_fd, false);
         }
         if (!g_log_thread_started) {
             flush_logs();
@@ -6220,6 +6316,7 @@ int main(int argc, char **argv) {
     g_tcp_listener_v4_ready = 0;
     g_tcp_listener_v6_ready = 0;
     g_control_listener_ready = 0;
+    g_control_tcp_listener_ready = 0;
     close(udp4_fd);
     if (udp6_fd >= 0) {
         close(udp6_fd);
@@ -6229,6 +6326,10 @@ int main(int argc, char **argv) {
         close(tcp6_fd);
     }
     close(control_fd);
+    if (g_control_tcp_fd >= 0) {
+        close(g_control_tcp_fd);
+        g_control_tcp_fd = -1;
+    }
     unlink(g_cfg.control_socket);
     unlink(g_cfg.pid_file);
     if (g_cfg.heartbeat_file[0] != '\0') {
