@@ -65,6 +65,7 @@
 #define UID_UNKNOWN -1
 #define UID_CACHE_SIZE 128
 #define UID_CACHE_TTL 15
+#define AFWALL_DNSD_SOCKET_MARK 0xAF053
 #define DNS_QTYPE_A 1
 #define DNS_QTYPE_OPT 41
 #define DNS_QTYPE_AAAA 28
@@ -79,6 +80,10 @@
 #define MSG_DONTWAIT 0
 #else
 #define AFWALL_HAS_MSG_DONTWAIT 1
+#endif
+
+#ifndef SO_MARK
+#define SO_MARK 36
 #endif
 
 typedef enum {
@@ -3015,6 +3020,13 @@ static void set_socket_buffers(int fd) {
     setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &size, sizeof(size));
 }
 
+static void mark_upstream_socket(int fd) {
+    int mark = AFWALL_DNSD_SOCKET_MARK;
+    if (fd >= 0) {
+        setsockopt(fd, SOL_SOCKET, SO_MARK, &mark, sizeof(mark));
+    }
+}
+
 static bool socket_timed_out(void) {
     return errno == EAGAIN || errno == EWOULDBLOCK || errno == ETIMEDOUT;
 }
@@ -3033,6 +3045,7 @@ static int connect_upstream(const upstream_t *upstream, int socktype, int timeou
         if (fd < 0) {
             return -1;
         }
+        mark_upstream_socket(fd);
         set_socket_buffers(fd);
         set_socket_timeout(fd, timeout_ms);
         if (connect(fd, (const struct sockaddr *) &upstream->addr, upstream->addr_len) == 0) {
@@ -3053,6 +3066,7 @@ static int connect_upstream(const upstream_t *upstream, int socktype, int timeou
         if (fd < 0) {
             continue;
         }
+        mark_upstream_socket(fd);
         set_socket_buffers(fd);
         set_socket_timeout(fd, timeout_ms);
         if (connect(fd, rp->ai_addr, rp->ai_addrlen) == 0) {

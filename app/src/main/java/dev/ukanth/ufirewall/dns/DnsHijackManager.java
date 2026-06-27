@@ -71,6 +71,7 @@ public final class DnsHijackManager {
     private static final String NFT_TABLE_V6 = "afwall_dns6";
     private static final String NFT_OUTPUT = "output";
     private static final String NFT_PREROUTING = "prerouting";
+    private static final String DAEMON_SOCKET_MARK = "0xaf053";
     private static final String PRIVATE_DNS_MODE = "private_dns_mode";
     private static final String PRIVATE_DNS_SPECIFIER = "private_dns_specifier";
     private static final int DEFAULT_PORT = 5354;
@@ -554,7 +555,7 @@ public final class DnsHijackManager {
                 "tcp_listener_v6", "tcp_listener");
         boolean controlListener = "1".equals(firstValue(statusValues, healthValues, "control_listener"));
         boolean privateDnsBypass = androidPrivateDnsMayBypass(context);
-        boolean rootUidBypass = true;
+        boolean rootUidBypass = false;
         long upstreamLatency = parseLong(firstValue(healthValues, statusValues, "upstream_probe_ms"), -1L);
         String upstreamProbe = firstValue(healthValues, statusValues, "upstream_probe");
         boolean listenersReady = controlListener && udpListener && tcpListener
@@ -850,9 +851,11 @@ public final class DnsHijackManager {
     }
 
     private static void appendAndroidDnsCompatibility(Context context, StringBuilder out) {
-        out.append("capture_scope=udp_tcp_port_53_output_and_prerouting_except_uid0_output\n");
+        out.append("capture_scope=udp_tcp_port_53_output_and_prerouting_except_daemon_mark\n");
         out.append("encrypted_dns_note=Private DNS/DoT on 853 and in-app DoH are not port-53 DNS and can bypass NAT capture\n");
-        out.append("root_uid_output_bypass=enabled_to_prevent_daemon_upstream_recursion\n");
+        out.append("daemon_socket_mark=").append(DAEMON_SOCKET_MARK).append('\n');
+        out.append("daemon_mark_output_bypass=enabled_to_prevent_daemon_upstream_recursion\n");
+        out.append("root_uid_output_bypass=fallback_only_when_mark_match_is_unavailable\n");
         out.append("root_uid_capture_warning=").append(rootUidBypassWarning()).append('\n');
         out.append("private_dns_mode=").append(readAndroidPrivateDnsMode(context)).append('\n');
         String specifier = readAndroidPrivateDnsSpecifier(context);
@@ -889,12 +892,13 @@ public final class DnsHijackManager {
     }
 
     private static String rootUidBypassDashboardLine() {
-        return "\nAndroid DNS routing: root-owned DNS output bypasses capture to prevent daemon recursion";
+        return "\nAndroid DNS routing: daemon upstream sockets use mark "
+                + DAEMON_SOCKET_MARK + " to prevent recursion";
     }
 
     private static String rootUidBypassWarning() {
-        return "UID 0 OUTPUT DNS is returned before redirect so the root daemon can reach upstream resolvers; "
-                + "devices that emit normal DNS through root-owned system services can bypass capture";
+        return "UID 0 OUTPUT DNS is only used as a compatibility fallback if mark matching is unavailable; "
+                + "that fallback can let root-owned system DNS bypass capture";
     }
 
     private static String readAndroidPrivateDnsMode(Context context) {
@@ -1086,7 +1090,9 @@ public final class DnsHijackManager {
         if (snapshot.privateDnsMayBypass) {
             warnings.add("Android Private DNS may bypass capture");
         }
-        if (snapshot.rootUidMayBypass) {
+        if (redirectStatusUsesUidFallback(rootStatusRaw)) {
+            warnings.add("daemon mark unavailable; UID 0 DNS may bypass capture");
+        } else if (snapshot.rootUidMayBypass) {
             warnings.add("root/system DNS may bypass capture");
         }
         if (!blockers.isEmpty()) {
@@ -1096,6 +1102,20 @@ public final class DnsHijackManager {
             return "Readiness: usable with warning (" + joinLabels(warnings) + ")";
         }
         return "Readiness: ready for port-53 DNS capture";
+    }
+
+    private static boolean redirectStatusUsesUidFallback(String raw) {
+        if (raw == null || raw.trim().isEmpty()) {
+            return false;
+        }
+        Map<String, String> values = parseKeyValueLines(raw);
+        if (values.isEmpty()) {
+            return false;
+        }
+        if (redirectFamilyUsesUidFallback(values, "dns_redirect_ipv4")) {
+            return true;
+        }
+        return G.enableIPv6() && redirectFamilyUsesUidFallback(values, "dns_redirect_ipv6");
     }
 
     public static boolean isRootRedirectStatusHealthy(String raw) {
@@ -1130,6 +1150,10 @@ public final class DnsHijackManager {
                 "PREROUTING", "udp", preChain));
         commands.add(buildRuleStatusCommand(prefix + "_prerouting_tcp", iptables,
                 "PREROUTING", "tcp", preChain));
+        commands.add(buildDaemonMarkReturnStatusCommand(prefix + "_output_daemon_mark_return",
+                iptables, chain));
+        commands.add(buildUid0ReturnStatusCommand(prefix + "_output_uid0_return",
+                iptables, chain));
         commands.add(buildRedirectTargetStatusCommand(prefix + "_chain_udp_redirect",
                 iptables, chain, "udp", port));
         commands.add(buildRedirectTargetStatusCommand(prefix + "_chain_tcp_redirect",
@@ -1139,6 +1163,10 @@ public final class DnsHijackManager {
         commands.add(buildRedirectTargetStatusCommand(prefix + "_pre_chain_tcp_redirect",
                 iptables, preChain, "tcp", port));
         commands.add(buildNftTableStatusCommand(prefix + "_nft_table", nftFamily, nftTable));
+        commands.add(buildNftDaemonMarkReturnStatusCommand(
+                prefix + "_nft_output_daemon_mark_return", nftFamily, nftTable));
+        commands.add(buildNftUid0ReturnStatusCommand(prefix + "_nft_output_uid0_return",
+                nftFamily, nftTable));
         commands.add(buildNftRedirectStatusCommand(prefix + "_nft_output_udp",
                 nftFamily, nftTable, NFT_OUTPUT, "udp", port));
         commands.add(buildNftRedirectStatusCommand(prefix + "_nft_output_tcp",
@@ -1163,6 +1191,18 @@ public final class DnsHijackManager {
                 + "; then echo " + key + "=1; else echo " + key + "=0; fi";
     }
 
+    private static String buildDaemonMarkReturnStatusCommand(String key, String iptables,
+                                                             String chain) {
+        return "if " + buildIptablesDaemonMarkReturnCheck(iptables, chain)
+                + "; then echo " + key + "=1; else echo " + key + "=0; fi";
+    }
+
+    private static String buildUid0ReturnStatusCommand(String key, String iptables,
+                                                       String chain) {
+        return "if " + buildIptablesUid0ReturnCheck(iptables, chain)
+                + "; then echo " + key + "=1; else echo " + key + "=0; fi";
+    }
+
     private static String buildRedirectTargetStatusCommand(String key, String iptables, String chain,
                                                            String protocol, int port) {
         String pattern = "-p " + protocol + " .*--dport 53.*-j REDIRECT.*--to-ports " + port;
@@ -1178,6 +1218,7 @@ public final class DnsHijackManager {
         checks.add(buildIptablesRuleCheck(iptables, "OUTPUT", "tcp", chain));
         checks.add(buildIptablesRuleCheck(iptables, "PREROUTING", "udp", preChain));
         checks.add(buildIptablesRuleCheck(iptables, "PREROUTING", "tcp", preChain));
+        checks.add(buildIptablesRecursionGuardCheck(iptables, chain));
         checks.add(buildIptablesRedirectTargetCheck(iptables, chain, "udp", port));
         checks.add(buildIptablesRedirectTargetCheck(iptables, chain, "tcp", port));
         checks.add(buildIptablesRedirectTargetCheck(iptables, preChain, "udp", port));
@@ -1206,6 +1247,23 @@ public final class DnsHijackManager {
                 + " 2>/dev/null | grep -q -- " + shellQuote(pattern);
     }
 
+    private static String buildIptablesRecursionGuardCheck(String iptables, String chain) {
+        return "( " + buildIptablesDaemonMarkReturnCheck(iptables, chain)
+                + " || " + buildIptablesUid0ReturnCheck(iptables, chain) + " )";
+    }
+
+    private static String buildIptablesDaemonMarkReturnCheck(String iptables, String chain) {
+        String pattern = "-m mark .*--mark " + DAEMON_SOCKET_MARK + ".*-j RETURN";
+        return iptables + " -t nat -S " + shellQuote(chain)
+                + " 2>/dev/null | grep -q -- " + shellQuote(pattern);
+    }
+
+    private static String buildIptablesUid0ReturnCheck(String iptables, String chain) {
+        String pattern = "-m owner .*--uid-owner 0.*-j RETURN";
+        return iptables + " -t nat -S " + shellQuote(chain)
+                + " 2>/dev/null | grep -q -- " + shellQuote(pattern);
+    }
+
     private static String buildIptablesRedirectTargetCheck(String iptables, String chain,
                                                            String protocol, int port) {
         String pattern = "-p " + protocol + " .*--dport 53.*-j REDIRECT.*--to-ports " + port;
@@ -1218,6 +1276,7 @@ public final class DnsHijackManager {
         checks.add("command -v nft >/dev/null 2>&1");
         checks.add("nft list table " + shellQuote(family) + " " + shellQuote(table)
                 + " >/dev/null 2>&1");
+        checks.add(buildNftDaemonMarkReturnCheck(family, table));
         checks.add(buildNftRedirectCheck(family, table, NFT_OUTPUT, "udp", port));
         checks.add(buildNftRedirectCheck(family, table, NFT_OUTPUT, "tcp", port));
         checks.add(buildNftRedirectCheck(family, table, NFT_PREROUTING, "udp", port));
@@ -1230,6 +1289,20 @@ public final class DnsHijackManager {
         String pattern = protocol + " dport 53.*redirect to :" + port;
         return "nft list chain " + shellQuote(family) + " " + shellQuote(table)
                 + " " + shellQuote(chain)
+                + " 2>/dev/null | grep -q -- " + shellQuote(pattern);
+    }
+
+    private static String buildNftDaemonMarkReturnCheck(String family, String table) {
+        String pattern = "meta mark .*return";
+        return "nft list chain " + shellQuote(family) + " " + shellQuote(table)
+                + " " + shellQuote(NFT_OUTPUT)
+                + " 2>/dev/null | grep -q -- " + shellQuote(pattern);
+    }
+
+    private static String buildNftUid0ReturnCheck(String family, String table) {
+        String pattern = "meta skuid 0.*return";
+        return "nft list chain " + shellQuote(family) + " " + shellQuote(table)
+                + " " + shellQuote(NFT_OUTPUT)
                 + " 2>/dev/null | grep -q -- " + shellQuote(pattern);
     }
 
@@ -1254,6 +1327,20 @@ public final class DnsHijackManager {
                 + key + "=0; fi";
     }
 
+    private static String buildNftDaemonMarkReturnStatusCommand(String key, String family,
+                                                                String table) {
+        return "if command -v nft >/dev/null 2>&1 && "
+                + buildNftDaemonMarkReturnCheck(family, table)
+                + "; then echo " + key + "=1; else echo " + key + "=0; fi";
+    }
+
+    private static String buildNftUid0ReturnStatusCommand(String key, String family,
+                                                          String table) {
+        return "if command -v nft >/dev/null 2>&1 && "
+                + buildNftUid0ReturnCheck(family, table)
+                + "; then echo " + key + "=1; else echo " + key + "=0; fi";
+    }
+
     private static String buildNftRedirectStatusCommand(String key, String family, String table,
                                                         String chain, String protocol, int port) {
         String pattern = protocol + " dport 53.*redirect to :" + port;
@@ -1268,15 +1355,18 @@ public final class DnsHijackManager {
         int hookScore = redirectFamilyHookScore(values, prefix);
         int targetScore = redirectFamilyTargetScore(values, prefix);
         int nftInstalled = redirectFamilyNftScore(values, prefix);
-        boolean iptablesInstalled = hookScore >= 6 && targetScore >= 4;
-        if (nftInstalled >= 4 && iptablesInstalled) {
-            return "installed (iptables+nft)";
+        boolean iptablesInstalled = hookScore >= 6 && targetScore >= 4
+                && redirectFamilyIptablesRecursionGuard(values, prefix);
+        boolean nftReady = nftInstalled >= 4 && redirectFamilyNftRecursionGuard(values, prefix);
+        String suffix = redirectFamilyUsesUidFallback(values, prefix) ? " (UID fallback)" : "";
+        if (nftReady && iptablesInstalled) {
+            return "installed (iptables+nft)" + suffix;
         }
-        if (nftInstalled >= 4) {
-            return "installed (nft)";
+        if (nftReady) {
+            return "installed (nft)" + suffix;
         }
         if (iptablesInstalled) {
-            return "installed";
+            return "installed" + suffix;
         }
         if (hookScore > 0 || targetScore > 0 || nftInstalled > 0 || nftTable) {
             return "partial";
@@ -1286,8 +1376,27 @@ public final class DnsHijackManager {
 
     private static boolean redirectFamilyHealthy(Map<String, String> values, String prefix) {
         return (redirectFamilyHookScore(values, prefix) >= 6
-                && redirectFamilyTargetScore(values, prefix) >= 4)
-                || redirectFamilyNftScore(values, prefix) >= 4;
+                && redirectFamilyTargetScore(values, prefix) >= 4
+                && redirectFamilyIptablesRecursionGuard(values, prefix))
+                || (redirectFamilyNftScore(values, prefix) >= 4
+                && redirectFamilyNftRecursionGuard(values, prefix));
+    }
+
+    private static boolean redirectFamilyIptablesRecursionGuard(Map<String, String> values,
+                                                                String prefix) {
+        return "1".equals(values.get(prefix + "_output_daemon_mark_return"))
+                || "1".equals(values.get(prefix + "_output_uid0_return"));
+    }
+
+    private static boolean redirectFamilyNftRecursionGuard(Map<String, String> values,
+                                                           String prefix) {
+        return "1".equals(values.get(prefix + "_nft_output_daemon_mark_return"))
+                || "1".equals(values.get(prefix + "_nft_output_uid0_return"));
+    }
+
+    private static boolean redirectFamilyUsesUidFallback(Map<String, String> values, String prefix) {
+        return "1".equals(values.get(prefix + "_output_uid0_return"))
+                || "1".equals(values.get(prefix + "_nft_output_uid0_return"));
     }
 
     private static int redirectFamilyHookScore(Map<String, String> values, String prefix) {
@@ -2182,7 +2291,8 @@ public final class DnsHijackManager {
         List<String> bypassInterfaces = parseInterfaceList(G.dnsHijackBypassInterfaces());
         List<String> captureInterfaces = parseInterfaceList(G.dnsHijackCaptureInterfaces());
         appendNftRule(command, family, table, NFT_OUTPUT, "oifname " + nftString("lo") + " return");
-        appendNftRule(command, family, table, NFT_OUTPUT, "meta skuid 0 return");
+        appendNftRule(command, family, table, NFT_OUTPUT,
+                "meta mark " + DAEMON_SOCKET_MARK + " return");
         for (String iface : bypassInterfaces) {
             appendNftRule(command, family, table, NFT_OUTPUT,
                     "oifname " + nftString(nftInterfacePattern(iface)) + " return");
@@ -2267,6 +2377,15 @@ public final class DnsHijackManager {
 
     private static String nftString(String value) {
         return "\"" + value + "\"";
+    }
+
+    private static String buildBootDaemonRecursionBypass(String tool, String chainVariable) {
+        return "  if ! " + tool + " -t nat -A \"" + chainVariable
+                + "\" -m mark --mark \"$DAEMON_MARK\" -j RETURN >> \"$LOG\" 2>&1; then\n"
+                + "    log_msg 'DNS daemon mark bypass unavailable; falling back to UID 0 OUTPUT bypass'\n"
+                + "    " + tool + " -t nat -A \"" + chainVariable
+                + "\" -m owner --uid-owner 0 -j RETURN >> \"$LOG\" 2>&1\n"
+                + "  fi\n";
     }
 
     private static String buildBootOutputRedirectRules(String tool, String chainVariable) {
@@ -2795,6 +2914,22 @@ public final class DnsHijackManager {
         commands.add(iptables + " " + args + " >/dev/null 2>&1 || true");
     }
 
+    private static void appendDaemonRecursionBypass(List<String> commands, String iptables,
+                                                    String chain) {
+        commands.add(buildDaemonRecursionBypassCommand(iptables, chain));
+    }
+
+    private static String buildDaemonRecursionBypassCommand(String iptables, String chain) {
+        return "( " + iptables + " -t nat -A " + chain + " -m mark --mark "
+                + DAEMON_SOCKET_MARK + " -j RETURN >/dev/null 2>&1 || "
+                + iptables + " -t nat -A " + chain
+                + " -m owner --uid-owner 0 -j RETURN )";
+    }
+
+    private static String buildApplyDaemonRecursionBypassCommand(String chain) {
+        return buildDaemonRecursionBypassCommand("\"$IPTABLES\"", chain) + " #";
+    }
+
     private static void appendTolerantIptables(List<String> commands, String iptables, String args) {
         commands.add(iptables + " " + args + " >/dev/null 2>&1 || true");
     }
@@ -2824,7 +2959,7 @@ public final class DnsHijackManager {
         appendTolerantIptables(commands, iptables, "-t nat -F " + chain);
         appendTolerantIptables(commands, iptables, "-t nat -F " + preChain);
         appendTolerantIptables(commands, iptables, "-t nat -A " + chain + " -o lo -j RETURN");
-        appendTolerantIptables(commands, iptables, "-t nat -A " + chain + " -m owner --uid-owner 0 -j RETURN");
+        appendDaemonRecursionBypass(commands, iptables, chain);
         if (!appendOutputPolicyRules(commands, iptables + " -t nat -A " + chain, port, true)) {
             appendTolerantIptables(commands, iptables,
                     "-t nat -A " + chain + " -p udp --dport 53 -j REDIRECT --to-ports " + port);
@@ -2860,7 +2995,7 @@ public final class DnsHijackManager {
         commands.add("#NOCHK# -t nat -F " + preChain);
 
         commands.add("#NOCHK# -t nat -A " + chain + " -o lo -j RETURN");
-        commands.add("#NOCHK# -t nat -A " + chain + " -m owner --uid-owner 0 -j RETURN");
+        commands.add("#LITERAL# " + buildApplyDaemonRecursionBypassCommand(chain));
         if (!appendOutputPolicyRules(commands, "#NOCHK# -t nat -A " + chain, port)) {
             commands.add("#NOCHK# -t nat -A " + chain + " -p udp --dport 53 -j REDIRECT --to-ports " + port);
             commands.add("#NOCHK# -t nat -A " + chain + " -p tcp --dport 53 -j REDIRECT --to-ports " + port);
@@ -3365,6 +3500,7 @@ public final class DnsHijackManager {
         checks.add(buildBootIptablesRuleCheck(tool, "OUTPUT", "tcp", chainVariable));
         checks.add(buildBootIptablesRuleCheck(tool, "PREROUTING", "udp", preChainVariable));
         checks.add(buildBootIptablesRuleCheck(tool, "PREROUTING", "tcp", preChainVariable));
+        checks.add(buildBootIptablesRecursionGuardCheck(tool, chainVariable));
         checks.add(buildBootIptablesRedirectTargetCheck(tool, chainVariable, "udp", port));
         checks.add(buildBootIptablesRedirectTargetCheck(tool, chainVariable, "tcp", port));
         checks.add(buildBootIptablesRedirectTargetCheck(tool, preChainVariable, "udp", port));
@@ -3377,6 +3513,24 @@ public final class DnsHijackManager {
         return tool + " -t nat -S " + parentChain
                 + " 2>/dev/null | grep -q -- \"-p " + protocol
                 + " .*--dport 53.*-j " + targetChainVariable + "\"";
+    }
+
+    private static String buildBootIptablesRecursionGuardCheck(String tool,
+                                                               String chainVariable) {
+        return "( " + buildBootIptablesDaemonMarkReturnCheck(tool, chainVariable)
+                + " || " + buildBootIptablesUid0ReturnCheck(tool, chainVariable) + " )";
+    }
+
+    private static String buildBootIptablesDaemonMarkReturnCheck(String tool,
+                                                                 String chainVariable) {
+        return tool + " -t nat -S \"" + chainVariable + "\""
+                + " 2>/dev/null | grep -q -- \"-m mark .*--mark "
+                + DAEMON_SOCKET_MARK + ".*-j RETURN\"";
+    }
+
+    private static String buildBootIptablesUid0ReturnCheck(String tool, String chainVariable) {
+        return tool + " -t nat -S \"" + chainVariable + "\""
+                + " 2>/dev/null | grep -q -- \"-m owner .*--uid-owner 0.*-j RETURN\"";
     }
 
     private static String buildBootIptablesRedirectTargetCheck(String tool, String chainVariable,
@@ -3488,6 +3642,7 @@ public final class DnsHijackManager {
                 + "IPTABLES=" + shellQuote(iptables) + "\n"
                 + "IP6TABLES=" + shellQuote(ip6tables) + "\n"
                 + "PORT=" + port + "\n"
+                + "DAEMON_MARK=" + DAEMON_SOCKET_MARK + "\n"
                 + "IPV6_ENABLED=" + ipv6Enabled + "\n"
                 + "LOG=" + shellQuote(log) + "\n"
                 + "CHAIN4=" + CHAIN_V4 + "\n"
@@ -3550,7 +3705,7 @@ public final class DnsHijackManager {
                 + "  ipt -t nat -F \"$CHAIN4\" >/dev/null 2>&1\n"
                 + "  ipt -t nat -F \"$PRE4\" >/dev/null 2>&1\n"
                 + "  ipt -t nat -A \"$CHAIN4\" -o lo -j RETURN >> \"$LOG\" 2>&1\n"
-                + "  ipt -t nat -A \"$CHAIN4\" -m owner --uid-owner 0 -j RETURN >> \"$LOG\" 2>&1\n"
+                + buildBootDaemonRecursionBypass("ipt", "$CHAIN4")
                 + buildBootOutputRedirectRules("ipt", "$CHAIN4")
                 + "  ipt -t nat -A \"$PRE4\" -i lo -j RETURN >> \"$LOG\" 2>&1\n"
                 + buildBootPreroutingRedirectRules("ipt", "$PRE4")
@@ -3570,7 +3725,7 @@ public final class DnsHijackManager {
                 + "  ip6t -t nat -F \"$CHAIN6\" >/dev/null 2>&1\n"
                 + "  ip6t -t nat -F \"$PRE6\" >/dev/null 2>&1\n"
                 + "  ip6t -t nat -A \"$CHAIN6\" -o lo -j RETURN >> \"$LOG\" 2>&1\n"
-                + "  ip6t -t nat -A \"$CHAIN6\" -m owner --uid-owner 0 -j RETURN >> \"$LOG\" 2>&1\n"
+                + buildBootDaemonRecursionBypass("ip6t", "$CHAIN6")
                 + buildBootOutputRedirectRules("ip6t", "$CHAIN6")
                 + "  ip6t -t nat -A \"$PRE6\" -i lo -j RETURN >> \"$LOG\" 2>&1\n"
                 + buildBootPreroutingRedirectRules("ip6t", "$PRE6")
