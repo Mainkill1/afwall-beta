@@ -319,6 +319,8 @@ static uid_cache_entry_t g_uid_cache[UID_CACHE_SIZE];
 static int g_uid_cache_pos = 0;
 static char g_config_path[256];
 
+static void write_control_response(int fd, const char *fmt, ...);
+
 static bool config_bool_value(const char *value) {
     return value != NULL && atoi(value) != 0;
 }
@@ -3212,6 +3214,54 @@ static bool reload_config(void) {
     return true;
 }
 
+static void write_validate_response(int client) {
+    config_t *candidate = (config_t *) calloc(1, sizeof(config_t));
+    if (candidate == NULL) {
+        write_control_response(client,
+                "validate=0\nstatus=allocation_failed\nactive_generation=%llu\n",
+                (unsigned long long) g_cfg.generation);
+        return;
+    }
+    if (!load_config(g_config_path, candidate)) {
+        free_config_dynamic(candidate);
+        free(candidate);
+        write_control_response(client,
+                "validate=0\nstatus=config_rejected\nactive_generation=%llu\n",
+                (unsigned long long) g_cfg.generation);
+        return;
+    }
+    write_control_response(client,
+            "validate=1\nstatus=ok\nactive_generation=%llu\ncandidate_generation=%llu\n"
+            "upstreams=%d\nsplit_upstreams=%d\n"
+            "rules_exact_allow=%d\nrules_suffix_allow=%d\n"
+            "rules_exact_block=%d\nrules_suffix_block=%d\n"
+            "rules_app_exact_allow=%d\nrules_app_exact_block=%d\n"
+            "rules_app_suffix_allow=%d\nrules_app_suffix_block=%d\n"
+            "rules_regex_allow=%d\nrules_regex_block=%d\n"
+            "rules_temp_allow=%d\nrules_temp_block=%d\n"
+            "cache_size=%d\nresolver_scope_hash=%llu\n",
+            (unsigned long long) g_cfg.generation,
+            (unsigned long long) candidate->generation,
+            candidate->upstream_count,
+            candidate->split_upstream_count,
+            candidate->exact_allow.count,
+            candidate->suffix_allow.count,
+            candidate->exact_block.count,
+            candidate->suffix_block.count,
+            candidate->app_exact_allow.count,
+            candidate->app_exact_block.count,
+            candidate->app_suffix_allow.count,
+            candidate->app_suffix_block.count,
+            candidate->regex_allow.count,
+            candidate->regex_block.count,
+            candidate->temp_allow_count,
+            candidate->temp_block_count,
+            candidate->cache_size,
+            (unsigned long long) candidate->resolver_scope_hash);
+    free_config_dynamic(candidate);
+    free(candidate);
+}
+
 static void write_pid_file(void) {
     FILE *fp;
     if (g_cfg.pid_file[0] == '\0') {
@@ -4066,6 +4116,8 @@ static void handle_control(int fd) {
         write_health_response(client);
     } else if (strcmp(cmd, "benchmark") == 0) {
         write_benchmark_response(client);
+    } else if (strcmp(cmd, "validate") == 0) {
+        write_validate_response(client);
     } else if (strcmp(cmd, "reload") == 0) {
         if (reload_config()) {
             write_control_response(client, "ok reload generation=%llu\n", (unsigned long long) g_cfg.generation);

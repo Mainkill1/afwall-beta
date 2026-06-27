@@ -315,6 +315,8 @@ public final class DnsHijackManager {
         out.append(queryControl(context, "status"));
         out.append("\n[control health]\n");
         out.append(queryControl(context, "health"));
+        out.append("\n[control validate]\n");
+        out.append(queryControl(context, "validate"));
         out.append("\n[recent queries]\n");
         String logs = queryControl(context, "logs");
         out.append(logs.trim().isEmpty() ? "no daemon query logs reported\n" : logs);
@@ -337,8 +339,10 @@ public final class DnsHijackManager {
                 || status.contains("running=1") || health.contains("running=1");
         long queries = parseLong(firstValue(statusValues, healthValues, "queries"), 0L);
         long blocked = parseLong(firstValue(statusValues, healthValues, "blocked"), 0L);
+        long reloads = parseLong(firstValue(statusValues, healthValues, "reloads"), 0L);
         long upstreamLatency = parseLong(firstValue(healthValues, statusValues, "upstream_probe_ms"), -1L);
         String upstreamProbe = firstValue(healthValues, statusValues, "upstream_probe");
+        String restartCount = readSmallFileValue(new File(workDir(context), RESTART_COUNT), "0");
         String profile = G.activeDnsHijackPolicyProfile();
         if (profile == null || profile.trim().isEmpty()) {
             profile = "global";
@@ -370,7 +374,9 @@ public final class DnsHijackManager {
                 + " | Profile: " + profile
                 + (G.dnsHijackUseProfilePolicy() ? " override" : " global")
                 + "\nUpstream: " + upstream
-                + " | Blocklist updated: " + blocklistUpdated;
+                + " | Blocklist updated: " + blocklistUpdated
+                + "\nRestarts: " + restartCount
+                + " | Reloads: " + reloads;
         return new DnsDashboardSnapshot(statusLine, details);
     }
 
@@ -791,6 +797,23 @@ public final class DnsHijackManager {
             }
         } catch (IOException e) {
             out.append("unreadable: ").append(e.getMessage()).append('\n');
+        }
+    }
+
+    private static String readSmallFileValue(File file, String fallback) {
+        if (file == null || !file.exists()) {
+            return fallback;
+        }
+        try (FileInputStream input = new FileInputStream(file)) {
+            byte[] buffer = new byte[256];
+            int read = input.read(buffer);
+            if (read <= 0) {
+                return fallback;
+            }
+            String value = new String(buffer, 0, read, StandardCharsets.UTF_8).trim();
+            return value.isEmpty() ? fallback : value;
+        } catch (IOException e) {
+            return fallback;
         }
     }
 
