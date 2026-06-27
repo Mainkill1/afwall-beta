@@ -12,6 +12,7 @@
 #include <errno.h>
 #include <netdb.h>
 #include <netinet/in.h>
+#include <pthread.h>
 #include <regex.h>
 #include <signal.h>
 #include <stdarg.h>
@@ -190,12 +191,19 @@ typedef struct {
 } cache_entry_t;
 
 static volatile sig_atomic_t g_running = 1;
+static volatile sig_atomic_t g_reload_requested = 0;
 static config_t g_cfg;
 static stats_t g_stats;
 static log_entry_t g_logs[LOG_RING];
 static int g_log_pos = 0;
 static uint64_t g_log_seq = 0;
 static uint64_t g_log_flushed_seq = 0;
+static pthread_mutex_t g_log_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t g_log_flush_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_t g_log_thread;
+static bool g_log_thread_started = false;
+static volatile sig_atomic_t g_log_thread_running = 0;
+static char g_log_file_path[256];
 static cache_entry_t *g_cache = NULL;
 static int g_cache_capacity = 0;
 static char g_config_path[256];
@@ -424,7 +432,9 @@ static int cache_entry_count_by_type(bool negative) {
 static void add_log(const char *domain, const char *action, const char *transport,
                     uint16_t qtype, const char *result, const char *rule,
                     const char *upstream, int latency_ms) {
-    log_entry_t *entry = &g_logs[g_log_pos % LOG_RING];
+    log_entry_t *entry;
+    pthread_mutex_lock(&g_log_mutex);
+    entry = &g_logs[g_log_pos % LOG_RING];
     entry->seq = ++g_log_seq;
     safe_copy(entry->domain, sizeof(entry->domain), domain);
     safe_copy(entry->action, sizeof(entry->action), action);
@@ -436,6 +446,25 @@ static void add_log(const char *domain, const char *action, const char *transpor
     entry->latency_ms = latency_ms;
     entry->timestamp = now_seconds();
     g_log_pos = (g_log_pos + 1) % LOG_RING;
+    pthread_mutex_unlock(&g_log_mutex);
+}
+
+static void set_log_file_path(const char *path) {
+    pthread_mutex_lock(&g_log_mutex);
+    safe_copy(g_log_file_path, sizeof(g_log_file_path), path == NULL ? "" : path);
+    pthread_mutex_unlock(&g_log_mutex);
+}
+
+static bool copy_log_file_path(char *out, size_t out_len) {
+    bool has_path;
+    if (out == NULL || out_len == 0) {
+        return false;
+    }
+    pthread_mutex_lock(&g_log_mutex);
+    safe_copy(out, out_len, g_log_file_path);
+    has_path = out[0] != '\0';
+    pthread_mutex_unlock(&g_log_mutex);
+    return has_path;
 }
 
 static void flush_logs(void) {
@@ -443,41 +472,121 @@ static void flush_logs(void) {
     uint64_t first_seq;
     uint64_t seq;
     int i;
+    int pending_count = 0;
+    uint64_t flush_to_seq;
+    log_entry_t pending[LOG_RING];
+    char log_file[sizeof(g_log_file_path)];
 
-    if (g_cfg.log_file[0] == '\0' || g_log_flushed_seq == g_log_seq) {
+    pthread_mutex_lock(&g_log_flush_mutex);
+    pthread_mutex_lock(&g_log_mutex);
+    if (g_log_file_path[0] == '\0' || g_log_flushed_seq == g_log_seq) {
+        pthread_mutex_unlock(&g_log_mutex);
+        pthread_mutex_unlock(&g_log_flush_mutex);
         return;
     }
 
+    safe_copy(log_file, sizeof(log_file), g_log_file_path);
+    flush_to_seq = g_log_seq;
     first_seq = g_log_flushed_seq + 1;
-    if (g_log_seq >= LOG_RING && first_seq < g_log_seq - LOG_RING + 1) {
-        first_seq = g_log_seq - LOG_RING + 1;
+    if (flush_to_seq >= LOG_RING && first_seq < flush_to_seq - LOG_RING + 1) {
+        first_seq = flush_to_seq - LOG_RING + 1;
     }
 
-    fp = fopen(g_cfg.log_file, "a");
-    if (fp == NULL) {
-        return;
-    }
-
-    for (seq = first_seq; seq <= g_log_seq; seq++) {
+    for (seq = first_seq; seq <= flush_to_seq && pending_count < LOG_RING; seq++) {
         for (i = 0; i < LOG_RING; i++) {
             const log_entry_t *entry = &g_logs[i];
             if (entry->seq == seq) {
-                fprintf(fp, "%llu %s %s %dms transport=%s qtype=%u result=%s rule=%s upstream=%s\n",
-                        (unsigned long long) entry->timestamp,
-                        entry->action,
-                        entry->domain,
-                        entry->latency_ms,
-                        entry->transport,
-                        (unsigned int) entry->qtype,
-                        entry->result,
-                        entry->rule,
-                        entry->upstream);
+                pending[pending_count++] = *entry;
                 break;
             }
         }
     }
+    pthread_mutex_unlock(&g_log_mutex);
+
+    fp = fopen(log_file, "a");
+    if (fp == NULL) {
+        pthread_mutex_unlock(&g_log_flush_mutex);
+        return;
+    }
+
+    for (i = 0; i < pending_count; i++) {
+        const log_entry_t *entry = &pending[i];
+        fprintf(fp, "%llu %s %s %dms transport=%s qtype=%u result=%s rule=%s upstream=%s\n",
+                (unsigned long long) entry->timestamp,
+                entry->action,
+                entry->domain,
+                entry->latency_ms,
+                entry->transport,
+                (unsigned int) entry->qtype,
+                entry->result,
+                entry->rule,
+                entry->upstream);
+    }
     fclose(fp);
-    g_log_flushed_seq = g_log_seq;
+
+    pthread_mutex_lock(&g_log_mutex);
+    if (g_log_flushed_seq < flush_to_seq) {
+        g_log_flushed_seq = flush_to_seq;
+    }
+    pthread_mutex_unlock(&g_log_mutex);
+    pthread_mutex_unlock(&g_log_flush_mutex);
+}
+
+static void *log_flush_worker(void *arg) {
+    (void) arg;
+    while (g_log_thread_running) {
+        sleep(1);
+        flush_logs();
+    }
+    flush_logs();
+    return NULL;
+}
+
+static void start_log_thread(void) {
+    if (g_log_thread_started) {
+        return;
+    }
+    g_log_thread_running = 1;
+    if (pthread_create(&g_log_thread, NULL, log_flush_worker, NULL) == 0) {
+        g_log_thread_started = true;
+    } else {
+        g_log_thread_running = 0;
+    }
+}
+
+static void stop_log_thread(void) {
+    if (!g_log_thread_started) {
+        flush_logs();
+        return;
+    }
+    g_log_thread_running = 0;
+    pthread_join(g_log_thread, NULL);
+    g_log_thread_started = false;
+}
+
+static void read_log_stats(uint64_t *ring_entries, uint64_t *unflushed_entries) {
+    int i;
+    uint64_t count = 0;
+    uint64_t unflushed = 0;
+    pthread_mutex_lock(&g_log_mutex);
+    for (i = 0; i < LOG_RING; i++) {
+        if (g_logs[i].timestamp != 0) {
+            count++;
+        }
+    }
+    if (g_log_seq > g_log_flushed_seq) {
+        unflushed = g_log_seq - g_log_flushed_seq;
+        if (unflushed > LOG_RING) {
+            unflushed = LOG_RING;
+        }
+    }
+    pthread_mutex_unlock(&g_log_mutex);
+    if (ring_entries != NULL) {
+        *ring_entries = count;
+    }
+    if (unflushed_entries != NULL) {
+        *unflushed_entries = unflushed;
+    }
 }
 
 static void free_regex_rules(config_t *cfg) {
@@ -1765,6 +1874,7 @@ static bool reload_config(void) {
     free(g_cache);
     g_cache = next_cache;
     g_cache_capacity = g_cfg.cache_size;
+    set_log_file_path(g_cfg.log_file);
     g_stats.reloads++;
     return true;
 }
@@ -2076,11 +2186,14 @@ static void write_health_response(int client) {
     uint64_t cpu_user_ms;
     uint64_t cpu_system_ms;
     uint64_t cpu_total_ms;
+    uint64_t log_ring_entries;
+    uint64_t log_unflushed_entries;
 
     read_proc_cpu_ticks(&cpu_user_ticks, &cpu_system_ticks);
     cpu_user_ms = cpu_ticks_to_ms(cpu_user_ticks);
     cpu_system_ms = cpu_ticks_to_ms(cpu_system_ticks);
     cpu_total_ms = cpu_user_ms + cpu_system_ms;
+    read_log_stats(&log_ring_entries, &log_unflushed_entries);
     query_len = build_health_query(query, sizeof(query));
     gettimeofday(&start, NULL);
     response_len = query_len == 0
@@ -2101,6 +2214,7 @@ static void write_health_response(int client) {
             "upstream_tcp_fallbacks=%llu\nupstream_truncated_responses=%llu\n"
             "memory_rss_kb=%ld\nmemory_hwm_kb=%ld\ncpu_user_ms=%llu\n"
             "cpu_system_ms=%llu\ncpu_total_ms=%llu\n"
+            "log_writer_thread=%d\nlog_ring_entries=%llu\nlog_unflushed_entries=%llu\n"
             "exact_index_size=%d\nsuffix_allow_trie_nodes=%d\nsuffix_block_trie_nodes=%d\n"
             "rules_total=%d\n",
             (long) getpid(),
@@ -2131,6 +2245,9 @@ static void write_health_response(int client) {
             (unsigned long long) cpu_user_ms,
             (unsigned long long) cpu_system_ms,
             (unsigned long long) cpu_total_ms,
+            g_log_thread_started ? 1 : 0,
+            (unsigned long long) log_ring_entries,
+            (unsigned long long) log_unflushed_entries,
             EXACT_INDEX_SIZE,
             g_cfg.suffix_allow_trie.count,
             g_cfg.suffix_block_trie.count,
@@ -2190,15 +2307,17 @@ static void write_benchmark_response(int client) {
 static void write_history_response(int client, const char *filter) {
     FILE *fp;
     char line[LOG_LINE_MAX];
+    char log_file[sizeof(g_log_file_path)];
     char (*matches)[LOG_LINE_MAX];
     int count = 0;
     int pos = 0;
     int i;
 
-    if (g_cfg.log_file[0] == '\0') {
+    flush_logs();
+    if (!copy_log_file_path(log_file, sizeof(log_file))) {
         return;
     }
-    fp = fopen(g_cfg.log_file, "r");
+    fp = fopen(log_file, "r");
     if (fp == NULL) {
         return;
     }
@@ -2249,17 +2368,21 @@ static void handle_control(int fd) {
         uint64_t cpu_user_ms;
         uint64_t cpu_system_ms;
         uint64_t cpu_total_ms;
+        uint64_t log_ring_entries;
+        uint64_t log_unflushed_entries;
 
         read_proc_cpu_ticks(&cpu_user_ticks, &cpu_system_ticks);
         cpu_user_ms = cpu_ticks_to_ms(cpu_user_ticks);
         cpu_system_ms = cpu_ticks_to_ms(cpu_system_ticks);
         cpu_total_ms = cpu_user_ms + cpu_system_ms;
+        read_log_stats(&log_ring_entries, &log_unflushed_entries);
         write_control_response(client,
                 "running=1\npid=%ld\nuptime=%llu\ngeneration=%llu\n"
                 "queries=%llu\nudp_queries=%llu\ntcp_queries=%llu\ninvalid_queries=%llu\n"
                 "allowed=%llu\nblocked=%llu\nfail_open_drops=%llu\nfail_closed_blocks=%llu\n"
                 "memory_rss_kb=%ld\nmemory_hwm_kb=%ld\ncpu_user_ms=%llu\n"
                 "cpu_system_ms=%llu\ncpu_total_ms=%llu\n"
+                "log_writer_thread=%d\nlog_ring_entries=%llu\nlog_unflushed_entries=%llu\n"
                 "cache_size=%d\ncache_entries=%d\ncache_hits=%llu\ncache_misses=%llu\n"
                 "cache_positive_entries=%d\ncache_negative_entries=%d\n"
                 "cache_positive_hits=%llu\ncache_negative_hits=%llu\n"
@@ -2289,6 +2412,9 @@ static void handle_control(int fd) {
                 (unsigned long long) cpu_user_ms,
                 (unsigned long long) cpu_system_ms,
                 (unsigned long long) cpu_total_ms,
+                g_log_thread_started ? 1 : 0,
+                (unsigned long long) log_ring_entries,
+                (unsigned long long) log_unflushed_entries,
                 g_cfg.cache_size,
                 cache_entry_count(),
                 (unsigned long long) g_stats.cache_hits,
@@ -2337,22 +2463,29 @@ static void handle_control(int fd) {
         }
     } else if (strcmp(cmd, "logs") == 0) {
         int i;
+        int count = 0;
+        log_entry_t entries[LOG_RING];
+        pthread_mutex_lock(&g_log_mutex);
         for (i = 0; i < LOG_RING; i++) {
             int idx = (g_log_pos + i) % LOG_RING;
             if (g_logs[idx].timestamp == 0) {
                 continue;
             }
+            entries[count++] = g_logs[idx];
+        }
+        pthread_mutex_unlock(&g_log_mutex);
+        for (i = 0; i < count; i++) {
             write_control_response(client,
                     "%llu %s %s %dms transport=%s qtype=%u result=%s rule=%s upstream=%s\n",
-                    (unsigned long long) g_logs[idx].timestamp,
-                    g_logs[idx].action,
-                    g_logs[idx].domain,
-                    g_logs[idx].latency_ms,
-                    g_logs[idx].transport,
-                    (unsigned int) g_logs[idx].qtype,
-                    g_logs[idx].result,
-                    g_logs[idx].rule,
-                    g_logs[idx].upstream);
+                    (unsigned long long) entries[i].timestamp,
+                    entries[i].action,
+                    entries[i].domain,
+                    entries[i].latency_ms,
+                    entries[i].transport,
+                    (unsigned int) entries[i].qtype,
+                    entries[i].result,
+                    entries[i].rule,
+                    entries[i].upstream);
         }
     } else if (strcmp(cmd, "history") == 0) {
         write_history_response(client, "");
@@ -2373,7 +2506,7 @@ static void signal_handler(int signo) {
     if (signo == SIGTERM || signo == SIGINT) {
         g_running = 0;
     } else if (signo == SIGHUP) {
-        reload_config();
+        g_reload_requested = 1;
     }
 }
 
@@ -2415,11 +2548,16 @@ int main(int argc, char **argv) {
         fprintf(stderr, "failed to create listeners on port %d\n", g_cfg.listen_port);
         return 1;
     }
+    start_log_thread();
     while (g_running) {
         fd_set readfds;
         struct timeval timeout;
         int maxfd = udp_fd;
         int ready;
+        if (g_reload_requested) {
+            g_reload_requested = 0;
+            reload_config();
+        }
         FD_ZERO(&readfds);
         FD_SET(udp_fd, &readfds);
         FD_SET(tcp_fd, &readfds);
@@ -2448,9 +2586,11 @@ int main(int argc, char **argv) {
         if (FD_ISSET(control_fd, &readfds)) {
             handle_control(control_fd);
         }
-        flush_logs();
+        if (!g_log_thread_started) {
+            flush_logs();
+        }
     }
-    flush_logs();
+    stop_log_thread();
     close(udp_fd);
     close(tcp_fd);
     close(control_fd);
