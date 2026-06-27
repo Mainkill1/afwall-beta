@@ -163,6 +163,7 @@ typedef struct {
     uint64_t cache_expired;
     uint64_t cache_evictions;
     uint64_t cache_ttl_rewrites;
+    uint64_t cache_lru_evictions;
     uint64_t udp_queries;
     uint64_t tcp_queries;
     uint64_t invalid_queries;
@@ -199,6 +200,7 @@ typedef struct {
     uint8_t response[MAX_PACKET];
     size_t response_len;
     time_t cached_at;
+    time_t last_access;
     time_t expires_at;
     uint32_t hash;
     bool used;
@@ -1451,6 +1453,7 @@ static bool cache_lookup(const char *domain, uint16_t qtype, const uint8_t *quer
             out[0] = query[0];
             out[1] = query[1];
             *out_len = entry->response_len;
+            entry->last_access = now;
             rewrite_cached_response_ttls(out, *out_len, entry->cached_at, now, remaining);
             if (negative != NULL) {
                 *negative = entry->negative;
@@ -1485,6 +1488,7 @@ static void cache_store(const char *domain, uint16_t qtype, const uint8_t *respo
     time_t now = time(NULL);
     bool evicting = false;
     bool negative;
+    cache_entry_t *lru = NULL;
     if (g_cache == NULL || g_cache_capacity <= 0
             || response_len < 12 || response_len > MAX_PACKET
             || !response_cacheable(response, response_len)) {
@@ -1514,13 +1518,17 @@ static void cache_store(const char *domain, uint16_t qtype, const uint8_t *respo
             entry = candidate;
             break;
         }
+        if (lru == NULL || candidate->last_access < lru->last_access) {
+            lru = candidate;
+        }
     }
     if (entry == NULL) {
-        entry = &g_cache[slot];
+        entry = lru != NULL ? lru : &g_cache[slot];
         evicting = entry->used && entry->expires_at > now;
     }
     if (evicting) {
         g_stats.cache_evictions++;
+        g_stats.cache_lru_evictions++;
     }
     memset(entry, 0, sizeof(*entry));
     safe_copy(entry->domain, sizeof(entry->domain), domain);
@@ -1529,6 +1537,7 @@ static void cache_store(const char *domain, uint16_t qtype, const uint8_t *respo
     memcpy(entry->response, response, response_len);
     entry->response_len = response_len;
     entry->cached_at = now;
+    entry->last_access = now;
     entry->expires_at = now + ttl;
     entry->used = true;
     entry->negative = negative;
@@ -2515,7 +2524,7 @@ static void write_health_response(int client) {
             "cache_positive_entries=%d\ncache_negative_entries=%d\n"
             "cache_positive_hits=%llu\ncache_negative_hits=%llu\n"
             "cache_positive_stores=%llu\ncache_negative_stores=%llu\n"
-            "cache_ttl_rewrites=%llu\n"
+            "cache_ttl_rewrites=%llu\ncache_lru_evictions=%llu\n"
             "upstream_tcp_fallbacks=%llu\nupstream_truncated_responses=%llu\n"
             "memory_rss_kb=%ld\nmemory_hwm_kb=%ld\ncpu_user_ms=%llu\n"
             "cpu_system_ms=%llu\ncpu_total_ms=%llu\n"
@@ -2546,6 +2555,7 @@ static void write_health_response(int client) {
             (unsigned long long) g_stats.cache_positive_stores,
             (unsigned long long) g_stats.cache_negative_stores,
             (unsigned long long) g_stats.cache_ttl_rewrites,
+            (unsigned long long) g_stats.cache_lru_evictions,
             (unsigned long long) g_stats.upstream_tcp_fallbacks,
             (unsigned long long) g_stats.upstream_truncated_responses,
             memory_rss_kb,
@@ -2701,6 +2711,7 @@ static void handle_control(int fd) {
                 "cache_hit_rate_ppm=%llu\ncache_stores=%llu\n"
                 "cache_positive_stores=%llu\ncache_negative_stores=%llu\n"
                 "cache_expired=%llu\ncache_evictions=%llu\ncache_ttl_rewrites=%llu\n"
+                "cache_lru_evictions=%llu\n"
                 "upstream_requests=%llu\nupstream_successes=%llu\nupstream_failures=%llu\n"
                 "upstream_tcp_fallbacks=%llu\nupstream_truncated_responses=%llu\n"
                 "avg_latency_ms=%llu\nmax_latency_ms=%llu\nupstream_avg_latency_ms=%llu\n"
@@ -2746,6 +2757,7 @@ static void handle_control(int fd) {
                 (unsigned long long) g_stats.cache_expired,
                 (unsigned long long) g_stats.cache_evictions,
                 (unsigned long long) g_stats.cache_ttl_rewrites,
+                (unsigned long long) g_stats.cache_lru_evictions,
                 (unsigned long long) g_stats.upstream_requests,
                 (unsigned long long) g_stats.upstream_successes,
                 (unsigned long long) g_stats.upstream_failures,
