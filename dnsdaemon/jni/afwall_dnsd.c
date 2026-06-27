@@ -162,6 +162,7 @@ typedef struct {
     uint64_t cache_negative_stores;
     uint64_t cache_expired;
     uint64_t cache_evictions;
+    uint64_t cache_ttl_rewrites;
     uint64_t udp_queries;
     uint64_t tcp_queries;
     uint64_t invalid_queries;
@@ -197,6 +198,7 @@ typedef struct {
     uint16_t qtype;
     uint8_t response[MAX_PACKET];
     size_t response_len;
+    time_t cached_at;
     time_t expires_at;
     uint32_t hash;
     bool used;
@@ -1236,6 +1238,13 @@ static uint32_t read_u32(const uint8_t *p) {
     return ((uint32_t) p[0] << 24) | ((uint32_t) p[1] << 16) | ((uint32_t) p[2] << 8) | p[3];
 }
 
+static void write_u32(uint8_t *p, uint32_t value) {
+    p[0] = (uint8_t) ((value >> 24) & 0xffu);
+    p[1] = (uint8_t) ((value >> 16) & 0xffu);
+    p[2] = (uint8_t) ((value >> 8) & 0xffu);
+    p[3] = (uint8_t) (value & 0xffu);
+}
+
 static uint16_t read_u16(const uint8_t *p) {
     return (uint16_t) (((uint16_t) p[0] << 8) | p[1]);
 }
@@ -1331,6 +1340,9 @@ static uint32_t extract_cache_ttl(const uint8_t *packet, size_t len, bool negati
         }
     }
     if (!negative) {
+        if (min_ttl == 0) {
+            return 0;
+        }
         return clamp_cache_ttl(min_ttl, DEFAULT_POSITIVE_TTL);
     }
     for (i = 0; i < ns; i++) {
@@ -1355,7 +1367,56 @@ static uint32_t extract_cache_ttl(const uint8_t *packet, size_t len, bool negati
             }
         }
     }
+    if (min_ttl == 0) {
+        return 0;
+    }
     return clamp_cache_ttl(min_ttl, DEFAULT_NEGATIVE_TTL);
+}
+
+static void rewrite_cached_response_ttls(uint8_t *packet, size_t len, time_t cached_at,
+                                         time_t now, uint32_t cache_remaining) {
+    uint16_t qd;
+    uint32_t total_rrs;
+    uint32_t i;
+    size_t pos = 12;
+    uint64_t elapsed = now > cached_at ? (uint64_t) (now - cached_at) : 0;
+    if (packet == NULL || len < 12) {
+        return;
+    }
+    qd = read_u16(packet + 4);
+    total_rrs = (uint32_t) read_u16(packet + 6)
+            + (uint32_t) read_u16(packet + 8)
+            + (uint32_t) read_u16(packet + 10);
+    for (i = 0; i < qd; i++) {
+        pos = skip_name(packet, len, pos);
+        if (pos + 4 > len) {
+            return;
+        }
+        pos += 4;
+    }
+    for (i = 0; i < total_rrs; i++) {
+        size_t rr_pos = skip_name(packet, len, pos);
+        size_t ttl_pos = rr_pos + 4;
+        size_t rdata_pos = rr_pos + 10;
+        uint16_t rdlen;
+        uint32_t ttl;
+        uint32_t adjusted;
+        if (rr_pos + 10 > len) {
+            return;
+        }
+        rdlen = read_u16(packet + rr_pos + 8);
+        if (rdata_pos + rdlen > len) {
+            return;
+        }
+        ttl = read_u32(packet + ttl_pos);
+        adjusted = ttl > elapsed ? ttl - (uint32_t) elapsed : 0;
+        if (adjusted > cache_remaining) {
+            adjusted = cache_remaining;
+        }
+        write_u32(packet + ttl_pos, adjusted);
+        pos = rdata_pos + rdlen;
+    }
+    g_stats.cache_ttl_rewrites++;
 }
 
 static bool cache_lookup(const char *domain, uint16_t qtype, const uint8_t *query,
@@ -1376,15 +1437,21 @@ static bool cache_lookup(const char *domain, uint16_t qtype, const uint8_t *quer
             continue;
         }
         if (entry->hash == h && entry->qtype == qtype && strcmp(entry->domain, domain) == 0) {
+            uint32_t remaining;
+            uint64_t lifetime_remaining;
             if (entry->expires_at <= now) {
                 entry->used = false;
                 g_stats.cache_expired++;
                 continue;
             }
+            lifetime_remaining = (uint64_t) (entry->expires_at - now);
+            remaining = lifetime_remaining > (uint64_t) UINT32_MAX
+                    ? UINT32_MAX : (uint32_t) lifetime_remaining;
             memcpy(out, entry->response, entry->response_len);
             out[0] = query[0];
             out[1] = query[1];
             *out_len = entry->response_len;
+            rewrite_cached_response_ttls(out, *out_len, entry->cached_at, now, remaining);
             if (negative != NULL) {
                 *negative = entry->negative;
             }
@@ -1461,6 +1528,7 @@ static void cache_store(const char *domain, uint16_t qtype, const uint8_t *respo
     entry->hash = h;
     memcpy(entry->response, response, response_len);
     entry->response_len = response_len;
+    entry->cached_at = now;
     entry->expires_at = now + ttl;
     entry->used = true;
     entry->negative = negative;
@@ -2447,6 +2515,7 @@ static void write_health_response(int client) {
             "cache_positive_entries=%d\ncache_negative_entries=%d\n"
             "cache_positive_hits=%llu\ncache_negative_hits=%llu\n"
             "cache_positive_stores=%llu\ncache_negative_stores=%llu\n"
+            "cache_ttl_rewrites=%llu\n"
             "upstream_tcp_fallbacks=%llu\nupstream_truncated_responses=%llu\n"
             "memory_rss_kb=%ld\nmemory_hwm_kb=%ld\ncpu_user_ms=%llu\n"
             "cpu_system_ms=%llu\ncpu_total_ms=%llu\n"
@@ -2476,6 +2545,7 @@ static void write_health_response(int client) {
             (unsigned long long) g_stats.cache_negative_hits,
             (unsigned long long) g_stats.cache_positive_stores,
             (unsigned long long) g_stats.cache_negative_stores,
+            (unsigned long long) g_stats.cache_ttl_rewrites,
             (unsigned long long) g_stats.upstream_tcp_fallbacks,
             (unsigned long long) g_stats.upstream_truncated_responses,
             memory_rss_kb,
@@ -2630,7 +2700,7 @@ static void handle_control(int fd) {
                 "cache_positive_hits=%llu\ncache_negative_hits=%llu\n"
                 "cache_hit_rate_ppm=%llu\ncache_stores=%llu\n"
                 "cache_positive_stores=%llu\ncache_negative_stores=%llu\n"
-                "cache_expired=%llu\ncache_evictions=%llu\n"
+                "cache_expired=%llu\ncache_evictions=%llu\ncache_ttl_rewrites=%llu\n"
                 "upstream_requests=%llu\nupstream_successes=%llu\nupstream_failures=%llu\n"
                 "upstream_tcp_fallbacks=%llu\nupstream_truncated_responses=%llu\n"
                 "avg_latency_ms=%llu\nmax_latency_ms=%llu\nupstream_avg_latency_ms=%llu\n"
@@ -2675,6 +2745,7 @@ static void handle_control(int fd) {
                 (unsigned long long) g_stats.cache_negative_stores,
                 (unsigned long long) g_stats.cache_expired,
                 (unsigned long long) g_stats.cache_evictions,
+                (unsigned long long) g_stats.cache_ttl_rewrites,
                 (unsigned long long) g_stats.upstream_requests,
                 (unsigned long long) g_stats.upstream_successes,
                 (unsigned long long) g_stats.upstream_failures,
