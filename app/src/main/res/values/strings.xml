@@ -334,6 +334,8 @@
     <string name="dns_hijack_cache_size_summary">Maximum daemon DNS cache entries. Use 0 to disable caching; maximum is 4096.</string>
     <string name="dns_hijack_stale_cache_seconds_title">Stale cache window</string>
     <string name="dns_hijack_stale_cache_seconds_summary">Seconds the daemon may answer from an expired cache entry after all upstream resolvers fail. Use 0 to disable; maximum is 86400.</string>
+    <string name="dns_hijack_persist_cache_title">Restore DNS cache after restart</string>
+    <string name="dns_hijack_persist_cache_summary">Save fresh daemon cache entries to app-private storage during reload or shutdown and restore matching entries on daemon start.</string>
     <string name="dns_hijack_query_logging_title">DNS query logging</string>
     <string name="dns_hijack_query_logging_summary">Keep live DNS query rows in the daemon ring buffer for diagnostics and the query viewer.</string>
     <string name="dns_hijack_persist_query_logs_title">Save DNS query history</string>

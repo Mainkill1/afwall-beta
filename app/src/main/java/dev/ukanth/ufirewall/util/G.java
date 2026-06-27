@@ -187,6 +187,7 @@ public class G extends Application implements Application.ActivityLifecycleCallb
     private static final String DNS_HIJACK_TIMEOUT_MS = "dnsHijackTimeoutMs";
     private static final String DNS_HIJACK_CACHE_SIZE = "dnsHijackCacheSize";
     private static final String DNS_HIJACK_STALE_CACHE_SECONDS = "dnsHijackStaleCacheSeconds";
+    private static final String DNS_HIJACK_PERSIST_CACHE = "dnsHijackPersistCache";
     private static final String DNS_HIJACK_QUERY_LOGGING = "dnsHijackQueryLogging";
     private static final String DNS_HIJACK_PERSIST_QUERY_LOGS = "dnsHijackPersistQueryLogs";
     private static final String DNS_HIJACK_ALLOW_EXACT = "dnsHijackAllowExact";
@@ -220,6 +221,7 @@ public class G extends Application implements Application.ActivityLifecycleCallb
             DNS_HIJACK_TIMEOUT_MS,
             DNS_HIJACK_CACHE_SIZE,
             DNS_HIJACK_STALE_CACHE_SECONDS,
+            DNS_HIJACK_PERSIST_CACHE,
             DNS_HIJACK_QUERY_LOGGING,
             DNS_HIJACK_PERSIST_QUERY_LOGS,
             DNS_HIJACK_ALLOW_EXACT,
@@ -395,6 +397,10 @@ public class G extends Application implements Application.ActivityLifecycleCallb
 
     public static int dnsHijackStaleCacheSeconds() {
         return readIntPreference(dnsPolicyPrefs(), DNS_HIJACK_STALE_CACHE_SECONDS, 300, 0, 86400);
+    }
+
+    public static boolean dnsHijackPersistCache() {
+        return dnsPolicyPrefs().getBoolean(DNS_HIJACK_PERSIST_CACHE, false);
     }
 
     public static boolean dnsHijackQueryLogging() {

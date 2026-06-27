@@ -54,6 +54,8 @@
 #define MAX_CACHE_TTL 86400
 #define DEFAULT_STALE_CACHE_SECONDS 300
 #define MAX_STALE_CACHE_SECONDS 86400
+#define CACHE_SNAPSHOT_MAGIC "AFWDNSC1"
+#define CACHE_SNAPSHOT_VERSION 1
 #define DNS_SOCKET_BUFFER_BYTES 262144
 #define UDP_DRAIN_LIMIT 32
 #define UID_UNKNOWN -1
@@ -182,11 +184,13 @@ typedef struct {
     int timeout_ms;
     int cache_size;
     int stale_cache_seconds;
+    int persist_cache;
     int query_logging;
     int persist_query_logs;
     int safe_search;
     char control_socket[256];
     char log_file[256];
+    char cache_file[256];
     char pid_file[256];
     char heartbeat_file[256];
     safe_search_target_t safe_google;
@@ -245,6 +249,10 @@ typedef struct {
     uint64_t cache_stale_hits;
     uint64_t cache_stale_negative_hits;
     uint64_t cache_stale_expired;
+    uint64_t cache_snapshot_restored;
+    uint64_t cache_snapshot_saved;
+    uint64_t cache_snapshot_load_failures;
+    uint64_t cache_snapshot_save_failures;
     uint64_t cache_reload_preserved;
     uint64_t cache_reload_dropped;
     uint64_t cache_reload_scope_changes;
@@ -2354,6 +2362,160 @@ static void migrate_cache_entries(cache_entry_t *old_cache, int old_capacity,
     }
 }
 
+static bool cache_snapshot_enabled(const config_t *cfg) {
+    return cfg != NULL && cfg->persist_cache && cfg->cache_size > 0
+            && cfg->cache_file[0] != '\0';
+}
+
+static bool write_cache_snapshot(const config_t *cfg, const cache_entry_t *cache, int capacity) {
+    FILE *fp;
+    char tmp_path[sizeof(cfg->cache_file) + 8];
+    uint32_t version = CACHE_SNAPSHOT_VERSION;
+    uint32_t count = 0;
+    uint32_t written = 0;
+    uint64_t scope_hash;
+    time_t now = time(NULL);
+    int i;
+    if (!cache_snapshot_enabled(cfg) || cache == NULL || capacity <= 0) {
+        return true;
+    }
+    if (snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", cfg->cache_file) >= (int) sizeof(tmp_path)) {
+        g_stats.cache_snapshot_save_failures++;
+        return false;
+    }
+    for (i = 0; i < capacity; i++) {
+        if (cache[i].used && cache[i].expires_at > now && cache[i].response_len > 0
+                && cache[i].response_len <= MAX_PACKET) {
+            count++;
+        }
+    }
+    fp = fopen(tmp_path, "wb");
+    if (fp == NULL) {
+        g_stats.cache_snapshot_save_failures++;
+        return false;
+    }
+    scope_hash = cfg->resolver_scope_hash;
+    if (fwrite(CACHE_SNAPSHOT_MAGIC, 1, 8, fp) != 8
+            || fwrite(&version, sizeof(version), 1, fp) != 1
+            || fwrite(&scope_hash, sizeof(scope_hash), 1, fp) != 1
+            || fwrite(&count, sizeof(count), 1, fp) != 1) {
+        fclose(fp);
+        unlink(tmp_path);
+        g_stats.cache_snapshot_save_failures++;
+        return false;
+    }
+    for (i = 0; i < capacity; i++) {
+        const cache_entry_t *entry = &cache[i];
+        uint16_t domain_len;
+        uint16_t response_len;
+        uint8_t negative;
+        int64_t cached_at;
+        int64_t expires_at;
+        if (!entry->used || entry->expires_at <= now || entry->response_len == 0
+                || entry->response_len > MAX_PACKET) {
+            continue;
+        }
+        domain_len = (uint16_t) strlen(entry->domain);
+        response_len = (uint16_t) entry->response_len;
+        negative = entry->negative ? 1 : 0;
+        cached_at = (int64_t) entry->cached_at;
+        expires_at = (int64_t) entry->expires_at;
+        if (domain_len == 0 || domain_len >= MAX_DOMAIN
+                || fwrite(&entry->qtype, sizeof(entry->qtype), 1, fp) != 1
+                || fwrite(&domain_len, sizeof(domain_len), 1, fp) != 1
+                || fwrite(&response_len, sizeof(response_len), 1, fp) != 1
+                || fwrite(&negative, sizeof(negative), 1, fp) != 1
+                || fwrite(&cached_at, sizeof(cached_at), 1, fp) != 1
+                || fwrite(&expires_at, sizeof(expires_at), 1, fp) != 1
+                || fwrite(entry->domain, 1, domain_len, fp) != domain_len
+                || fwrite(entry->response, 1, response_len, fp) != response_len) {
+            fclose(fp);
+            unlink(tmp_path);
+            g_stats.cache_snapshot_save_failures++;
+            return false;
+        }
+        written++;
+    }
+    if (fclose(fp) != 0 || written != count || rename(tmp_path, cfg->cache_file) != 0) {
+        unlink(tmp_path);
+        g_stats.cache_snapshot_save_failures++;
+        return false;
+    }
+    chmod(cfg->cache_file, 0600);
+    g_stats.cache_snapshot_saved += (uint64_t) written;
+    return true;
+}
+
+static bool load_cache_snapshot(const config_t *cfg, cache_entry_t *cache, int capacity) {
+    FILE *fp;
+    char magic[8];
+    uint32_t version;
+    uint32_t count;
+    uint32_t i;
+    uint64_t scope_hash;
+    time_t now = time(NULL);
+    uint64_t restored = 0;
+    if (!cache_snapshot_enabled(cfg) || cache == NULL || capacity <= 0) {
+        return true;
+    }
+    fp = fopen(cfg->cache_file, "rb");
+    if (fp == NULL) {
+        return true;
+    }
+    if (fread(magic, 1, sizeof(magic), fp) != sizeof(magic)
+            || memcmp(magic, CACHE_SNAPSHOT_MAGIC, sizeof(magic)) != 0
+            || fread(&version, sizeof(version), 1, fp) != 1
+            || fread(&scope_hash, sizeof(scope_hash), 1, fp) != 1
+            || fread(&count, sizeof(count), 1, fp) != 1
+            || version != CACHE_SNAPSHOT_VERSION
+            || count > (uint32_t) MAX_CACHE_SIZE) {
+        fclose(fp);
+        g_stats.cache_snapshot_load_failures++;
+        return false;
+    }
+    if (scope_hash != cfg->resolver_scope_hash) {
+        fclose(fp);
+        return true;
+    }
+    for (i = 0; i < count; i++) {
+        cache_entry_t entry;
+        uint16_t domain_len;
+        uint16_t response_len;
+        uint8_t negative;
+        int64_t cached_at;
+        int64_t expires_at;
+        memset(&entry, 0, sizeof(entry));
+        if (fread(&entry.qtype, sizeof(entry.qtype), 1, fp) != 1
+                || fread(&domain_len, sizeof(domain_len), 1, fp) != 1
+                || fread(&response_len, sizeof(response_len), 1, fp) != 1
+                || fread(&negative, sizeof(negative), 1, fp) != 1
+                || fread(&cached_at, sizeof(cached_at), 1, fp) != 1
+                || fread(&expires_at, sizeof(expires_at), 1, fp) != 1
+                || domain_len == 0 || domain_len >= MAX_DOMAIN
+                || response_len == 0 || response_len > MAX_PACKET
+                || fread(entry.domain, 1, domain_len, fp) != domain_len
+                || fread(entry.response, 1, response_len, fp) != response_len) {
+            fclose(fp);
+            g_stats.cache_snapshot_load_failures++;
+            return false;
+        }
+        entry.domain[domain_len] = '\0';
+        entry.response_len = response_len;
+        entry.cached_at = (time_t) cached_at;
+        entry.last_access = now;
+        entry.expires_at = (time_t) expires_at;
+        entry.hash = hash_domain(entry.domain, entry.qtype);
+        entry.used = true;
+        entry.negative = negative != 0;
+        if (entry.expires_at > now && cache_insert_existing(cache, capacity, &entry, now)) {
+            restored++;
+        }
+    }
+    fclose(fp);
+    g_stats.cache_snapshot_restored += restored;
+    return true;
+}
+
 static uint64_t hash_scope_u64(uint64_t hash, uint64_t value) {
     int i;
     for (i = 0; i < 8; i++) {
@@ -2884,6 +3046,7 @@ static void default_config(config_t *cfg) {
     cfg->timeout_ms = DEFAULT_TIMEOUT_MS;
     cfg->cache_size = DEFAULT_CACHE_SIZE;
     cfg->stale_cache_seconds = DEFAULT_STALE_CACHE_SECONDS;
+    cfg->persist_cache = 0;
     cfg->query_logging = 1;
     cfg->persist_query_logs = 1;
     safe_copy(cfg->control_socket, sizeof(cfg->control_socket), "/data/local/tmp/afwall_dnsd.sock");
@@ -3098,6 +3261,8 @@ static bool load_config(const char *path, config_t *new_cfg) {
             safe_copy(new_cfg->control_socket, sizeof(new_cfg->control_socket), value);
         } else if (strcmp(key, "log_file") == 0) {
             safe_copy(new_cfg->log_file, sizeof(new_cfg->log_file), value);
+        } else if (strcmp(key, "cache_file") == 0) {
+            safe_copy(new_cfg->cache_file, sizeof(new_cfg->cache_file), value);
         } else if (strcmp(key, "pid_file") == 0) {
             safe_copy(new_cfg->pid_file, sizeof(new_cfg->pid_file), value);
         } else if (strcmp(key, "heartbeat_file") == 0) {
@@ -3121,6 +3286,8 @@ static bool load_config(const char *path, config_t *new_cfg) {
             if (stale_seconds >= 0 && stale_seconds <= MAX_STALE_CACHE_SECONDS) {
                 new_cfg->stale_cache_seconds = stale_seconds;
             }
+        } else if (strcmp(key, "persist_cache") == 0) {
+            new_cfg->persist_cache = config_bool_value(value);
         } else if (strcmp(key, "query_logging") == 0) {
             new_cfg->query_logging = config_bool_value(value);
         } else if (strcmp(key, "persist_query_logs") == 0) {
@@ -3300,6 +3467,7 @@ static bool load_regex_rule_file(regex_rule_list_t *rules, const char *path) {
 static bool reload_config(void) {
     config_t *next = (config_t *) calloc(1, sizeof(config_t));
     cache_entry_t *next_cache = NULL;
+    bool migrated_cache = false;
     if (next == NULL) {
         g_stats.reload_failures++;
         return false;
@@ -3322,10 +3490,24 @@ static bool reload_config(void) {
     if (g_cache != NULL && g_cache_capacity > 0) {
         if (g_cfg.resolver_scope_hash == next->resolver_scope_hash) {
             migrate_cache_entries(g_cache, g_cache_capacity, next_cache, next->cache_size);
+            migrated_cache = true;
         } else {
             g_stats.cache_reload_scope_changes++;
             g_stats.cache_reload_dropped += (uint64_t) cache_count_entries_in(g_cache,
                     g_cache_capacity, time(NULL));
+        }
+    }
+    if (!migrated_cache && next_cache != NULL && next->cache_size > 0) {
+        load_cache_snapshot(next, next_cache, next->cache_size);
+    }
+    if (next->persist_cache) {
+        write_cache_snapshot(&g_cfg, g_cache, g_cache_capacity);
+    } else {
+        if (g_cfg.cache_file[0] != '\0') {
+            unlink(g_cfg.cache_file);
+        }
+        if (next->cache_file[0] != '\0') {
+            unlink(next->cache_file);
         }
     }
     free_config_dynamic(&g_cfg);
@@ -3377,7 +3559,8 @@ static void write_validate_response(int client) {
             "rules_app_suffix_allow=%d\nrules_app_suffix_block=%d\n"
             "rules_regex_allow=%d\nrules_regex_block=%d\n"
             "rules_temp_allow=%d\nrules_temp_block=%d\n"
-            "cache_size=%d\nstale_cache_seconds=%d\nresolver_scope_hash=%llu\n",
+            "cache_size=%d\nstale_cache_seconds=%d\npersist_cache=%d\n"
+            "cache_file_configured=%d\nresolver_scope_hash=%llu\n",
             (unsigned long long) g_cfg.generation,
             (unsigned long long) candidate->generation,
             (unsigned long long) g_stats.validations,
@@ -3398,6 +3581,8 @@ static void write_validate_response(int client) {
             candidate->temp_block_count,
             candidate->cache_size,
             candidate->stale_cache_seconds,
+            candidate->persist_cache,
+            candidate->cache_file[0] != '\0' ? 1 : 0,
             (unsigned long long) candidate->resolver_scope_hash);
     free_config_dynamic(candidate);
     free(candidate);
@@ -3987,6 +4172,8 @@ static void write_health_response(int client) {
             "cache_positive_stores=%llu\ncache_negative_stores=%llu\n"
             "stale_cache_seconds=%d\ncache_stale_hits=%llu\n"
             "cache_stale_negative_hits=%llu\ncache_stale_expired=%llu\n"
+            "persist_cache=%d\ncache_snapshot_restored=%llu\ncache_snapshot_saved=%llu\n"
+            "cache_snapshot_load_failures=%llu\ncache_snapshot_save_failures=%llu\n"
             "cache_ttl_rewrites=%llu\ncache_lru_evictions=%llu\n"
             "cache_reload_preserved=%llu\ncache_reload_dropped=%llu\n"
             "cache_reload_scope_changes=%llu\n"
@@ -4045,6 +4232,11 @@ static void write_health_response(int client) {
             (unsigned long long) g_stats.cache_stale_hits,
             (unsigned long long) g_stats.cache_stale_negative_hits,
             (unsigned long long) g_stats.cache_stale_expired,
+            g_cfg.persist_cache,
+            (unsigned long long) g_stats.cache_snapshot_restored,
+            (unsigned long long) g_stats.cache_snapshot_saved,
+            (unsigned long long) g_stats.cache_snapshot_load_failures,
+            (unsigned long long) g_stats.cache_snapshot_save_failures,
             (unsigned long long) g_stats.cache_ttl_rewrites,
             (unsigned long long) g_stats.cache_lru_evictions,
             (unsigned long long) g_stats.cache_reload_preserved,
@@ -4235,6 +4427,8 @@ static void handle_control(int fd) {
                 "cache_positive_stores=%llu\ncache_negative_stores=%llu\n"
                 "stale_cache_seconds=%d\ncache_stale_hits=%llu\n"
                 "cache_stale_negative_hits=%llu\ncache_stale_expired=%llu\n"
+                "persist_cache=%d\ncache_snapshot_restored=%llu\ncache_snapshot_saved=%llu\n"
+                "cache_snapshot_load_failures=%llu\ncache_snapshot_save_failures=%llu\n"
                 "cache_expired=%llu\ncache_evictions=%llu\ncache_ttl_rewrites=%llu\n"
                 "cache_lru_evictions=%llu\n"
                 "cache_reload_preserved=%llu\ncache_reload_dropped=%llu\n"
@@ -4307,6 +4501,11 @@ static void handle_control(int fd) {
                 (unsigned long long) g_stats.cache_stale_hits,
                 (unsigned long long) g_stats.cache_stale_negative_hits,
                 (unsigned long long) g_stats.cache_stale_expired,
+                g_cfg.persist_cache,
+                (unsigned long long) g_stats.cache_snapshot_restored,
+                (unsigned long long) g_stats.cache_snapshot_saved,
+                (unsigned long long) g_stats.cache_snapshot_load_failures,
+                (unsigned long long) g_stats.cache_snapshot_save_failures,
                 (unsigned long long) g_stats.cache_expired,
                 (unsigned long long) g_stats.cache_evictions,
                 (unsigned long long) g_stats.cache_ttl_rewrites,
@@ -4538,6 +4737,7 @@ int main(int argc, char **argv) {
         }
     }
     stop_log_thread();
+    write_cache_snapshot(&g_cfg, g_cache, g_cache_capacity);
     g_udp_listener_ready = 0;
     g_tcp_listener_ready = 0;
     g_control_listener_ready = 0;

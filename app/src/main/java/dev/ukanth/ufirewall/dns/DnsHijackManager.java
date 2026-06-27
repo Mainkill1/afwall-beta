@@ -268,6 +268,7 @@ public final class DnsHijackManager {
         out.append("timeout_ms=").append(G.dnsHijackTimeoutMs()).append('\n');
         out.append("cache_size=").append(G.dnsHijackCacheSize()).append('\n');
         out.append("stale_cache_seconds=").append(G.dnsHijackStaleCacheSeconds()).append('\n');
+        out.append("persist_cache=").append(G.dnsHijackPersistCache()).append('\n');
         out.append("query_logging=").append(G.dnsHijackQueryLogging()).append('\n');
         out.append("persist_query_logs=").append(G.dnsHijackPersistQueryLogs()).append('\n');
         out.append("bootstrap_upstream_entries=").append(countLines(G.dnsHijackBootstrapUpstreams())).append('\n');
@@ -1654,11 +1655,13 @@ public final class DnsHijackManager {
         config.append("pid_file=").append(new File(dir, PID).getAbsolutePath()).append('\n');
         config.append("heartbeat_file=").append(new File(dir, HEARTBEAT).getAbsolutePath()).append('\n');
         config.append("log_file=").append(new File(dir, QUERY_LOG).getAbsolutePath()).append('\n');
+        config.append("cache_file=").append(new File(dir, "cache.snapshot").getAbsolutePath()).append('\n');
         config.append("fail_open=").append(G.dnsHijackFailOpen() ? "1" : "0").append('\n');
         config.append("strict_mode=").append(G.dnsHijackStrictMode() ? "1" : "0").append('\n');
         config.append("timeout_ms=").append(G.dnsHijackTimeoutMs()).append('\n');
         config.append("cache_size=").append(G.dnsHijackCacheSize()).append('\n');
         config.append("stale_cache_seconds=").append(G.dnsHijackStaleCacheSeconds()).append('\n');
+        config.append("persist_cache=").append(G.dnsHijackPersistCache() ? "1" : "0").append('\n');
         config.append("query_logging=").append(G.dnsHijackQueryLogging() ? "1" : "0").append('\n');
         config.append("persist_query_logs=").append(G.dnsHijackPersistQueryLogs() ? "1" : "0").append('\n');
         appendSafeSearchConfigEntries(context, config);
