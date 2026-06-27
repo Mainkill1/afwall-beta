@@ -96,6 +96,7 @@ typedef struct {
     upstream_protocol_t protocol;
     struct sockaddr_storage addr;
     socklen_t addr_len;
+    int udp_fd;
 } upstream_t;
 
 typedef struct {
@@ -176,6 +177,8 @@ typedef struct {
     uint64_t upstream_failures;
     uint64_t upstream_tcp_fallbacks;
     uint64_t upstream_truncated_responses;
+    uint64_t upstream_udp_socket_reuses;
+    uint64_t upstream_udp_stale_replies;
     uint64_t total_latency_ms;
     uint64_t upstream_latency_ms;
     uint64_t max_latency_ms;
@@ -671,10 +674,30 @@ static void free_string_rule_list(string_rule_list_t *list) {
     list->capacity = 0;
 }
 
+static void close_upstream_udp_sockets(config_t *cfg) {
+    int i;
+    if (cfg == NULL) {
+        return;
+    }
+    for (i = 0; i < cfg->upstream_count; i++) {
+        if (cfg->upstreams[i].udp_fd >= 0) {
+            close(cfg->upstreams[i].udp_fd);
+            cfg->upstreams[i].udp_fd = -1;
+        }
+    }
+    for (i = 0; i < cfg->split_upstream_count; i++) {
+        if (cfg->split_upstreams[i].upstream.udp_fd >= 0) {
+            close(cfg->split_upstreams[i].upstream.udp_fd);
+            cfg->split_upstreams[i].upstream.udp_fd = -1;
+        }
+    }
+}
+
 static void free_config_dynamic(config_t *cfg) {
     if (cfg == NULL) {
         return;
     }
+    close_upstream_udp_sockets(cfg);
     free_regex_rule_list(&cfg->regex_allow);
     free_regex_rule_list(&cfg->regex_block);
     free_string_rule_list(&cfg->exact_allow);
@@ -1574,6 +1597,12 @@ static void compile_upstream_address(upstream_t *upstream) {
     }
 }
 
+static void init_upstream_runtime(upstream_t *upstream) {
+    if (upstream != NULL) {
+        upstream->udp_fd = -1;
+    }
+}
+
 static void set_socket_timeout(int fd, int timeout_ms) {
     struct timeval timeout;
     timeout.tv_sec = timeout_ms / 1000;
@@ -1624,6 +1653,26 @@ static int connect_upstream(const upstream_t *upstream, int socktype, int timeou
     }
     freeaddrinfo(res);
     return fd;
+}
+
+static void prepare_udp_upstream_socket(upstream_t *upstream, int timeout_ms) {
+    if (upstream == NULL || upstream->protocol == UPSTREAM_PROTO_TCP || upstream->addr_len <= 0) {
+        return;
+    }
+    upstream->udp_fd = connect_upstream(upstream, SOCK_DGRAM, timeout_ms);
+}
+
+static void prepare_udp_upstream_sockets(config_t *cfg) {
+    int i;
+    if (cfg == NULL) {
+        return;
+    }
+    for (i = 0; i < cfg->upstream_count; i++) {
+        prepare_udp_upstream_socket(&cfg->upstreams[i], cfg->timeout_ms);
+    }
+    for (i = 0; i < cfg->split_upstream_count; i++) {
+        prepare_udp_upstream_socket(&cfg->split_upstreams[i].upstream, cfg->timeout_ms);
+    }
 }
 
 static const char *upstream_protocol_name(upstream_protocol_t protocol) {
@@ -1677,6 +1726,25 @@ static int compiled_upstream_address_count(const config_t *cfg) {
     }
     for (i = 0; i < cfg->split_upstream_count; i++) {
         if (cfg->split_upstreams[i].upstream.addr_len > 0) {
+            count++;
+        }
+    }
+    return count;
+}
+
+static int reusable_udp_upstream_socket_count(const config_t *cfg) {
+    int i;
+    int count = 0;
+    if (cfg == NULL) {
+        return 0;
+    }
+    for (i = 0; i < cfg->upstream_count; i++) {
+        if (cfg->upstreams[i].udp_fd >= 0) {
+            count++;
+        }
+    }
+    for (i = 0; i < cfg->split_upstream_count; i++) {
+        if (cfg->split_upstreams[i].upstream.udp_fd >= 0) {
             count++;
         }
     }
@@ -1760,16 +1828,41 @@ static ssize_t forward_udp_to_upstream(const upstream_t *upstream, int timeout_m
                                        uint8_t *response, size_t response_len) {
     int fd;
     ssize_t got;
-    fd = connect_upstream(upstream, SOCK_DGRAM, timeout_ms);
+    bool close_fd = false;
+    if (upstream == NULL) {
+        return -1;
+    }
+    fd = upstream->udp_fd;
+    if (fd < 0) {
+        fd = connect_upstream(upstream, SOCK_DGRAM, timeout_ms);
+        close_fd = true;
+    } else {
+        set_socket_timeout(fd, timeout_ms);
+        g_stats.upstream_udp_socket_reuses++;
+    }
     if (fd < 0) {
         return -1;
     }
     if (send(fd, query, query_len, 0) < 0) {
-        close(fd);
+        if (close_fd) {
+            close(fd);
+        }
         return -1;
     }
-    got = recv(fd, response, response_len, 0);
-    close(fd);
+    do {
+        got = recv(fd, response, response_len, 0);
+        if (got < 2 || query_len < 2
+                || (response[0] == query[0] && response[1] == query[1])) {
+            break;
+        }
+        g_stats.upstream_udp_stale_replies++;
+    } while (got > 0);
+    if (got >= 2 && query_len >= 2 && (response[0] != query[0] || response[1] != query[1])) {
+        got = -1;
+    }
+    if (close_fd) {
+        close(fd);
+    }
     return got;
 }
 
@@ -1905,6 +1998,7 @@ static void default_config(config_t *cfg) {
     cfg->persist_query_logs = 1;
     safe_copy(cfg->control_socket, sizeof(cfg->control_socket), "/data/local/tmp/afwall_dnsd.sock");
     cfg->upstream_count = 1;
+    init_upstream_runtime(&cfg->upstreams[0]);
     safe_copy(cfg->upstreams[0].host, sizeof(cfg->upstreams[0].host), "1.1.1.1");
     cfg->upstreams[0].port = 53;
     cfg->upstreams[0].protocol = UPSTREAM_PROTO_AUTO;
@@ -1920,6 +2014,7 @@ static bool parse_upstream_value(const char *value, upstream_t *upstream) {
         return false;
     }
     memset(upstream, 0, sizeof(*upstream));
+    init_upstream_runtime(upstream);
     upstream->protocol = UPSTREAM_PROTO_AUTO;
     upstream->port = 53;
     safe_copy(line, sizeof(line), value);
@@ -2164,6 +2259,7 @@ static bool load_config(const char *path, config_t *new_cfg) {
             || !build_suffix_trie(&new_cfg->suffix_block, &new_cfg->suffix_block_trie)) {
         return false;
     }
+    prepare_udp_upstream_sockets(new_cfg);
     new_cfg->generation = g_cfg.generation + 1;
     return true;
 }
@@ -2588,7 +2684,7 @@ static void write_health_response(int client) {
     write_control_response(client,
             "health=1\nrunning=1\npid=%ld\nuptime=%llu\nlisten_port=%d\n"
             "generation=%llu\nupstreams=%d\nsplit_upstreams=%d\nupstream_probe=%s\n"
-            "compiled_upstream_addresses=%d\n"
+            "compiled_upstream_addresses=%d\nreusable_udp_upstream_sockets=%d\n"
             "upstream_probe_ms=%d\nupstream_probe_index=%d\nupstream_probe_rcode=%d\n"
             "queries=%llu\nblocked=%llu\nallowed=%llu\ncache_size=%d\ncache_entries=%d\n"
             "cache_positive_entries=%d\ncache_negative_entries=%d\n"
@@ -2596,6 +2692,7 @@ static void write_health_response(int client) {
             "cache_positive_stores=%llu\ncache_negative_stores=%llu\n"
             "cache_ttl_rewrites=%llu\ncache_lru_evictions=%llu\n"
             "upstream_tcp_fallbacks=%llu\nupstream_truncated_responses=%llu\n"
+            "upstream_udp_socket_reuses=%llu\nupstream_udp_stale_replies=%llu\n"
             "memory_rss_kb=%ld\nmemory_hwm_kb=%ld\ncpu_user_ms=%llu\n"
             "cpu_system_ms=%llu\ncpu_total_ms=%llu\n"
             "query_logging=%d\npersist_query_logs=%d\n"
@@ -2611,6 +2708,7 @@ static void write_health_response(int client) {
             g_cfg.split_upstream_count,
             response_len > 0 ? "ok" : "fail",
             compiled_upstream_address_count(&g_cfg),
+            reusable_udp_upstream_socket_count(&g_cfg),
             latency_ms,
             upstream_index,
             rcode,
@@ -2629,6 +2727,8 @@ static void write_health_response(int client) {
             (unsigned long long) g_stats.cache_lru_evictions,
             (unsigned long long) g_stats.upstream_tcp_fallbacks,
             (unsigned long long) g_stats.upstream_truncated_responses,
+            (unsigned long long) g_stats.upstream_udp_socket_reuses,
+            (unsigned long long) g_stats.upstream_udp_stale_replies,
             memory_rss_kb,
             memory_hwm_kb,
             (unsigned long long) cpu_user_ms,
@@ -2785,7 +2885,8 @@ static void handle_control(int fd) {
                 "cache_lru_evictions=%llu\n"
                 "upstream_requests=%llu\nupstream_successes=%llu\nupstream_failures=%llu\n"
                 "upstream_tcp_fallbacks=%llu\nupstream_truncated_responses=%llu\n"
-                "compiled_upstream_addresses=%d\n"
+                "upstream_udp_socket_reuses=%llu\nupstream_udp_stale_replies=%llu\n"
+                "compiled_upstream_addresses=%d\nreusable_udp_upstream_sockets=%d\n"
                 "avg_latency_ms=%llu\nmax_latency_ms=%llu\nupstream_avg_latency_ms=%llu\n"
                 "reloads=%llu\nexact_allow_index_size=%d\nexact_block_index_size=%d\n"
                 "suffix_allow_trie_nodes=%d\n"
@@ -2835,7 +2936,10 @@ static void handle_control(int fd) {
                 (unsigned long long) g_stats.upstream_failures,
                 (unsigned long long) g_stats.upstream_tcp_fallbacks,
                 (unsigned long long) g_stats.upstream_truncated_responses,
+                (unsigned long long) g_stats.upstream_udp_socket_reuses,
+                (unsigned long long) g_stats.upstream_udp_stale_replies,
                 compiled_upstream_address_count(&g_cfg),
+                reusable_udp_upstream_socket_count(&g_cfg),
                 (unsigned long long) div_u64(g_stats.total_latency_ms, g_stats.queries),
                 (unsigned long long) g_stats.max_latency_ms,
                 (unsigned long long) div_u64(g_stats.upstream_latency_ms, g_stats.upstream_requests),
