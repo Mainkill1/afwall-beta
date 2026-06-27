@@ -95,11 +95,25 @@
                             android:text="@string/dns_queries_title" />
 
                         <Button
+                            android:id="@+id/log_hub_dns_dashboard_pause_resume"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="6dp"
+                            android:text="@string/dns_dashboard_pause" />
+
+                        <Button
                             android:id="@+id/log_hub_dns_dashboard_update"
                             android:layout_width="match_parent"
                             android:layout_height="wrap_content"
                             android:layout_marginTop="6dp"
                             android:text="@string/dns_hijack_update_blocklists_title" />
+
+                        <Button
+                            android:id="@+id/log_hub_dns_dashboard_restart"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="6dp"
+                            android:text="@string/dns_diagnostics_restart" />
 
                         <Button
                             android:id="@+id/log_hub_dns_dashboard_repair"

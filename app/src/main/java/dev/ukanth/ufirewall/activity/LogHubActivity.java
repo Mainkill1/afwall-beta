@@ -11,6 +11,7 @@ import android.os.Bundle;
 import android.os.Environment;
 import android.os.Handler;
 import android.os.Looper;
+import android.widget.Button;
 import android.widget.TextView;
 import android.widget.Toast;
 
@@ -65,6 +66,7 @@ public class LogHubActivity extends AppCompatActivity {
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private TextView dnsDashboardStatus;
     private TextView dnsDashboardDetails;
+    private Button dnsDashboardPauseResume;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -85,10 +87,14 @@ public class LogHubActivity extends AppCompatActivity {
 
         dnsDashboardStatus = findViewById(R.id.log_hub_dns_dashboard_status);
         dnsDashboardDetails = findViewById(R.id.log_hub_dns_dashboard_details);
+        dnsDashboardPauseResume = findViewById(R.id.log_hub_dns_dashboard_pause_resume);
         findViewById(R.id.log_hub_dns_dashboard_queries)
                 .setOnClickListener(v -> startActivity(new Intent(this, DnsQueriesActivity.class)));
+        dnsDashboardPauseResume.setOnClickListener(v -> runDashboardPauseResume());
         findViewById(R.id.log_hub_dns_dashboard_update)
                 .setOnClickListener(v -> runDashboardBlocklistUpdate());
+        findViewById(R.id.log_hub_dns_dashboard_restart)
+                .setOnClickListener(v -> runDashboardDnsRestart());
         findViewById(R.id.log_hub_dns_dashboard_repair)
                 .setOnClickListener(v -> runDashboardDnsRepair());
         findViewById(R.id.log_hub_blocked_requests).setOnClickListener(v -> openBlockedRequests());
@@ -129,8 +135,40 @@ public class LogHubActivity extends AppCompatActivity {
             mainHandler.post(() -> {
                 dnsDashboardStatus.setText(snapshot.statusLine);
                 dnsDashboardDetails.setText(snapshot.detailLine);
+                if (dnsDashboardPauseResume != null) {
+                    dnsDashboardPauseResume.setText(G.enableDnsHijack()
+                            ? R.string.dns_dashboard_pause
+                            : R.string.dns_dashboard_resume);
+                }
             });
         });
+    }
+
+    private void runDashboardPauseResume() {
+        boolean pause = G.enableDnsHijack();
+        String message = getString(pause
+                ? R.string.dns_dashboard_pause_queued
+                : R.string.dns_dashboard_resume_queued);
+        dnsDashboardStatus.setText(message);
+        RootCommand.Callback callback = new RootCommand.Callback() {
+            @Override
+            public void cbFunc(RootCommand state) {
+                mainHandler.post(() -> {
+                    if (state.exitCode == 0) {
+                        Api.toast(LogHubActivity.this, message);
+                        DnsBlocklistUpdateReceiver.scheduleOrCancel(LogHubActivity.this);
+                    } else {
+                        Api.toast(LogHubActivity.this, getString(R.string.error_apply));
+                    }
+                    loadDnsDashboard();
+                });
+            }
+        };
+        if (pause) {
+            DnsHijackManager.pauseDnsProtection(this, callback);
+        } else {
+            DnsHijackManager.resumeDnsProtection(this, callback);
+        }
     }
 
     private void runDashboardBlocklistUpdate() {
@@ -170,6 +208,28 @@ public class LogHubActivity extends AppCompatActivity {
         String message = getString(R.string.dns_diagnostics_repair_queued);
         dnsDashboardStatus.setText(message);
         DnsHijackManager.repairDnsProtection(this, new RootCommand.Callback() {
+            @Override
+            public void cbFunc(RootCommand state) {
+                mainHandler.post(() -> {
+                    if (state.exitCode == 0) {
+                        Api.toast(LogHubActivity.this, message);
+                    } else {
+                        Api.toast(LogHubActivity.this, getString(R.string.error_apply));
+                    }
+                    loadDnsDashboard();
+                });
+            }
+        });
+    }
+
+    private void runDashboardDnsRestart() {
+        if (!G.enableDnsHijack()) {
+            Api.toast(this, getString(R.string.dns_dashboard_disabled));
+            return;
+        }
+        String message = getString(R.string.dns_diagnostics_restart_queued);
+        dnsDashboardStatus.setText(message);
+        DnsHijackManager.runSupervisorAction(this, "restart", new RootCommand.Callback() {
             @Override
             public void cbFunc(RootCommand state) {
                 mainHandler.post(() -> {

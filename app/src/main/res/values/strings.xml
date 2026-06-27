@@ -390,6 +390,11 @@
     <string name="dns_diagnostics_stop_queued">DNS daemon stop requested.</string>
     <string name="dns_dashboard_title">DNS Protection</string>
     <string name="dns_dashboard_loading">Loading DNS protection status...</string>
+    <string name="dns_dashboard_pause">Pause protection</string>
+    <string name="dns_dashboard_resume">Resume protection</string>
+    <string name="dns_dashboard_pause_queued">DNS protection pause requested.</string>
+    <string name="dns_dashboard_resume_queued">DNS protection resume requested.</string>
+    <string name="dns_dashboard_disabled">DNS protection is disabled.</string>
 
     <string-array name="dns_hijack_blocklist_preset_names">
         <item>StevenBlack Unified hosts</item>

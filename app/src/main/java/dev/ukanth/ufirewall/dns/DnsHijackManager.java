@@ -164,6 +164,74 @@ public final class DnsHijackManager {
                 .run(context.getApplicationContext(), commands);
     }
 
+    public static void pauseDnsProtection(Context context, RootCommand.Callback callback) {
+        if (context == null) {
+            return;
+        }
+        boolean previousEnabled = G.enableDnsHijack();
+        List<String> commands = new ArrayList<>();
+        G.enableDnsHijack(false);
+        Api.setRulesUpToDate(false);
+        appendPurgeCommands(context, commands, false);
+        if (G.enableIPv6()) {
+            appendPurgeCommands(context, commands, true);
+        }
+        ApplicationErrorLog.add(context, "DNS protection pause queued: redirect teardown and daemon stop");
+        new RootCommand()
+                .setLogging(true)
+                .setReopenShell(true)
+                .setFailureToast(R.string.error_apply)
+                .setCallback(new RootCommand.Callback() {
+                    @Override
+                    public void cbFunc(RootCommand state) {
+                        if (state.exitCode != 0) {
+                            G.enableDnsHijack(previousEnabled);
+                            Api.setRulesUpToDate(false);
+                            ApplicationErrorLog.add(context, "DNS protection pause failed; restored previous enabled setting");
+                        }
+                        if (callback != null) {
+                            callback.cbFunc(state);
+                        }
+                    }
+                })
+                .run(context.getApplicationContext(), commands);
+    }
+
+    public static void resumeDnsProtection(Context context, RootCommand.Callback callback) {
+        if (context == null) {
+            return;
+        }
+        boolean previousEnabled = G.enableDnsHijack();
+        G.enableDnsHijack(true);
+        Api.setRulesUpToDate(false);
+        if (!prepareDaemon(context)) {
+            G.enableDnsHijack(previousEnabled);
+            failSupervisorAction(context, callback, "DNS protection resume requested but daemon files could not be prepared");
+            return;
+        }
+
+        List<String> commands = buildRootRepairCommands(context);
+        ApplicationErrorLog.add(context, "DNS protection resume queued: daemon start and DNS redirect reinstall");
+        new RootCommand()
+                .setLogging(true)
+                .setReopenShell(true)
+                .setFailureToast(R.string.error_apply)
+                .setCallback(new RootCommand.Callback() {
+                    @Override
+                    public void cbFunc(RootCommand state) {
+                        if (state.exitCode != 0) {
+                            G.enableDnsHijack(previousEnabled);
+                            Api.setRulesUpToDate(false);
+                            ApplicationErrorLog.add(context, "DNS protection resume failed; restored previous enabled setting");
+                        }
+                        if (callback != null) {
+                            callback.cbFunc(state);
+                        }
+                    }
+                })
+                .run(context.getApplicationContext(), commands);
+    }
+
     public static String collectLocalDiagnostics(Context context) {
         StringBuilder out = new StringBuilder();
         File dir = workDir(context);
