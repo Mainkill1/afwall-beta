@@ -63,6 +63,25 @@ public class RulesPreferenceFragment extends PreferenceFragment implements
         }
 
         wireDnsBlocklistActions();
+        wireDnsServiceActions();
+    }
+
+    private void wireDnsServiceActions() {
+        Preference repairService = findPreference("dnsHijackRepairService");
+        if (repairService != null) {
+            repairService.setOnPreferenceClickListener(preference -> {
+                repairDnsService();
+                return true;
+            });
+        }
+
+        Preference removeService = findPreference("dnsHijackRemoveService");
+        if (removeService != null) {
+            removeService.setOnPreferenceClickListener(preference -> {
+                confirmRemoveDnsService();
+                return true;
+            });
+        }
     }
 
     private void wireDnsBlocklistActions() {
@@ -683,6 +702,66 @@ public class RulesPreferenceFragment extends PreferenceFragment implements
                     } else {
                         setDnsBootPersistenceChecked(!enabled);
                         Api.toast(ctx, ctx.getString(R.string.dns_hijack_boot_persistence_failed));
+                    }
+                });
+            }
+        });
+    }
+
+    private void repairDnsService() {
+        if (ctx == null) {
+            return;
+        }
+        Api.setRulesUpToDate(false);
+        DnsHijackManager.applyDnsProtectionPreference(ctx, true, new RootCommand.Callback() {
+            @Override
+            public void cbFunc(RootCommand state) {
+                new Handler(Looper.getMainLooper()).post(() -> {
+                    if (state.exitCode == 0) {
+                        setDnsHijackChecked(true);
+                        Api.toast(ctx, ctx.getString(R.string.dns_hijack_enable_complete));
+                    } else {
+                        Api.toast(ctx, ctx.getString(R.string.dns_hijack_enable_failed));
+                    }
+                });
+            }
+        });
+    }
+
+    private void confirmRemoveDnsService() {
+        if (ctx == null || getActivity() == null) {
+            return;
+        }
+        new MaterialDialog.Builder(getActivity())
+                .title(R.string.dns_hijack_remove_service_title)
+                .content(R.string.dns_hijack_remove_service_confirm)
+                .positiveText(R.string.OK)
+                .negativeText(android.R.string.cancel)
+                .onPositive((dialog, which) -> removeDnsService())
+                .show();
+    }
+
+    private void removeDnsService() {
+        if (ctx == null) {
+            return;
+        }
+        final boolean previousEnabled = G.enableDnsHijack();
+        final boolean previousBootPersistence = G.dnsHijackBootPersistence();
+        setDnsHijackChecked(false);
+        setDnsBootPersistenceChecked(false);
+        Api.setRulesUpToDate(false);
+        DnsBlocklistUpdateReceiver.scheduleOrCancel(ctx);
+        DnsHijackManager.applyDnsProtectionPreference(ctx, false, new RootCommand.Callback() {
+            @Override
+            public void cbFunc(RootCommand state) {
+                new Handler(Looper.getMainLooper()).post(() -> {
+                    if (state.exitCode == 0) {
+                        Api.toast(ctx, ctx.getString(R.string.dns_hijack_disable_complete));
+                    } else {
+                        setDnsHijackChecked(previousEnabled);
+                        setDnsBootPersistenceChecked(previousBootPersistence);
+                        DnsBlocklistUpdateReceiver.scheduleOrCancel(ctx);
+                        Api.toast(ctx, ctx.getString(R.string.dns_hijack_disable_failed));
                     }
                 });
             }

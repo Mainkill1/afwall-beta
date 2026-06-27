@@ -298,7 +298,7 @@
     <string name="ui_chains_title">IPv4 Chains</string>
     <string name="ui_chains6_title">IPv6 Chains</string>
     <string name="rules_prefs_title">Rules/Connectivity</string>
-    <string name="dns_hijack_category">Root DNS Filtering</string>
+    <string name="dns_hijack_category">Experimental Root DNS Filtering</string>
     <string name="dns_hijack_title">Capture DNS with root redirect</string>
     <string name="dns_hijack_summary">Run the native DNS daemon and redirect UDP/TCP DNS traffic through it when firewall rules are applied.</string>
     <string name="dns_hijack_port_title">Local DNS daemon port</string>
@@ -332,6 +332,11 @@
     <string name="dns_hijack_dnssec_auth_required_summary">Only accept upstream answers with the DNSSEC authenticated-data bit. Requires a validating upstream and is not local validation.</string>
     <string name="dns_hijack_boot_persistence_title">Restore DNS filtering at boot</string>
     <string name="dns_hijack_boot_persistence_summary">Install a root boot script that restarts the DNS daemon and restores DNS redirect rules before opening the app.</string>
+    <string name="dns_hijack_repair_service_title">Install or repair DNS service</string>
+    <string name="dns_hijack_repair_service_summary">Reinstall daemon files, restart the watchdog, restore DNS redirects, and refresh root cleanup hooks.</string>
+    <string name="dns_hijack_remove_service_title">Remove DNS service</string>
+    <string name="dns_hijack_remove_service_summary">Stop the daemon, remove DNS redirect rules, and uninstall root startup hooks.</string>
+    <string name="dns_hijack_remove_service_confirm">Remove the DNS daemon, redirect rules, and root startup hooks?</string>
     <string name="dns_hijack_enable_complete">DNS protection installed and enabled.</string>
     <string name="dns_hijack_disable_complete">DNS protection removed and disabled.</string>
     <string name="dns_hijack_enable_failed">Unable to enable DNS protection. Check root access and diagnostics.</string>

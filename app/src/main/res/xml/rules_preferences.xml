@@ -176,6 +176,17 @@
             android:summary="@string/dns_hijack_boot_persistence_summary"
             android:title="@string/dns_hijack_boot_persistence_title" />
 
+        <Preference
+            android:dependency="enableDnsHijack"
+            android:key="dnsHijackRepairService"
+            android:summary="@string/dns_hijack_repair_service_summary"
+            android:title="@string/dns_hijack_repair_service_title" />
+
+        <Preference
+            android:key="dnsHijackRemoveService"
+            android:summary="@string/dns_hijack_remove_service_summary"
+            android:title="@string/dns_hijack_remove_service_title" />
+
         <EditTextPreference
             android:defaultValue="2500"
             android:dependency="enableDnsHijack"

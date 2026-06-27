@@ -50,6 +50,8 @@ public final class DnsHijackManager {
     private static final String HEARTBEAT = "afwall_dnsd.heartbeat";
     private static final String BOOT_SCRIPT = "afwall_dnsd_boot.sh";
     private static final String BOOT_LOG = "afwall_dnsd_boot.log";
+    private static final String CLEANUP_SCRIPT = "afwall_dnsd_cleanup.sh";
+    private static final String CLEANUP_LOG = "afwall_dnsd_cleanup.log";
     private static final String CHAIN_V4 = "afwall-dns";
     private static final String CHAIN_V4_PRE = "afwall-dns-pre";
     private static final String CHAIN_V6 = "afwall-dns6";
@@ -80,6 +82,7 @@ public final class DnsHijackManager {
             if (!ipv6) {
                 appendStopCommand(context, commands);
                 appendRemoveBootPersistenceCommand(commands);
+                appendRemoveLifecycleCleanupCommand(commands);
             }
             return;
         }
@@ -109,6 +112,7 @@ public final class DnsHijackManager {
         if (!ipv6) {
             appendStopCommand(context, commands);
             appendRemoveBootPersistenceCommand(commands);
+            appendRemoveLifecycleCleanupCommand(commands);
         }
     }
 
@@ -306,6 +310,8 @@ public final class DnsHijackManager {
         File heartbeat = new File(dir, HEARTBEAT);
         File bootScript = new File(dir, BOOT_SCRIPT);
         File bootLog = new File(dir, BOOT_LOG);
+        File cleanupScript = new File(dir, CLEANUP_SCRIPT);
+        File cleanupLog = new File(dir, CLEANUP_LOG);
 
         out.append("enabled_pref=").append(G.enableDnsHijack()).append('\n');
         out.append("active_profile=").append(G.activeDnsHijackPolicyProfile()).append('\n');
@@ -364,6 +370,8 @@ public final class DnsHijackManager {
         appendFileInfo(out, "heartbeat", heartbeat);
         appendFileInfo(out, "boot_script", bootScript);
         appendFileInfo(out, "boot_log", bootLog);
+        appendFileInfo(out, "cleanup_script", cleanupScript);
+        appendFileInfo(out, "cleanup_log", cleanupLog);
 
         out.append("\n[supervisor metadata]\n");
         appendSmallFileValue(out, "watchdog_pid", supervisorPid);
@@ -549,6 +557,12 @@ public final class DnsHijackManager {
                 + " /su/su.d/" + BOOT_SCRIPT
                 + " /system/su.d/" + BOOT_SCRIPT
                 + " /system/etc/init.d/" + BOOT_SCRIPT
+                + "; do if [ -f \"$f\" ]; then ls -l \"$f\"; fi; done");
+        commands.add("echo '[DNS lifecycle cleanup guard]'");
+        commands.add("for f in /data/adb/service.d/" + CLEANUP_SCRIPT
+                + " /su/su.d/" + CLEANUP_SCRIPT
+                + " /system/su.d/" + CLEANUP_SCRIPT
+                + " /system/etc/init.d/" + CLEANUP_SCRIPT
                 + "; do if [ -f \"$f\" ]; then ls -l \"$f\"; fi; done");
         return commands;
     }
@@ -1599,6 +1613,7 @@ public final class DnsHijackManager {
     }
 
     private static void appendBootPersistenceCommand(Context context, List<String> commands) {
+        appendLifecycleCleanupCommand(context, commands);
         if (!G.dnsHijackBootPersistence()) {
             appendRemoveBootPersistenceCommand(commands);
             return;
@@ -1609,31 +1624,53 @@ public final class DnsHijackManager {
     }
 
     private static String buildInstallBootPersistenceCommand(File bootScript) {
-        return "SRC=" + shellQuote(bootScript.getAbsolutePath()) + "; "
-                + "NAME=" + shellQuote(BOOT_SCRIPT) + "; "
+        return buildInstallRootScriptCommand(bootScript, BOOT_SCRIPT, "DNS boot persistence");
+    }
+
+    private static void appendLifecycleCleanupCommand(Context context, List<String> commands) {
+        File cleanupScript = new File(workDir(context), CLEANUP_SCRIPT);
+        commands.add("#LITERAL# " + buildInstallLifecycleCleanupCommand(cleanupScript));
+        ApplicationErrorLog.add(context, "DNS lifecycle cleanup guard install queued");
+    }
+
+    private static String buildInstallLifecycleCleanupCommand(File cleanupScript) {
+        return buildInstallRootScriptCommand(cleanupScript, CLEANUP_SCRIPT, "DNS lifecycle cleanup");
+    }
+
+    private static String buildInstallRootScriptCommand(File script, String scriptName, String label) {
+        return "SRC=" + shellQuote(script.getAbsolutePath()) + "; "
+                + "NAME=" + shellQuote(scriptName) + "; "
                 + "installed=0; "
                 + "for DIR in /data/adb/service.d /su/su.d /system/su.d /system/etc/init.d; do "
                 + "if [ -d \"$DIR\" ]; then "
                 + "cp \"$SRC\" \"$DIR/$NAME\" 2>/dev/null && chmod 755 \"$DIR/$NAME\" 2>/dev/null "
-                + "&& echo \"DNS boot persistence installed at $DIR/$NAME\" && installed=1 && break; "
+                + "&& echo \"" + label + " installed at $DIR/$NAME\" && installed=1 && break; "
                 + "fi; "
                 + "done; "
                 + "if [ \"$installed\" = 0 ] && [ -d /data/adb ]; then "
                 + "mkdir -p /data/adb/service.d 2>/dev/null "
                 + "&& cp \"$SRC\" /data/adb/service.d/\"$NAME\" 2>/dev/null "
                 + "&& chmod 755 /data/adb/service.d/\"$NAME\" 2>/dev/null "
-                + "&& echo \"DNS boot persistence installed at /data/adb/service.d/$NAME\" "
+                + "&& echo \"" + label + " installed at /data/adb/service.d/$NAME\" "
                 + "&& installed=1; "
                 + "fi; "
-                + "if [ \"$installed\" = 0 ]; then echo 'DNS boot persistence: no supported root boot directory found'; fi; "
+                + "if [ \"$installed\" = 0 ]; then echo '" + label + ": no supported root boot directory found'; fi; "
                 + "true";
     }
 
     private static String buildRemoveBootPersistenceCommand() {
-        return "for FILE in /data/adb/service.d/" + BOOT_SCRIPT
-                + " /su/su.d/" + BOOT_SCRIPT
-                + " /system/su.d/" + BOOT_SCRIPT
-                + " /system/etc/init.d/" + BOOT_SCRIPT
+        return buildRemoveRootScriptCommand(BOOT_SCRIPT);
+    }
+
+    private static String buildRemoveLifecycleCleanupCommand() {
+        return buildRemoveRootScriptCommand(CLEANUP_SCRIPT);
+    }
+
+    private static String buildRemoveRootScriptCommand(String scriptName) {
+        return "for FILE in /data/adb/service.d/" + scriptName
+                + " /su/su.d/" + scriptName
+                + " /system/su.d/" + scriptName
+                + " /system/etc/init.d/" + scriptName
                 + "; do [ -e \"$FILE\" ] && rm -f \"$FILE\" 2>/dev/null; done; true";
     }
 
@@ -1641,15 +1678,21 @@ public final class DnsHijackManager {
         commands.add("#LITERAL# " + buildRemoveBootPersistenceCommand());
     }
 
+    private static void appendRemoveLifecycleCleanupCommand(List<String> commands) {
+        commands.add("#LITERAL# " + buildRemoveLifecycleCleanupCommand());
+    }
+
     private static List<String> buildRootRepairCommands(Context context) {
         List<String> commands = new ArrayList<>();
         File bootScript = new File(workDir(context), BOOT_SCRIPT);
+        File cleanupScript = new File(workDir(context), CLEANUP_SCRIPT);
         commands.add(shellQuote(supervisorPath(context)) + " start");
         logRedirectPolicy(context, "DNS redirect policy repair queued");
         appendRootRedirectRepairCommands(context, commands, false);
         if (G.enableIPv6()) {
             appendRootRedirectRepairCommands(context, commands, true);
         }
+        commands.add(buildInstallLifecycleCleanupCommand(cleanupScript));
         if (G.dnsHijackBootPersistence()) {
             commands.add(buildInstallBootPersistenceCommand(bootScript));
         } else {
@@ -1667,6 +1710,7 @@ public final class DnsHijackManager {
         commands.add(buildNftPurgeCommand());
         appendDirectStopCommand(context, commands);
         commands.add(buildRemoveBootPersistenceCommand());
+        commands.add(buildRemoveLifecycleCleanupCommand());
         return commands;
     }
 
@@ -1815,6 +1859,11 @@ public final class DnsHijackManager {
             writeText(bootScript, buildBootScript(context, dir));
             if (!bootScript.setExecutable(true, false)) {
                 Log.w(TAG, "Unable to mark DNS boot script executable from app context; root install will chmod it");
+            }
+            File cleanupScript = new File(dir, CLEANUP_SCRIPT);
+            writeText(cleanupScript, buildLifecycleCleanupScript(context, dir));
+            if (!cleanupScript.setExecutable(true, false)) {
+                Log.w(TAG, "Unable to mark DNS cleanup script executable from app context; root install will chmod it");
             }
             return true;
         } catch (IOException e) {
@@ -2218,8 +2267,93 @@ public final class DnsHijackManager {
                 + "  fi\n";
     }
 
+    private static String buildLifecycleCleanupScript(Context context, File dir) {
+        String supervisor = new File(dir, SUPERVISOR).getAbsolutePath();
+        String marker = new File(dir, ENABLED_MARKER).getAbsolutePath();
+        String pid = new File(dir, PID).getAbsolutePath();
+        String supervisorPid = new File(dir, SUPERVISOR_PID).getAbsolutePath();
+        String appLog = new File(dir, CLEANUP_LOG).getAbsolutePath();
+        String iptables = Api.getBinaryPath(context, false);
+        String ip6tables = Api.getBinaryPath(context, true);
+
+        return "#!/system/bin/sh\n"
+                + "PATH=/system/bin:/system/xbin:/vendor/bin:/sbin:/su/bin:/data/adb/magisk:$PATH\n"
+                + "DIR=" + shellQuote(dir.getAbsolutePath()) + "\n"
+                + "SUPERVISOR=" + shellQuote(supervisor) + "\n"
+                + "MARKER=" + shellQuote(marker) + "\n"
+                + "PID_FILE=" + shellQuote(pid) + "\n"
+                + "SUP_PID=" + shellQuote(supervisorPid) + "\n"
+                + "APP_LOG=" + shellQuote(appLog) + "\n"
+                + "FALLBACK_LOG=/data/local/tmp/" + CLEANUP_LOG + "\n"
+                + "IPTABLES=" + shellQuote(iptables) + "\n"
+                + "IP6TABLES=" + shellQuote(ip6tables) + "\n"
+                + "CHAIN4=" + CHAIN_V4 + "\n"
+                + "PRE4=" + CHAIN_V4_PRE + "\n"
+                + "CHAIN6=" + CHAIN_V6 + "\n"
+                + "PRE6=" + CHAIN_V6_PRE + "\n"
+                + "if [ -d \"$DIR\" ]; then LOG=\"$APP_LOG\"; else LOG=\"$FALLBACK_LOG\"; fi\n"
+                + "log_msg() {\n"
+                + "  echo \"$(date +%s) $*\" >> \"$LOG\" 2>/dev/null || true\n"
+                + "}\n"
+                + "ipt() {\n"
+                + "  if [ -x \"$IPTABLES\" ]; then \"$IPTABLES\" \"$@\"; elif command -v iptables >/dev/null 2>&1; then iptables \"$@\"; else return 0; fi\n"
+                + "}\n"
+                + "ip6t() {\n"
+                + "  if [ -x \"$IP6TABLES\" ]; then \"$IP6TABLES\" \"$@\"; elif command -v ip6tables >/dev/null 2>&1; then ip6tables \"$@\"; else return 0; fi\n"
+                + "}\n"
+                + "cleanup_redirects() {\n"
+                + "  log_msg 'cleanup guard removing stale DNS redirect rules'\n"
+                + "  ipt -t nat -D OUTPUT -p udp --dport 53 -j \"$CHAIN4\" >/dev/null 2>&1 || true\n"
+                + "  ipt -t nat -D OUTPUT -p tcp --dport 53 -j \"$CHAIN4\" >/dev/null 2>&1 || true\n"
+                + "  ipt -t nat -D PREROUTING -p udp --dport 53 -j \"$PRE4\" >/dev/null 2>&1 || true\n"
+                + "  ipt -t nat -D PREROUTING -p tcp --dport 53 -j \"$PRE4\" >/dev/null 2>&1 || true\n"
+                + "  ipt -t nat -F \"$CHAIN4\" >/dev/null 2>&1 || true\n"
+                + "  ipt -t nat -F \"$PRE4\" >/dev/null 2>&1 || true\n"
+                + "  ipt -t nat -X \"$CHAIN4\" >/dev/null 2>&1 || true\n"
+                + "  ipt -t nat -X \"$PRE4\" >/dev/null 2>&1 || true\n"
+                + "  ip6t -t nat -D OUTPUT -p udp --dport 53 -j \"$CHAIN6\" >/dev/null 2>&1 || true\n"
+                + "  ip6t -t nat -D OUTPUT -p tcp --dport 53 -j \"$CHAIN6\" >/dev/null 2>&1 || true\n"
+                + "  ip6t -t nat -D PREROUTING -p udp --dport 53 -j \"$PRE6\" >/dev/null 2>&1 || true\n"
+                + "  ip6t -t nat -D PREROUTING -p tcp --dport 53 -j \"$PRE6\" >/dev/null 2>&1 || true\n"
+                + "  ip6t -t nat -F \"$CHAIN6\" >/dev/null 2>&1 || true\n"
+                + "  ip6t -t nat -F \"$PRE6\" >/dev/null 2>&1 || true\n"
+                + "  ip6t -t nat -X \"$CHAIN6\" >/dev/null 2>&1 || true\n"
+                + "  ip6t -t nat -X \"$PRE6\" >/dev/null 2>&1 || true\n"
+                + "  if command -v nft >/dev/null 2>&1; then nft delete table ip " + NFT_TABLE_V4 + " >/dev/null 2>&1 || true; nft delete table ip6 " + NFT_TABLE_V6 + " >/dev/null 2>&1 || true; fi\n"
+                + "}\n"
+                + "stop_daemon() {\n"
+                + "  if [ -x \"$SUPERVISOR\" ]; then \"$SUPERVISOR\" stop >> \"$LOG\" 2>&1 || true; fi\n"
+                + "  if [ -f \"$PID_FILE\" ]; then kill -TERM \"$(cat \"$PID_FILE\")\" 2>/dev/null || true; fi\n"
+                + "  if [ -f \"$SUP_PID\" ]; then kill -TERM \"$(cat \"$SUP_PID\")\" 2>/dev/null || true; fi\n"
+                + "  if command -v pidof >/dev/null 2>&1; then for p in $(pidof " + DAEMON_NAME + " 2>/dev/null); do kill -TERM \"$p\" 2>/dev/null || true; done; fi\n"
+                + "}\n"
+                + "remove_root_copies() {\n"
+                + "  for FILE in /data/adb/service.d/" + BOOT_SCRIPT
+                + " /su/su.d/" + BOOT_SCRIPT
+                + " /system/su.d/" + BOOT_SCRIPT
+                + " /system/etc/init.d/" + BOOT_SCRIPT
+                + " /data/adb/service.d/" + CLEANUP_SCRIPT
+                + " /su/su.d/" + CLEANUP_SCRIPT
+                + " /system/su.d/" + CLEANUP_SCRIPT
+                + " /system/etc/init.d/" + CLEANUP_SCRIPT
+                + "; do [ -e \"$FILE\" ] && rm -f \"$FILE\" 2>/dev/null || true; done\n"
+                + "}\n"
+                + "# Android does not guarantee that app code runs during its own uninstall.\n"
+                + "# This guard lets root clean stale DNS capture state on the next startup.\n"
+                + "if [ -d \"$DIR\" ] && [ -x \"$SUPERVISOR\" ] && [ -f \"$MARKER\" ]; then\n"
+                + "  log_msg 'cleanup guard found active service marker; leaving DNS service installed'\n"
+                + "  exit 0\n"
+                + "fi\n"
+                + "log_msg 'cleanup guard found stale or removed service; removing DNS service state'\n"
+                + "stop_daemon\n"
+                + "cleanup_redirects\n"
+                + "remove_root_copies\n"
+                + "log_msg 'cleanup guard complete'\n";
+    }
+
     private static String buildBootScript(Context context, File dir) {
         String supervisor = new File(dir, SUPERVISOR).getAbsolutePath();
+        String marker = new File(dir, ENABLED_MARKER).getAbsolutePath();
         String log = new File(dir, BOOT_LOG).getAbsolutePath();
         String iptables = Api.getBinaryPath(context, false);
         String ip6tables = Api.getBinaryPath(context, true);
@@ -2229,6 +2363,7 @@ public final class DnsHijackManager {
                 + "PATH=/system/bin:/system/xbin:/vendor/bin:/sbin:/su/bin:/data/adb/magisk:$PATH\n"
                 + "DIR=" + shellQuote(dir.getAbsolutePath()) + "\n"
                 + "SUPERVISOR=" + shellQuote(supervisor) + "\n"
+                + "MARKER=" + shellQuote(marker) + "\n"
                 + "IPTABLES=" + shellQuote(iptables) + "\n"
                 + "IP6TABLES=" + shellQuote(ip6tables) + "\n"
                 + "PORT=" + port + "\n"
@@ -2271,6 +2406,10 @@ public final class DnsHijackManager {
                 + " /su/su.d/" + BOOT_SCRIPT
                 + " /system/su.d/" + BOOT_SCRIPT
                 + " /system/etc/init.d/" + BOOT_SCRIPT
+                + " /data/adb/service.d/" + CLEANUP_SCRIPT
+                + " /su/su.d/" + CLEANUP_SCRIPT
+                + " /system/su.d/" + CLEANUP_SCRIPT
+                + " /system/etc/init.d/" + CLEANUP_SCRIPT
                 + "; do [ -e \"$FILE\" ] && rm -f \"$FILE\" 2>/dev/null || true; done\n"
                 + "}\n"
                 + "cleanup_stale_install() {\n"
@@ -2320,7 +2459,7 @@ public final class DnsHijackManager {
                 + "}\n"
                 + "log_msg 'DNS boot restore starting'\n"
                 + "sleep 15\n"
-                + "if [ ! -d \"$DIR\" ] || [ ! -x \"$SUPERVISOR\" ]; then cleanup_stale_install; exit 0; fi\n"
+                + "if [ ! -d \"$DIR\" ] || [ ! -x \"$SUPERVISOR\" ] || [ ! -f \"$MARKER\" ]; then cleanup_stale_install; exit 0; fi\n"
                 + "\"$SUPERVISOR\" start >> \"$LOG\" 2>&1\n"
                 + "restore_v4\n"
                 + "restore_v6\n"
