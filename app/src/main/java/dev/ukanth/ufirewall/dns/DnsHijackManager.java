@@ -536,6 +536,9 @@ public final class DnsHijackManager {
         boolean privateDnsBypass = androidPrivateDnsMayBypass(context);
         long upstreamLatency = parseLong(firstValue(healthValues, statusValues, "upstream_probe_ms"), -1L);
         String upstreamProbe = firstValue(healthValues, statusValues, "upstream_probe");
+        boolean listenersReady = udpListener && tcpListener && controlListener;
+        boolean upstreamHealthy = upstreamLatency >= 0L && "ok".equalsIgnoreCase(upstreamProbe);
+        String powerStatus = androidPowerDashboardLine(context);
         String restartCount = readSmallFileValue(new File(workDir(context), RESTART_COUNT), "0");
         String profile = G.activeDnsHijackPolicyProfile();
         if (profile == null || profile.trim().isEmpty()) {
@@ -603,11 +606,13 @@ public final class DnsHijackManager {
                 + "\n" + latencyLine
                 + "\n" + upstreamLine
                 + "\n" + systemLine
+                + "\n" + powerStatus
                 + "\n" + rulesLine
                 + "\nListeners: UDP " + listenerLabel(udpListener)
                 + " | TCP " + listenerLabel(tcpListener)
                 + " | Control " + listenerLabel(controlListener);
-        return new DnsDashboardSnapshot(statusLine, details);
+        return new DnsDashboardSnapshot(statusLine, details, enabled, running,
+                listenersReady, upstreamHealthy, privateDnsBypass, powerStatus);
     }
 
     public static boolean androidPrivateDnsMayBypass(Context context) {
@@ -808,6 +813,17 @@ public final class DnsHijackManager {
         }
     }
 
+    private static String androidPowerDashboardLine(Context context) {
+        String optimized = androidAppBatteryOptimized(context);
+        if ("true".equals(optimized)) {
+            return "Power: root daemon watchdog runs outside app power limits; scheduled app updates may be delayed";
+        }
+        if ("false".equals(optimized)) {
+            return "Power: root daemon watchdog runs outside app power limits; app updates are not battery-optimized";
+        }
+        return "Power: root daemon watchdog runs outside app power limits; app update power state " + optimized;
+    }
+
     private static String readAndroidPrivateDnsMode(Context context) {
         if (context == null || Build.VERSION.SDK_INT < Build.VERSION_CODES.P) {
             return "unsupported";
@@ -974,6 +990,36 @@ public final class DnsHijackManager {
                 ? redirectFamilyStatus(values, "dns_redirect_ipv6")
                 : "disabled";
         return "Redirect rules: IPv4 " + ipv4 + " | IPv6 " + ipv6;
+    }
+
+    public static String formatDashboardReadiness(DnsDashboardSnapshot snapshot, String rootStatusRaw) {
+        if (snapshot == null || !snapshot.enabled) {
+            return "Readiness: disabled";
+        }
+        List<String> blockers = new ArrayList<>();
+        List<String> warnings = new ArrayList<>();
+        if (!snapshot.daemonRunning) {
+            blockers.add("daemon unavailable");
+        }
+        if (!snapshot.listenersReady) {
+            blockers.add("listener missing");
+        }
+        if (!isRootRedirectStatusHealthy(rootStatusRaw)) {
+            blockers.add("redirect rules missing");
+        }
+        if (!snapshot.upstreamProbeHealthy) {
+            warnings.add("upstream probe failed");
+        }
+        if (snapshot.privateDnsMayBypass) {
+            warnings.add("Android Private DNS may bypass capture");
+        }
+        if (!blockers.isEmpty()) {
+            return "Readiness: repair needed (" + joinLabels(blockers) + ")";
+        }
+        if (!warnings.isEmpty()) {
+            return "Readiness: usable with warning (" + joinLabels(warnings) + ")";
+        }
+        return "Readiness: ready for port-53 DNS capture";
     }
 
     public static boolean isRootRedirectStatusHealthy(String raw) {
@@ -1683,6 +1729,20 @@ public final class DnsHijackManager {
         return count;
     }
 
+    private static String joinLabels(List<String> labels) {
+        StringBuilder joined = new StringBuilder();
+        for (String label : labels) {
+            if (label == null || label.trim().isEmpty()) {
+                continue;
+            }
+            if (joined.length() > 0) {
+                joined.append(", ");
+            }
+            joined.append(label.trim());
+        }
+        return joined.toString();
+    }
+
     private static int parseQueryUid(QueryEntry entry) {
         if (entry == null || entry.uid == null) {
             return -1;
@@ -2146,10 +2206,25 @@ public final class DnsHijackManager {
     public static final class DnsDashboardSnapshot {
         public final String statusLine;
         public final String detailLine;
+        public final boolean enabled;
+        public final boolean daemonRunning;
+        public final boolean listenersReady;
+        public final boolean upstreamProbeHealthy;
+        public final boolean privateDnsMayBypass;
+        public final String powerLine;
 
-        private DnsDashboardSnapshot(String statusLine, String detailLine) {
+        private DnsDashboardSnapshot(String statusLine, String detailLine, boolean enabled,
+                                     boolean daemonRunning, boolean listenersReady,
+                                     boolean upstreamProbeHealthy, boolean privateDnsMayBypass,
+                                     String powerLine) {
             this.statusLine = statusLine;
             this.detailLine = detailLine;
+            this.enabled = enabled;
+            this.daemonRunning = daemonRunning;
+            this.listenersReady = listenersReady;
+            this.upstreamProbeHealthy = upstreamProbeHealthy;
+            this.privateDnsMayBypass = privateDnsMayBypass;
+            this.powerLine = powerLine;
         }
     }
 

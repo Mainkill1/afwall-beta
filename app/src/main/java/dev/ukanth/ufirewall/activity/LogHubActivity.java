@@ -140,17 +140,20 @@ public class LogHubActivity extends AppCompatActivity {
                             ? R.string.dns_dashboard_pause
                             : R.string.dns_dashboard_resume);
                 }
-                loadDnsRedirectStatus(snapshot.detailLine);
+                loadDnsRedirectStatus(snapshot);
             });
         });
     }
 
-    private void loadDnsRedirectStatus(String baseDetails) {
+    private void loadDnsRedirectStatus(DnsHijackManager.DnsDashboardSnapshot snapshot) {
         if (dnsDashboardDetails == null) {
             return;
         }
+        String baseDetails = snapshot == null ? "" : snapshot.detailLine;
         if (!G.enableDnsHijack()) {
-            dnsDashboardDetails.setText(baseDetails + "\nRedirect rules: disabled");
+            dnsDashboardDetails.setText(baseDetails
+                    + "\nRedirect rules: disabled"
+                    + "\n" + DnsHijackManager.formatDashboardReadiness(snapshot, ""));
             return;
         }
         new RootCommand()
@@ -169,7 +172,9 @@ public class LogHubActivity extends AppCompatActivity {
                                     "DNS dashboard redirect status needs repair: " + redirectStatus);
                         }
                         mainHandler.post(() -> dnsDashboardDetails.setText(
-                                baseDetails + "\n" + redirectStatus));
+                                baseDetails + "\n" + redirectStatus
+                                        + "\n" + DnsHijackManager.formatDashboardReadiness(
+                                                snapshot, output)));
                     }
                 })
                 .run(getApplicationContext(), DnsHijackManager.buildRootRedirectStatusCommands(this));
