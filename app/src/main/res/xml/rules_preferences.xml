@@ -151,6 +151,13 @@
         <CheckBoxPreference
             android:defaultValue="false"
             android:dependency="enableDnsHijack"
+            android:key="dnsHijackSafeSearch"
+            android:summary="@string/dns_hijack_safe_search_summary"
+            android:title="@string/dns_hijack_safe_search_title" />
+
+        <CheckBoxPreference
+            android:defaultValue="false"
+            android:dependency="enableDnsHijack"
             android:key="dnsHijackBootPersistence"
             android:summary="@string/dns_hijack_boot_persistence_summary"
             android:title="@string/dns_hijack_boot_persistence_title" />

@@ -192,6 +192,7 @@ public final class DnsHijackManager {
         out.append("port=").append(G.dnsHijackPort(DEFAULT_PORT)).append('\n');
         out.append("fail_open=").append(G.dnsHijackFailOpen()).append('\n');
         out.append("strict_mode=").append(G.dnsHijackStrictMode()).append('\n');
+        out.append("safe_search=").append(G.dnsHijackSafeSearch()).append('\n');
         out.append("timeout_ms=").append(G.dnsHijackTimeoutMs()).append('\n');
         out.append("cache_size=").append(G.dnsHijackCacheSize()).append('\n');
         out.append("query_logging=").append(G.dnsHijackQueryLogging()).append('\n');
@@ -1513,6 +1514,7 @@ public final class DnsHijackManager {
         config.append("cache_size=").append(G.dnsHijackCacheSize()).append('\n');
         config.append("query_logging=").append(G.dnsHijackQueryLogging() ? "1" : "0").append('\n');
         config.append("persist_query_logs=").append(G.dnsHijackPersistQueryLogs() ? "1" : "0").append('\n');
+        appendSafeSearchConfigEntries(context, config);
 
         appendResolvedUpstreamConfigEntries(context, config, "upstream", G.dnsHijackUpstreams());
         appendResolvedSplitUpstreamConfigEntries(context, config, G.dnsHijackSplitUpstreams());
@@ -1528,6 +1530,42 @@ public final class DnsHijackManager {
         appendConfigFile(config, "block_suffix_file", DnsBlocklistManager.suffixBlockFile(context));
 
         return config.toString();
+    }
+
+    private static void appendSafeSearchConfigEntries(Context context, StringBuilder config) {
+        boolean enabled = G.dnsHijackSafeSearch();
+        config.append("safe_search=").append(enabled ? "1" : "0").append('\n');
+        if (!enabled) {
+            return;
+        }
+        appendSafeSearchProvider(context, config, "google", "forcesafesearch.google.com",
+                "216.239.38.120", "2001:4860:4802:32::78");
+        appendSafeSearchProvider(context, config, "youtube", "restrict.youtube.com",
+                "216.239.38.120", "2001:4860:4802:32::78");
+        appendSafeSearchProvider(context, config, "bing", "strict.bing.com",
+                "204.79.197.220");
+        appendSafeSearchProvider(context, config, "duckduckgo", "safe.duckduckgo.com");
+    }
+
+    private static void appendSafeSearchProvider(Context context, StringBuilder config,
+                                                 String provider, String targetHost,
+                                                 String... fallbackAddresses) {
+        List<String> addresses = resolveWithBootstrap(context, targetHost);
+        if (addresses.isEmpty()) {
+            for (String fallback : fallbackAddresses) {
+                if (fallback != null && !fallback.trim().isEmpty() && !addresses.contains(fallback)) {
+                    addresses.add(fallback);
+                }
+            }
+        }
+        if (addresses.isEmpty()) {
+            ApplicationErrorLog.add(context, "DNS SafeSearch target could not be resolved: " + targetHost);
+            return;
+        }
+        for (String address : addresses) {
+            config.append("safe_search_address=").append(provider).append('|')
+                    .append(address).append('\n');
+        }
     }
 
     private static void appendConfigFile(StringBuilder config, String key, File file) {

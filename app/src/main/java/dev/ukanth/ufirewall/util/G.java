@@ -182,6 +182,7 @@ public class G extends Application implements Application.ActivityLifecycleCallb
     private static final String DNS_HIJACK_BYPASS_INTERFACES = "dnsHijackBypassInterfaces";
     private static final String DNS_HIJACK_FAIL_OPEN = "dnsHijackFailOpen";
     private static final String DNS_HIJACK_STRICT_MODE = "dnsHijackStrictMode";
+    private static final String DNS_HIJACK_SAFE_SEARCH = "dnsHijackSafeSearch";
     private static final String DNS_HIJACK_BOOT_PERSISTENCE = "dnsHijackBootPersistence";
     private static final String DNS_HIJACK_TIMEOUT_MS = "dnsHijackTimeoutMs";
     private static final String DNS_HIJACK_CACHE_SIZE = "dnsHijackCacheSize";
@@ -210,6 +211,7 @@ public class G extends Application implements Application.ActivityLifecycleCallb
             DNS_HIJACK_BYPASS_INTERFACES,
             DNS_HIJACK_FAIL_OPEN,
             DNS_HIJACK_STRICT_MODE,
+            DNS_HIJACK_SAFE_SEARCH,
             DNS_HIJACK_TIMEOUT_MS,
             DNS_HIJACK_CACHE_SIZE,
             DNS_HIJACK_QUERY_LOGGING,
@@ -358,6 +360,10 @@ public class G extends Application implements Application.ActivityLifecycleCallb
 
     public static boolean dnsHijackStrictMode() {
         return dnsPolicyPrefs().getBoolean(DNS_HIJACK_STRICT_MODE, false);
+    }
+
+    public static boolean dnsHijackSafeSearch() {
+        return dnsPolicyPrefs().getBoolean(DNS_HIJACK_SAFE_SEARCH, false);
     }
 
     public static boolean dnsHijackBootPersistence() {

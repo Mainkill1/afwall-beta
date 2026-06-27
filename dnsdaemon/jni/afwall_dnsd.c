@@ -54,6 +54,10 @@
 #define MAX_CACHE_TTL 86400
 #define DNS_SOCKET_BUFFER_BYTES 262144
 #define UDP_DRAIN_LIMIT 32
+#define DNS_QTYPE_A 1
+#define DNS_QTYPE_AAAA 28
+#define DNS_CLASS_IN 1
+#define SAFE_SEARCH_TTL 300
 
 #ifndef MSG_DONTWAIT
 #define AFWALL_HAS_MSG_DONTWAIT 0
@@ -115,6 +119,11 @@ typedef struct {
 } split_upstream_t;
 
 typedef struct {
+    char ipv4[INET_ADDRSTRLEN];
+    char ipv6[INET6_ADDRSTRLEN];
+} safe_search_target_t;
+
+typedef struct {
     char label[MAX_LABEL];
     int first_child;
     int next_sibling;
@@ -135,10 +144,15 @@ typedef struct {
     int cache_size;
     int query_logging;
     int persist_query_logs;
+    int safe_search;
     char control_socket[256];
     char log_file[256];
     char pid_file[256];
     char heartbeat_file[256];
+    safe_search_target_t safe_google;
+    safe_search_target_t safe_youtube;
+    safe_search_target_t safe_bing;
+    safe_search_target_t safe_duckduckgo;
     upstream_t upstreams[MAX_UPSTREAMS];
     int upstream_count;
     split_upstream_t split_upstreams[MAX_SPLIT_UPSTREAMS];
@@ -188,6 +202,7 @@ typedef struct {
     uint64_t control_client_timeouts;
     uint64_t fail_open_drops;
     uint64_t fail_closed_blocks;
+    uint64_t safe_search_rewrites;
     uint64_t upstream_requests;
     uint64_t upstream_successes;
     uint64_t upstream_failures;
@@ -1277,6 +1292,11 @@ static size_t build_block_response(const uint8_t *query, size_t query_len, uint8
     return pos + 5;
 }
 
+static void write_u16(uint8_t *p, uint16_t value) {
+    p[0] = (uint8_t) ((value >> 8) & 0xffu);
+    p[1] = (uint8_t) (value & 0xffu);
+}
+
 static uint32_t read_u32(const uint8_t *p) {
     return ((uint32_t) p[0] << 24) | ((uint32_t) p[1] << 16) | ((uint32_t) p[2] << 8) | p[3];
 }
@@ -1290,6 +1310,133 @@ static void write_u32(uint8_t *p, uint32_t value) {
 
 static uint16_t read_u16(const uint8_t *p) {
     return (uint16_t) (((uint16_t) p[0] << 8) | p[1]);
+}
+
+static size_t build_address_response(const uint8_t *query, size_t query_len,
+                                     uint8_t *out, size_t out_len,
+                                     uint16_t qtype, const char *address) {
+    size_t qend = 12;
+    size_t pos;
+    uint8_t raw[16];
+    int family;
+    size_t rdlen;
+    if (query_len < 12 || address == NULL || address[0] == '\0') {
+        return 0;
+    }
+    while (qend < query_len && query[qend] != 0) {
+        uint8_t label_len = query[qend];
+        if ((label_len & 0xc0u) != 0 || label_len > 63 || qend + label_len + 1 > query_len) {
+            return 0;
+        }
+        qend += (size_t) label_len + 1;
+    }
+    if (qend + 5 > query_len) {
+        return 0;
+    }
+    family = qtype == DNS_QTYPE_A ? AF_INET : qtype == DNS_QTYPE_AAAA ? AF_INET6 : AF_UNSPEC;
+    if (family == AF_UNSPEC || inet_pton(family, address, raw) != 1) {
+        return 0;
+    }
+    rdlen = qtype == DNS_QTYPE_A ? 4u : 16u;
+    if (out_len < qend + 5 + 12 + rdlen) {
+        return 0;
+    }
+    memcpy(out, query, qend + 5);
+    out[2] = (uint8_t) (0x80u | (query[2] & 0x01u));
+    out[3] = 0x80;
+    write_u16(out + 6, 1);
+    write_u16(out + 8, 0);
+    write_u16(out + 10, 0);
+    pos = qend + 5;
+    out[pos++] = 0xc0;
+    out[pos++] = 0x0c;
+    write_u16(out + pos, qtype);
+    pos += 2;
+    write_u16(out + pos, DNS_CLASS_IN);
+    pos += 2;
+    write_u32(out + pos, SAFE_SEARCH_TTL);
+    pos += 4;
+    write_u16(out + pos, (uint16_t) rdlen);
+    pos += 2;
+    memcpy(out + pos, raw, rdlen);
+    return pos + rdlen;
+}
+
+static bool domain_equals_or_has_suffix(const char *domain, const char *suffix) {
+    return domain != NULL && suffix != NULL && domain_has_suffix(domain, suffix);
+}
+
+static bool safe_search_google_tld(const char *suffix) {
+    size_t i;
+    size_t dots = 0;
+    size_t len = suffix == NULL ? 0 : strlen(suffix);
+    if (len < 2 || len > 6 || suffix[0] == '.' || suffix[len - 1] == '.') {
+        return false;
+    }
+    for (i = 0; i < len; i++) {
+        if (suffix[i] == '.') {
+            dots++;
+            if (dots > 1 || i == 0 || suffix[i - 1] == '.') {
+                return false;
+            }
+        } else if (!isalpha((unsigned char) suffix[i])) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool safe_search_google_domain(const char *domain) {
+    if (domain == NULL) {
+        return false;
+    }
+    if (strncmp(domain, "www.google.", 11) == 0) {
+        return safe_search_google_tld(domain + 11);
+    }
+    if (strncmp(domain, "google.", 7) == 0) {
+        return safe_search_google_tld(domain + 7);
+    }
+    return false;
+}
+
+static const safe_search_target_t *safe_search_target_for_domain(const config_t *cfg,
+                                                                 const char *domain) {
+    if (cfg == NULL || domain == NULL || !cfg->safe_search) {
+        return NULL;
+    }
+    if (safe_search_google_domain(domain)) {
+        return &cfg->safe_google;
+    }
+    if (domain_equals_or_has_suffix(domain, "youtube.com")
+            || domain_equals_or_has_suffix(domain, "youtube-nocookie.com")
+            || strcmp(domain, "youtube.googleapis.com") == 0
+            || strcmp(domain, "youtubei.googleapis.com") == 0) {
+        return &cfg->safe_youtube;
+    }
+    if (strcmp(domain, "bing.com") == 0 || strcmp(domain, "www.bing.com") == 0
+            || strcmp(domain, "cn.bing.com") == 0) {
+        return &cfg->safe_bing;
+    }
+    if (strcmp(domain, "duckduckgo.com") == 0 || strcmp(domain, "www.duckduckgo.com") == 0
+            || strcmp(domain, "safe.duckduckgo.com") == 0) {
+        return &cfg->safe_duckduckgo;
+    }
+    return NULL;
+}
+
+static size_t build_safe_search_response(const config_t *cfg, const char *domain,
+                                         uint16_t qtype, const uint8_t *query,
+                                         size_t query_len, uint8_t *out, size_t out_len) {
+    const safe_search_target_t *target = safe_search_target_for_domain(cfg, domain);
+    const char *address;
+    if (target == NULL || (qtype != DNS_QTYPE_A && qtype != DNS_QTYPE_AAAA)) {
+        return 0;
+    }
+    address = qtype == DNS_QTYPE_A ? target->ipv4 : target->ipv6;
+    if (address[0] == '\0') {
+        return 0;
+    }
+    return build_address_response(query, query_len, out, out_len, qtype, address);
 }
 
 static size_t skip_name(const uint8_t *packet, size_t len, size_t pos) {
@@ -2221,6 +2368,61 @@ static bool parse_split_upstream(config_t *cfg, const char *value) {
     return true;
 }
 
+static safe_search_target_t *safe_search_target_by_name(config_t *cfg, const char *provider) {
+    if (cfg == NULL || provider == NULL) {
+        return NULL;
+    }
+    if (strcmp(provider, "google") == 0) {
+        return &cfg->safe_google;
+    }
+    if (strcmp(provider, "youtube") == 0) {
+        return &cfg->safe_youtube;
+    }
+    if (strcmp(provider, "bing") == 0) {
+        return &cfg->safe_bing;
+    }
+    if (strcmp(provider, "duckduckgo") == 0) {
+        return &cfg->safe_duckduckgo;
+    }
+    return NULL;
+}
+
+static void parse_safe_search_address(config_t *cfg, const char *value) {
+    char line[256];
+    char *sep;
+    char *provider;
+    char *address;
+    safe_search_target_t *target;
+    struct in_addr addr4;
+    struct in6_addr addr6;
+    if (cfg == NULL || value == NULL || value[0] == '\0') {
+        return;
+    }
+    safe_copy(line, sizeof(line), value);
+    sep = strchr(line, '|');
+    if (sep == NULL) {
+        sep = strchr(line, '=');
+    }
+    if (sep == NULL) {
+        return;
+    }
+    *sep = '\0';
+    provider = line;
+    address = sep + 1;
+    trim(provider);
+    trim(address);
+    lower_ascii(provider);
+    target = safe_search_target_by_name(cfg, provider);
+    if (target == NULL || address[0] == '\0') {
+        return;
+    }
+    if (inet_pton(AF_INET, address, &addr4) == 1) {
+        safe_copy(target->ipv4, sizeof(target->ipv4), address);
+    } else if (inet_pton(AF_INET6, address, &addr6) == 1) {
+        safe_copy(target->ipv6, sizeof(target->ipv6), address);
+    }
+}
+
 static bool load_string_rule_file(string_rule_list_t *rules, const char *path);
 static bool load_regex_rule_file(regex_rule_list_t *rules, const char *path);
 
@@ -2280,6 +2482,10 @@ static bool load_config(const char *path, config_t *new_cfg) {
             new_cfg->query_logging = config_bool_value(value);
         } else if (strcmp(key, "persist_query_logs") == 0) {
             new_cfg->persist_query_logs = config_bool_value(value);
+        } else if (strcmp(key, "safe_search") == 0) {
+            new_cfg->safe_search = config_bool_value(value);
+        } else if (strcmp(key, "safe_search_address") == 0) {
+            parse_safe_search_address(new_cfg, value);
         } else if (strcmp(key, "upstream") == 0) {
             parse_upstream(new_cfg, value);
         } else if (strcmp(key, "split_upstream") == 0) {
@@ -2594,6 +2800,16 @@ static void handle_dns_query(const config_t *cfg, const uint8_t *query, size_t q
                 "block", reason, "none", &start);
         return;
     }
+    *response_len = build_safe_search_response(cfg, domain, qtype, query, query_len,
+            response, MAX_PACKET);
+    if (*response_len > 0) {
+        g_stats.allowed++;
+        g_stats.safe_search_rewrites++;
+        *action_out = "safe_search";
+        finish_dns_query(domain, *action_out, transport, qtype,
+                "allow", "safe_search", "local", &start);
+        return;
+    }
     if (cache_lookup(domain, qtype, query, response, response_len, &cache_negative)) {
         g_stats.cache_hits++;
         if (cache_negative) {
@@ -2813,6 +3029,7 @@ static void write_health_response(int client) {
             "memory_rss_kb=%ld\nmemory_hwm_kb=%ld\ncpu_user_ms=%llu\n"
             "cpu_system_ms=%llu\ncpu_total_ms=%llu\n"
             "query_logging=%d\npersist_query_logs=%d\n"
+            "safe_search=%d\nsafe_search_rewrites=%llu\n"
             "log_writer_thread=%d\nlog_ring_entries=%llu\nlog_unflushed_entries=%llu\n"
             "exact_allow_index_size=%d\nexact_block_index_size=%d\n"
             "suffix_allow_trie_nodes=%d\nsuffix_block_trie_nodes=%d\n"
@@ -2861,6 +3078,8 @@ static void write_health_response(int client) {
             (unsigned long long) cpu_total_ms,
             g_cfg.query_logging,
             g_cfg.persist_query_logs,
+            g_cfg.safe_search,
+            (unsigned long long) g_stats.safe_search_rewrites,
             g_log_thread_started ? 1 : 0,
             (unsigned long long) log_ring_entries,
             (unsigned long long) log_unflushed_entries,
@@ -3006,6 +3225,7 @@ static void handle_control(int fd) {
                 "memory_rss_kb=%ld\nmemory_hwm_kb=%ld\ncpu_user_ms=%llu\n"
                 "cpu_system_ms=%llu\ncpu_total_ms=%llu\n"
                 "query_logging=%d\npersist_query_logs=%d\n"
+                "safe_search=%d\nsafe_search_rewrites=%llu\n"
                 "log_writer_thread=%d\nlog_ring_entries=%llu\nlog_unflushed_entries=%llu\n"
                 "socket_buffer_bytes=%d\nudp_drain_limit=%d\n"
                 "cache_size=%d\ncache_entries=%d\ncache_hits=%llu\ncache_misses=%llu\n"
@@ -3048,6 +3268,8 @@ static void handle_control(int fd) {
                 (unsigned long long) cpu_total_ms,
                 g_cfg.query_logging,
                 g_cfg.persist_query_logs,
+                g_cfg.safe_search,
+                (unsigned long long) g_stats.safe_search_rewrites,
                 g_log_thread_started ? 1 : 0,
                 (unsigned long long) log_ring_entries,
                 (unsigned long long) log_unflushed_entries,
