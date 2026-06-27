@@ -13,6 +13,7 @@ import com.afollestad.materialdialogs.MaterialDialog;
 
 import dev.ukanth.ufirewall.Api;
 import dev.ukanth.ufirewall.R;
+import dev.ukanth.ufirewall.dns.DnsHijackManager;
 import dev.ukanth.ufirewall.util.ApplicationErrorLog;
 import dev.ukanth.ufirewall.util.G;
 import dev.ukanth.ufirewall.util.ThemeHelper;
@@ -76,6 +77,7 @@ public class ApplicationErrorsActivity extends AppCompatActivity {
     }
 
     private void refreshData() {
+        DnsHijackManager.syncServiceLogsToAppLog(this);
         String errors = ApplicationErrorLog.get(this);
         content.setText(errors.trim().isEmpty() ? getString(R.string.application_errors_empty) : errors);
     }

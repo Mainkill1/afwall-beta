@@ -509,6 +509,7 @@ public class LogHubActivity extends AppCompatActivity {
     }
 
     private String buildExportContent(Integer[] selectedSections) {
+        DnsHijackManager.syncServiceLogsToAppLog(this);
         StringBuilder builder = new StringBuilder();
         for (Integer section : selectedSections) {
             if (section == null) {

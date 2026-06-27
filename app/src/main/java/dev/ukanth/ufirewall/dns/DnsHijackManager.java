@@ -6,7 +6,6 @@ import android.net.LocalSocket;
 import android.net.LocalSocketAddress;
 import android.os.Build;
 import android.provider.Settings;
-import android.util.Log;
 
 import java.io.ByteArrayOutputStream;
 import java.io.File;
@@ -23,7 +22,9 @@ import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.net.SocketTimeoutException;
 import java.nio.charset.StandardCharsets;
+import java.text.SimpleDateFormat;
 import java.util.ArrayList;
+import java.util.Date;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
@@ -31,6 +32,7 @@ import java.util.Map;
 
 import dev.ukanth.ufirewall.Api;
 import dev.ukanth.ufirewall.R;
+import dev.ukanth.ufirewall.log.Log;
 import dev.ukanth.ufirewall.service.RootCommand;
 import dev.ukanth.ufirewall.util.ApplicationErrorLog;
 import dev.ukanth.ufirewall.util.G;
@@ -56,6 +58,11 @@ public final class DnsHijackManager {
     private static final String CLEANUP_SCRIPT = "afwall_dnsd_cleanup.sh";
     private static final String CLEANUP_LOG = "afwall_dnsd_cleanup.log";
     private static final String SERVICE_LOG_PREFS = "AFWallDnsServiceLogBridge";
+    private static final String[] SERVICE_EVENT_LOGS = new String[] {
+            SUPERVISOR_LOG,
+            BOOT_LOG,
+            CLEANUP_LOG
+    };
     private static final String CHAIN_V4 = "afwall-dns";
     private static final String CHAIN_V4_PRE = "afwall-dns-pre";
     private static final String CHAIN_V6 = "afwall-dns6";
@@ -108,6 +115,7 @@ public final class DnsHijackManager {
         if (!ipv6) {
             ApplicationErrorLog.add(context, "DNS hijacker enabled; daemon start and DNS redirect rules queued");
             logRedirectPolicy(context, "DNS redirect policy queued");
+            commands.add("#LITERAL# " + buildRepairServiceEventLogFilesCommand(context));
             commands.add("#LITERAL# " + shellQuote(supervisorPath(context)) + " restart");
             appendBootPersistenceCommand(context, commands);
         }
@@ -250,6 +258,7 @@ public final class DnsHijackManager {
             return;
         }
         List<String> commands = new ArrayList<>();
+        commands.add(buildRepairServiceEventLogFilesCommand(context));
         commands.add(shellQuote(supervisor.getAbsolutePath()) + " " + safeAction);
         ApplicationErrorLog.add(context, "DNS hijacker supervisor action queued: " + safeAction);
         new RootCommand()
@@ -721,6 +730,7 @@ public final class DnsHijackManager {
         if (!prefs.getBoolean(UNREADABLE_SERVICE_LOG_PREFIX + label, false)) {
             ApplicationErrorLog.add(context, "DNS service " + label
                     + " log could not be read; root log file permissions may need repair");
+            Log.w(TAG, "DNS service " + label + " log could not be read by the app");
         }
         prefs.edit().putBoolean(UNREADABLE_SERVICE_LOG_PREFIX + label, true).apply();
     }
@@ -736,17 +746,44 @@ public final class DnsHijackManager {
         }
         int start = Math.max(0, cleaned.size() - MAX_SERVICE_LOG_LINES);
         for (int i = start; i < cleaned.size(); i++) {
-            ApplicationErrorLog.add(context, "DNS service " + label + ": " + cleaned.get(i));
+            String bridgedLine = "DNS service " + label + ": " + cleaned.get(i);
+            Log.i(TAG, bridgedLine);
+            ApplicationErrorLog.add(context, bridgedLine);
         }
     }
 
     private static String sanitizeServiceLogLine(String line) {
         String clean = line == null ? "" : line.trim().replace('\r', ' ').replace('\n', ' ');
         clean = clean.replaceAll("\\s+", " ");
+        clean = formatServiceEventTimestamp(clean);
         if (clean.length() > MAX_SERVICE_LOG_LINE_CHARS) {
             clean = clean.substring(0, MAX_SERVICE_LOG_LINE_CHARS);
         }
         return clean;
+    }
+
+    private static String formatServiceEventTimestamp(String clean) {
+        if (clean == null || clean.isEmpty()) {
+            return "";
+        }
+        int separator = clean.indexOf(' ');
+        if (separator <= 0 || separator >= clean.length() - 1) {
+            return clean;
+        }
+        String firstToken = clean.substring(0, separator);
+        for (int i = 0; i < firstToken.length(); i++) {
+            if (!Character.isDigit(firstToken.charAt(i))) {
+                return clean;
+            }
+        }
+        try {
+            long epochSeconds = Long.parseLong(firstToken);
+            String timestamp = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US)
+                    .format(new Date(epochSeconds * 1000L));
+            return timestamp + " " + clean.substring(separator + 1);
+        } catch (NumberFormatException e) {
+            return clean;
+        }
     }
 
     private static void appendServiceLogBridgeStatus(Context context, StringBuilder out,
@@ -2675,6 +2712,21 @@ public final class DnsHijackManager {
                 + "; do [ -e \"$FILE\" ] && rm -f \"$FILE\" 2>/dev/null; done; true";
     }
 
+    private static String buildRepairServiceEventLogFilesCommand(Context context) {
+        File dir = workDir(context);
+        StringBuilder command = new StringBuilder();
+        command.append("DIR=").append(shellQuote(dir.getAbsolutePath())).append("; ");
+        command.append("if [ -d \"$DIR\" ]; then ");
+        command.append("chmod 700 \"$DIR\" 2>/dev/null || true; ");
+        for (String logName : SERVICE_EVENT_LOGS) {
+            command.append("LOG=\"$DIR/").append(logName).append("\"; ")
+                    .append("touch \"$LOG\" 2>/dev/null || true; ")
+                    .append("chmod 644 \"$LOG\" 2>/dev/null || true; ");
+        }
+        command.append("fi; true");
+        return command.toString();
+    }
+
     private static void appendRemoveBootPersistenceCommand(List<String> commands) {
         commands.add("#LITERAL# " + buildRemoveBootPersistenceCommand());
     }
@@ -2687,6 +2739,7 @@ public final class DnsHijackManager {
         List<String> commands = new ArrayList<>();
         File bootScript = new File(workDir(context), BOOT_SCRIPT);
         File cleanupScript = new File(workDir(context), CLEANUP_SCRIPT);
+        commands.add(buildRepairServiceEventLogFilesCommand(context));
         commands.add(shellQuote(supervisorPath(context)) + " restart");
         logRedirectPolicy(context, "DNS redirect policy repair queued");
         appendRootRedirectRepairCommands(context, commands, false);
@@ -2709,6 +2762,7 @@ public final class DnsHijackManager {
         List<String> commands = new ArrayList<>();
         // These commands are executed directly through RootCommand, not through Api.iptablesCommands.
         // Keep them fully-qualified so preference toggles and dashboard pause actually remove root state.
+        commands.add(buildRepairServiceEventLogFilesCommand(context));
         appendDirectPurgeRules(context, commands, false);
         appendDirectPurgeRules(context, commands, true);
         commands.add(buildNftPurgeCommand());
@@ -2858,6 +2912,7 @@ public final class DnsHijackManager {
             if (!dir.exists() && !dir.mkdirs()) {
                 throw new IOException("Unable to create " + dir.getAbsolutePath());
             }
+            ensureLocalServiceEventLogFiles(dir);
 
             File daemon = new File(dir, DAEMON_NAME);
             copyDaemonAsset(context, daemon);
@@ -2886,6 +2941,20 @@ public final class DnsHijackManager {
             Log.e(TAG, "Unable to prepare DNS daemon", e);
             ApplicationErrorLog.add(context, "Unable to prepare DNS hijacker daemon: " + e.getMessage());
             return false;
+        }
+    }
+
+    private static void ensureLocalServiceEventLogFiles(File dir) throws IOException {
+        if (dir == null) {
+            return;
+        }
+        for (String logName : SERVICE_EVENT_LOGS) {
+            File logFile = new File(dir, logName);
+            if (!logFile.exists() && !logFile.createNewFile()) {
+                throw new IOException("Unable to create " + logFile.getAbsolutePath());
+            }
+            // Root appends lifecycle events, but AFWall must be able to read them back later.
+            logFile.setReadable(true, false);
         }
     }
 

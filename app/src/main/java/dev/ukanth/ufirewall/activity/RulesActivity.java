@@ -43,6 +43,7 @@ import dev.ukanth.ufirewall.Api;
 import dev.ukanth.ufirewall.InterfaceDetails;
 import dev.ukanth.ufirewall.InterfaceTracker;
 import dev.ukanth.ufirewall.R;
+import dev.ukanth.ufirewall.dns.DnsHijackManager;
 import dev.ukanth.ufirewall.log.Log;
 import dev.ukanth.ufirewall.service.RootCommand;
 import dev.ukanth.ufirewall.util.ApplicationErrorLog;
@@ -118,6 +119,7 @@ public class RulesActivity extends DataDumpActivity {
 
         if (includeApplicationErrors()) {
             writeHeading(result, true, getString(R.string.application_errors_title));
+            DnsHijackManager.syncServiceLogsToAppLog(ctx);
             String applicationErrors = ApplicationErrorLog.get(ctx);
             if (applicationErrors.trim().isEmpty()) {
                 result.append(getString(R.string.application_errors_empty)).append("\n");
