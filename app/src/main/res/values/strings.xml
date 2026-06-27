@@ -454,6 +454,8 @@
     <string name="dns_query_allow_exact">Allow this domain</string>
     <string name="dns_query_allow_suffix">Allow this domain and subdomains</string>
     <string name="dns_query_temp_allow">Temporarily allow this domain</string>
+    <string name="dns_query_enable_dns_capture">Enable DNS capture for this app</string>
+    <string name="dns_query_disable_dns_capture">Disable DNS capture for this app</string>
     <string name="dns_query_app_allow_exact">Allow for this app</string>
     <string name="dns_query_app_allow_suffix">Allow this app and subdomains</string>
     <string name="dns_query_block_exact">Block this domain</string>
@@ -467,6 +469,9 @@
     <string name="dns_query_app_unknown">Unable to identify the application for this DNS query.</string>
     <string name="dns_query_rule_added">DNS rule added and daemon reload requested.</string>
     <string name="dns_query_rule_exists">DNS rule already exists.</string>
+    <string name="dns_query_dns_capture_enabled">DNS capture enabled for this app.</string>
+    <string name="dns_query_dns_capture_disabled">DNS capture disabled for this app.</string>
+    <string name="dns_query_dns_capture_unchanged">DNS capture already matches this app.</string>
     <string name="log_prefs_title">Log</string>
     <string name="hideicons_pref_title">Hide app icons</string>
     <string name="hideicons_pref_summary_on">Improve performance by disabling app icons in the main view</string>

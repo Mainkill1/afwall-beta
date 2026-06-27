@@ -366,6 +366,44 @@ public class G extends Application implements Application.ActivityLifecycleCallb
         return dnsPolicyPrefs().getString(DNS_HIJACK_BYPASS_UIDS, "");
     }
 
+    public static boolean dnsHijackUidCaptured(int uid) {
+        if (uid < 0) {
+            return false;
+        }
+        LinkedHashSet<Integer> bypassUids = readUidSet(dnsPolicyPrefs(), DNS_HIJACK_BYPASS_UIDS);
+        if (bypassUids.contains(uid)) {
+            return false;
+        }
+        LinkedHashSet<Integer> captureUids = readUidSet(dnsPolicyPrefs(), DNS_HIJACK_CAPTURE_UIDS);
+        return captureUids.isEmpty() || captureUids.contains(uid);
+    }
+
+    public static boolean dnsHijackUidCaptured(int uid, boolean captured) {
+        if (uid < 0) {
+            return false;
+        }
+        SharedPreferences prefs = dnsWritablePolicyPrefs();
+        LinkedHashSet<Integer> captureUids = readUidSet(prefs, DNS_HIJACK_CAPTURE_UIDS);
+        LinkedHashSet<Integer> bypassUids = readUidSet(prefs, DNS_HIJACK_BYPASS_UIDS);
+        boolean changed = false;
+        if (captured) {
+            changed |= bypassUids.remove(uid);
+            if (!captureUids.isEmpty()) {
+                changed |= captureUids.add(uid);
+            }
+        } else {
+            changed |= captureUids.remove(uid);
+            changed |= bypassUids.add(uid);
+        }
+        if (changed) {
+            prefs.edit()
+                    .putString(DNS_HIJACK_CAPTURE_UIDS, joinUidSet(captureUids))
+                    .putString(DNS_HIJACK_BYPASS_UIDS, joinUidSet(bypassUids))
+                    .commit();
+        }
+        return changed;
+    }
+
     public static String dnsHijackCaptureInterfaces() {
         return dnsPolicyPrefs().getString(DNS_HIJACK_CAPTURE_INTERFACES, "");
     }
@@ -719,6 +757,42 @@ public class G extends Application implements Application.ActivityLifecycleCallb
             return false;
         }
         return appendLinePreference(prefs, key, uid + "|" + domain);
+    }
+
+    private static LinkedHashSet<Integer> readUidSet(SharedPreferences prefs, String key) {
+        LinkedHashSet<Integer> values = new LinkedHashSet<>();
+        String existing = prefs.getString(key, "");
+        if (existing == null || existing.trim().isEmpty()) {
+            return values;
+        }
+        String[] tokens = existing.split("[\\r\\n,]+");
+        for (String token : tokens) {
+            if (token == null) {
+                continue;
+            }
+            String value = token.trim();
+            if (value.isEmpty()) {
+                continue;
+            }
+            try {
+                int uid = Integer.parseInt(value);
+                if (uid >= 0) {
+                    values.add(uid);
+                }
+            } catch (NumberFormatException ignored) {
+            }
+        }
+        return values;
+    }
+
+    private static String joinUidSet(LinkedHashSet<Integer> values) {
+        List<String> out = new ArrayList<>();
+        for (Integer value : values) {
+            if (value != null && value >= 0) {
+                out.add(String.valueOf(value));
+            }
+        }
+        return android.text.TextUtils.join("\n", out);
     }
 
     private static void pruneExpiredTemporaryPreference(SharedPreferences prefs, String key) {

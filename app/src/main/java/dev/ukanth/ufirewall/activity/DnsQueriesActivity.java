@@ -37,6 +37,8 @@ import java.util.concurrent.Executors;
 import dev.ukanth.ufirewall.Api;
 import dev.ukanth.ufirewall.R;
 import dev.ukanth.ufirewall.dns.DnsHijackManager;
+import dev.ukanth.ufirewall.service.RootCommand;
+import dev.ukanth.ufirewall.util.ApplicationErrorLog;
 import dev.ukanth.ufirewall.util.G;
 import dev.ukanth.ufirewall.util.ThemeHelper;
 
@@ -51,6 +53,8 @@ public class DnsQueriesActivity extends AppCompatActivity {
     private static final int MENU_EXPORT = 5;
     private static final int QUERY_ACTION_VIEW_APP = 100;
     private static final int QUERY_ACTION_VIEW_RULE = 101;
+    private static final int QUERY_ACTION_ENABLE_DNS_CAPTURE = 102;
+    private static final int QUERY_ACTION_DISABLE_DNS_CAPTURE = 103;
     private static final long REFRESH_MS = 2500L;
 
     private final Handler handler = new Handler(Looper.getMainLooper());
@@ -222,7 +226,15 @@ public class DnsQueriesActivity extends AppCompatActivity {
                 DnsHijackManager.RULE_ALLOW_SUFFIX);
         addQueryAction(labels, actions, R.string.dns_query_temp_allow,
                 DnsHijackManager.RULE_TEMP_ALLOW);
-        if (parseQueryUid(entry) >= 0) {
+        int uid = parseQueryUid(entry);
+        if (uid >= 0) {
+            boolean captured = G.dnsHijackUidCaptured(uid);
+            addQueryAction(labels, actions, captured
+                            ? R.string.dns_query_disable_dns_capture
+                            : R.string.dns_query_enable_dns_capture,
+                    captured
+                            ? QUERY_ACTION_DISABLE_DNS_CAPTURE
+                            : QUERY_ACTION_ENABLE_DNS_CAPTURE);
             addQueryAction(labels, actions, R.string.dns_query_app_allow_exact,
                     DnsHijackManager.RULE_APP_ALLOW_EXACT);
             addQueryAction(labels, actions, R.string.dns_query_app_allow_suffix,
@@ -234,7 +246,7 @@ public class DnsQueriesActivity extends AppCompatActivity {
                 DnsHijackManager.RULE_BLOCK_SUFFIX);
         addQueryAction(labels, actions, R.string.dns_query_temp_block,
                 DnsHijackManager.RULE_TEMP_BLOCK);
-        if (parseQueryUid(entry) >= 0) {
+        if (uid >= 0) {
             addQueryAction(labels, actions, R.string.dns_query_app_block_exact,
                     DnsHijackManager.RULE_APP_BLOCK_EXACT);
             addQueryAction(labels, actions, R.string.dns_query_app_block_suffix,
@@ -268,6 +280,11 @@ public class DnsQueriesActivity extends AppCompatActivity {
         }
         if (actionId == QUERY_ACTION_VIEW_RULE) {
             showRuleDetails(entry);
+            return;
+        }
+        if (actionId == QUERY_ACTION_ENABLE_DNS_CAPTURE
+                || actionId == QUERY_ACTION_DISABLE_DNS_CAPTURE) {
+            updateQueryAppDnsCapture(entry, actionId == QUERY_ACTION_ENABLE_DNS_CAPTURE);
             return;
         }
         switch (actionId) {
@@ -326,6 +343,8 @@ public class DnsQueriesActivity extends AppCompatActivity {
         details.append("Source: ").append(entry.source).append('\n');
         details.append("UID: ").append(entry.uid).append('\n');
         details.append("App: ").append(resolveAppLabel(entry)).append('\n');
+        details.append("DNS capture: ").append(G.dnsHijackUidCaptured(parseQueryUid(entry))
+                ? "enabled" : "disabled").append('\n');
         details.append("Upstream: ").append(entry.upstream).append('\n');
         details.append("Latency: ").append(entry.latency);
 
@@ -348,6 +367,46 @@ public class DnsQueriesActivity extends AppCompatActivity {
             Log.w(TAG, "Unable to open app details for DNS query UID", e);
             Api.toast(this, getString(R.string.dns_query_app_unknown));
         }
+    }
+
+    private void updateQueryAppDnsCapture(DnsHijackManager.QueryEntry entry, boolean enabled) {
+        int uid = parseQueryUid(entry);
+        if (uid < 0) {
+            Api.toast(this, getString(R.string.dns_query_app_unknown));
+            return;
+        }
+        boolean changed = G.dnsHijackUidCaptured(uid, enabled);
+        if (!changed) {
+            Api.toast(this, getString(R.string.dns_query_dns_capture_unchanged));
+            return;
+        }
+        Api.setRulesUpToDate(false);
+        int toast = enabled
+                ? R.string.dns_query_dns_capture_enabled
+                : R.string.dns_query_dns_capture_disabled;
+        ApplicationErrorLog.add(this, "DNS capture " + (enabled ? "enabled" : "disabled")
+                + " for UID " + uid + " from live query action");
+        if (!G.enableDnsHijack()) {
+            Api.toast(this, getString(toast));
+            loadQueries(false);
+            return;
+        }
+        DnsHijackManager.repairDnsProtection(this, new RootCommand.Callback() {
+            @Override
+            public void cbFunc(RootCommand state) {
+                runOnUiThread(() -> {
+                    if (state.exitCode != 0) {
+                        ApplicationErrorLog.add(DnsQueriesActivity.this,
+                                "DNS capture policy changed for UID " + uid
+                                        + " but redirect repair failed");
+                    }
+                    Api.toast(DnsQueriesActivity.this, getString(state.exitCode == 0
+                            ? toast
+                            : R.string.error_apply));
+                    loadQueries(false);
+                });
+            }
+        });
     }
 
     private String resolveAppLabel(DnsHijackManager.QueryEntry entry) {
