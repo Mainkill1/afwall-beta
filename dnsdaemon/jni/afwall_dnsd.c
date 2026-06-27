@@ -4308,6 +4308,23 @@ static size_t build_health_query(uint8_t *out, size_t out_len) {
     return pos;
 }
 
+static size_t build_probe_query(uint8_t *out, size_t out_len, bool *dnssec_prepared) {
+    size_t query_len = build_health_query(out, out_len);
+    if (dnssec_prepared != NULL) {
+        *dnssec_prepared = false;
+    }
+    if (query_len == 0 || !g_cfg.dnssec_request) {
+        return query_len;
+    }
+    if (!prepare_dnssec_query(out, query_len, out, out_len, &query_len, NULL, NULL)) {
+        return 0;
+    }
+    if (dnssec_prepared != NULL) {
+        *dnssec_prepared = true;
+    }
+    return query_len;
+}
+
 static int response_rcode(const uint8_t *response, size_t response_len) {
     if (response_len < 4) {
         return -1;
@@ -4384,6 +4401,7 @@ static void write_health_response(int client) {
     int latency_ms;
     int upstream_index = -1;
     int rcode;
+    bool probe_dnssec = false;
     long memory_rss_kb = read_proc_status_kb("VmRSS");
     long memory_hwm_kb = read_proc_status_kb("VmHWM");
     uint64_t cpu_user_ticks;
@@ -4399,7 +4417,7 @@ static void write_health_response(int client) {
     cpu_system_ms = cpu_ticks_to_ms(cpu_system_ticks);
     cpu_total_ms = cpu_user_ms + cpu_system_ms;
     read_log_stats(&log_ring_entries, &log_unflushed_entries);
-    query_len = build_health_query(query, sizeof(query));
+    query_len = build_probe_query(query, sizeof(query), &probe_dnssec);
     gettimeofday(&start, NULL);
     response_len = query_len == 0
             ? -1
@@ -4416,6 +4434,7 @@ static void write_health_response(int client) {
             "resolver_scope_hash=%llu\n"
             "reloads=%llu\nreload_failures=%llu\nvalidations=%llu\nvalidation_failures=%llu\n"
             "upstream_probe_ms=%d\nupstream_probe_index=%d\nupstream_probe_rcode=%d\n"
+            "upstream_probe_dnssec=%d\n"
             "queries=%llu\nblocked=%llu\nallowed=%llu\ncache_size=%d\ncache_entries=%d\n"
             "socket_buffer_bytes=%d\nudp_drain_limit=%d\n"
             "udp_drain_batches=%llu\nudp_drain_packets=%llu\n"
@@ -4468,6 +4487,7 @@ static void write_health_response(int client) {
             latency_ms,
             upstream_index,
             rcode,
+            probe_dnssec ? 1 : 0,
             (unsigned long long) g_stats.queries,
             (unsigned long long) g_stats.blocked,
             (unsigned long long) g_stats.allowed,
@@ -4550,15 +4570,17 @@ static void write_benchmark_response(int client) {
     size_t query_len;
     int timeout_ms;
     int i;
+    bool probe_dnssec = false;
 
-    query_len = build_health_query(query, sizeof(query));
+    query_len = build_probe_query(query, sizeof(query), &probe_dnssec);
     timeout_ms = g_cfg.timeout_ms < 1000 ? g_cfg.timeout_ms : 1000;
     if (timeout_ms < 250) {
         timeout_ms = 250;
     }
 
-    write_control_response(client, "benchmark=1\nupstreams=%d\ntimeout_ms=%d\n",
-            g_cfg.upstream_count, timeout_ms);
+    write_control_response(client,
+            "benchmark=1\nupstreams=%d\ntimeout_ms=%d\ndnssec_request=%d\nprobe_dnssec=%d\n",
+            g_cfg.upstream_count, timeout_ms, g_cfg.dnssec_request, probe_dnssec ? 1 : 0);
     if (query_len == 0) {
         write_control_response(client, "error=unable_to_build_query\n");
         return;

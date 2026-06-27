@@ -761,6 +761,8 @@ public final class DnsHijackManager {
         out.append("source=app_direct_udp\n");
         out.append("upstreams=").append(targets.size()).append('\n');
         out.append("timeout_ms=").append(timeoutMs).append('\n');
+        out.append("dnssec_request=").append(G.dnsHijackDnssecRequest() ? 1 : 0).append('\n');
+        out.append("probe_dnssec=").append(G.dnsHijackDnssecRequest() ? 1 : 0).append('\n');
         if (targets.isEmpty()) {
             out.append("error=no_upstreams_configured\n");
             return out.toString();
@@ -796,7 +798,7 @@ public final class DnsHijackManager {
             InetAddress address = InetAddress.getByName(target.host);
             DatagramPacket request = new DatagramPacket(query, query.length, address, target.port);
             socket.send(request);
-            byte[] response = new byte[512];
+            byte[] response = new byte[G.dnsHijackDnssecRequest() ? 4096 : 512];
             DatagramPacket reply = new DatagramPacket(response, response.length);
             socket.receive(reply);
             int bytes = reply.getLength();
@@ -863,7 +865,26 @@ public final class DnsHijackManager {
         int id = (int) (System.currentTimeMillis() & 0xffff);
         query[0] = (byte) ((id >> 8) & 0xff);
         query[1] = (byte) (id & 0xff);
-        return query;
+        if (!G.dnsHijackDnssecRequest()) {
+            return query;
+        }
+        byte[] dnssecQuery = new byte[query.length + 11];
+        System.arraycopy(query, 0, dnssecQuery, 0, query.length);
+        dnssecQuery[10] = 0x00;
+        dnssecQuery[11] = 0x01;
+        int pos = query.length;
+        dnssecQuery[pos++] = 0x00;
+        dnssecQuery[pos++] = 0x00;
+        dnssecQuery[pos++] = 0x29;
+        dnssecQuery[pos++] = 0x10;
+        dnssecQuery[pos++] = 0x00;
+        dnssecQuery[pos++] = 0x00;
+        dnssecQuery[pos++] = 0x00;
+        dnssecQuery[pos++] = (byte) 0x80;
+        dnssecQuery[pos++] = 0x00;
+        dnssecQuery[pos++] = 0x00;
+        dnssecQuery[pos] = 0x00;
+        return dnssecQuery;
     }
 
     private static List<UpstreamTarget> parseUpstreamTargets(String raw) {
