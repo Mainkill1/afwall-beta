@@ -36,6 +36,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
 
@@ -61,9 +62,12 @@ public class LogHubActivity extends AppCompatActivity {
     private static final int EXPORT_APPLICATION_LOG = 3;
     private static final int EXPORT_APPLICATION_ERRORS = 4;
     private static final int EXPORT_DNS_QUERIES = 5;
+    private static final int EXPORT_DNS_SERVICE_EVENTS = 6;
 
     private final ExecutorService dashboardExecutor = Executors.newSingleThreadExecutor();
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
+    // Root status checks can complete after newer actions; version refreshes so old results stay hidden.
+    private final AtomicInteger dashboardLoadGeneration = new AtomicInteger();
     private TextView dnsDashboardStatus;
     private TextView dnsDashboardDetails;
     private Button dnsDashboardPauseResume;
@@ -92,13 +96,39 @@ public class LogHubActivity extends AppCompatActivity {
                 .setOnClickListener(v -> startActivity(new Intent(this, DnsQueriesActivity.class)));
         findViewById(R.id.log_hub_dns_dashboard_capture_test)
                 .setOnClickListener(v -> runDashboardDnsCaptureTest());
+        findViewById(R.id.log_hub_dns_dashboard_service_events)
+                .setOnClickListener(v -> showDashboardDnsServiceEvents());
+        findViewById(R.id.log_hub_dns_dashboard_validate)
+                .setOnClickListener(v -> runDashboardDnsValidation());
+        findViewById(R.id.log_hub_dns_dashboard_auth_test)
+                .setOnClickListener(v -> runDashboardDnsAuthTest());
+        findViewById(R.id.log_hub_dns_dashboard_benchmark)
+                .setOnClickListener(v -> runDashboardDnsBenchmark());
         dnsDashboardPauseResume.setOnClickListener(v -> runDashboardPauseResume());
         findViewById(R.id.log_hub_dns_dashboard_update)
                 .setOnClickListener(v -> runDashboardBlocklistUpdate());
+        findViewById(R.id.log_hub_dns_dashboard_flush_cache)
+                .setOnClickListener(v -> runDashboardDaemonMaintenance(
+                        "flush_cache",
+                        R.string.dns_dashboard_flush_cache_title,
+                        R.string.dns_dashboard_flush_cache_queued));
+        findViewById(R.id.log_hub_dns_dashboard_flush_logs)
+                .setOnClickListener(v -> runDashboardDaemonMaintenance(
+                        "flush_logs",
+                        R.string.dns_dashboard_flush_logs_title,
+                        R.string.dns_dashboard_flush_logs_queued));
+        findViewById(R.id.log_hub_dns_dashboard_clear_logs)
+                .setOnClickListener(v -> confirmDashboardClearDnsLogs());
         findViewById(R.id.log_hub_dns_dashboard_restart)
                 .setOnClickListener(v -> runDashboardDnsRestart());
         findViewById(R.id.log_hub_dns_dashboard_repair)
                 .setOnClickListener(v -> runDashboardDnsRepair());
+        findViewById(R.id.log_hub_dns_dashboard_module_status)
+                .setOnClickListener(v -> showDashboardDnsModuleStatus());
+        findViewById(R.id.log_hub_dns_dashboard_remove_service)
+                .setOnClickListener(v -> confirmDashboardDnsServiceRemoval());
+        findViewById(R.id.log_hub_dns_dashboard_emergency_cleanup)
+                .setOnClickListener(v -> confirmDashboardEmergencyDnsCleanup());
         findViewById(R.id.log_hub_blocked_requests).setOnClickListener(v -> openBlockedRequests());
         findViewById(R.id.log_hub_dns_queries).setOnClickListener(v -> startActivity(new Intent(this, DnsQueriesActivity.class)));
         findViewById(R.id.log_hub_iptables).setOnClickListener(v -> startActivity(new Intent(this, RulesActivity.class)));
@@ -126,15 +156,19 @@ public class LogHubActivity extends AppCompatActivity {
     }
 
     private void loadDnsDashboard() {
-        if (dashboardExecutor.isShutdown() || dnsDashboardStatus == null || dnsDashboardDetails == null) {
+        if (!canUseDashboardUi()) {
             return;
         }
+        int generation = dashboardLoadGeneration.incrementAndGet();
         dnsDashboardStatus.setText(R.string.dns_dashboard_loading);
         dnsDashboardDetails.setText(R.string.dns_dashboard_loading);
         dashboardExecutor.execute(() -> {
             DnsHijackManager.DnsDashboardSnapshot snapshot =
                     DnsHijackManager.getDashboardSnapshot(this);
             mainHandler.post(() -> {
+                if (!canUseDashboardUi() || generation != dashboardLoadGeneration.get()) {
+                    return;
+                }
                 dnsDashboardStatus.setText(snapshot.statusLine);
                 dnsDashboardDetails.setText(snapshot.detailLine);
                 if (dnsDashboardPauseResume != null) {
@@ -142,13 +176,13 @@ public class LogHubActivity extends AppCompatActivity {
                             ? R.string.dns_dashboard_pause
                             : R.string.dns_dashboard_resume);
                 }
-                loadDnsRedirectStatus(snapshot);
+                loadDnsRedirectStatus(snapshot, generation);
             });
         });
     }
 
-    private void loadDnsRedirectStatus(DnsHijackManager.DnsDashboardSnapshot snapshot) {
-        if (dnsDashboardDetails == null) {
+    private void loadDnsRedirectStatus(DnsHijackManager.DnsDashboardSnapshot snapshot, int generation) {
+        if (!canUseDashboardUi() || generation != dashboardLoadGeneration.get()) {
             return;
         }
         String baseDetails = snapshot == null ? "" : snapshot.detailLine;
@@ -173,16 +207,25 @@ public class LogHubActivity extends AppCompatActivity {
                             ApplicationErrorLog.add(LogHubActivity.this,
                                     "DNS dashboard redirect status needs repair: " + redirectStatus);
                         }
-                        mainHandler.post(() -> dnsDashboardDetails.setText(
-                                baseDetails + "\n" + redirectStatus
-                                        + "\n" + DnsHijackManager.formatDashboardReadiness(
-                                                snapshot, output)));
+                        mainHandler.post(() -> {
+                            if (!canUseDashboardUi()
+                                    || generation != dashboardLoadGeneration.get()) {
+                                return;
+                            }
+                            dnsDashboardDetails.setText(baseDetails + "\n" + redirectStatus
+                                    + "\n" + DnsHijackManager.formatDashboardReadiness(
+                                            snapshot, output));
+                        });
                     }
                 })
                 .run(getApplicationContext(), DnsHijackManager.buildRootRedirectStatusCommands(this));
     }
 
     private void runDashboardPauseResume() {
+        if (!canUseDashboardUi()) {
+            return;
+        }
+        invalidateDashboardLoads();
         boolean pause = G.enableDnsHijack();
         String message = getString(pause
                 ? R.string.dns_dashboard_pause_queued
@@ -192,6 +235,9 @@ public class LogHubActivity extends AppCompatActivity {
             @Override
             public void cbFunc(RootCommand state) {
                 mainHandler.post(() -> {
+                    if (!canUseDashboardUi()) {
+                        return;
+                    }
                     if (state.exitCode == 0) {
                         Api.toast(LogHubActivity.this, message);
                         DnsBlocklistUpdateReceiver.scheduleOrCancel(LogHubActivity.this);
@@ -210,18 +256,24 @@ public class LogHubActivity extends AppCompatActivity {
     }
 
     private void runDashboardBlocklistUpdate() {
-        if (dashboardExecutor.isShutdown()) {
+        if (!canUseDashboardUi()) {
             return;
         }
+        invalidateDashboardLoads();
         dnsDashboardStatus.setText(R.string.dns_hijack_update_blocklists_title);
         dashboardExecutor.execute(() -> {
             DnsBlocklistManager.Result result = DnsBlocklistManager.updateFromConfiguredUrls(this);
-            mainHandler.post(() -> handleDashboardBlocklistResult(result));
+            mainHandler.post(() -> {
+                if (!canUseDashboardUi()) {
+                    return;
+                }
+                handleDashboardBlocklistResult(result);
+            });
         });
     }
 
     private void handleDashboardBlocklistResult(DnsBlocklistManager.Result result) {
-        if (result == null) {
+        if (result == null || !canUseDashboardUi()) {
             return;
         }
         if (!result.failed) {
@@ -243,17 +295,21 @@ public class LogHubActivity extends AppCompatActivity {
     }
 
     private void runDashboardDnsCaptureTest() {
-        if (dashboardExecutor.isShutdown()) {
+        if (!canUseDashboardUi()) {
             return;
         }
         if (!G.enableDnsHijack()) {
             Api.toast(this, getString(R.string.dns_dashboard_disabled));
             return;
         }
+        invalidateDashboardLoads();
         dnsDashboardStatus.setText(R.string.dns_dashboard_capture_test_queued);
         dashboardExecutor.execute(() -> {
             String result = DnsHijackManager.runCaptureProbe(this);
             mainHandler.post(() -> {
+                if (!canUseDashboardUi()) {
+                    return;
+                }
                 new MaterialDialog.Builder(this)
                         .title(R.string.dns_dashboard_capture_test_title)
                         .content(result == null || result.trim().isEmpty()
@@ -267,12 +323,19 @@ public class LogHubActivity extends AppCompatActivity {
     }
 
     private void runDashboardDnsRepair() {
+        if (!canUseDashboardUi()) {
+            return;
+        }
+        invalidateDashboardLoads();
         String message = getString(R.string.dns_diagnostics_repair_queued);
         dnsDashboardStatus.setText(message);
         DnsHijackManager.repairDnsProtection(this, new RootCommand.Callback() {
             @Override
             public void cbFunc(RootCommand state) {
                 mainHandler.post(() -> {
+                    if (!canUseDashboardUi()) {
+                        return;
+                    }
                     if (state.exitCode == 0) {
                         Api.toast(LogHubActivity.this, message);
                     } else {
@@ -284,17 +347,297 @@ public class LogHubActivity extends AppCompatActivity {
         });
     }
 
-    private void runDashboardDnsRestart() {
+    private void confirmDashboardDnsServiceRemoval() {
+        if (!canUseDashboardUi()) {
+            return;
+        }
+        new MaterialDialog.Builder(this)
+                .title(R.string.dns_hijack_remove_service_title)
+                .content(R.string.dns_hijack_remove_service_confirm)
+                .positiveText(R.string.OK)
+                .negativeText(android.R.string.cancel)
+                .onPositive((dialog, which) -> runDashboardDnsServiceRemoval())
+                .show();
+    }
+
+    private void runDashboardDnsServiceRemoval() {
+        if (!canUseDashboardUi()) {
+            return;
+        }
+        invalidateDashboardLoads();
+        G.enableDnsHijack(false);
+        G.dnsHijackBootPersistence(false);
+        Api.setRulesUpToDate(false);
+        DnsBlocklistUpdateReceiver.scheduleOrCancel(this);
+        String message = getString(R.string.dns_dashboard_remove_queued);
+        dnsDashboardStatus.setText(message);
+        ApplicationErrorLog.add(this, "DNS dashboard service removal requested");
+        DnsHijackManager.applyDnsProtectionPreference(this, false, new RootCommand.Callback() {
+            @Override
+            public void cbFunc(RootCommand state) {
+                mainHandler.post(() -> {
+                    if (!canUseDashboardUi()) {
+                        return;
+                    }
+                    if (state.exitCode == 0) {
+                        Api.toast(LogHubActivity.this,
+                                getString(R.string.dns_hijack_disable_complete));
+                    } else {
+                        ApplicationErrorLog.add(LogHubActivity.this,
+                                "DNS dashboard service removal root cleanup failed; leaving DNS settings disabled for fail-open recovery");
+                        Api.toast(LogHubActivity.this,
+                                getString(R.string.dns_hijack_disable_failed));
+                    }
+                    loadDnsDashboard();
+                });
+            }
+        });
+    }
+
+    private void confirmDashboardEmergencyDnsCleanup() {
+        if (!canUseDashboardUi()) {
+            return;
+        }
+        new MaterialDialog.Builder(this)
+                .title(R.string.dns_hijack_emergency_cleanup_title)
+                .content(R.string.dns_hijack_emergency_cleanup_confirm)
+                .positiveText(R.string.OK)
+                .negativeText(android.R.string.cancel)
+                .onPositive((dialog, which) -> runDashboardEmergencyDnsCleanup())
+                .show();
+    }
+
+    private void runDashboardEmergencyDnsCleanup() {
+        if (!canUseDashboardUi()) {
+            return;
+        }
+        invalidateDashboardLoads();
+        dnsDashboardStatus.setText(R.string.dns_hijack_emergency_cleanup_queued);
+        ApplicationErrorLog.add(this, "DNS dashboard emergency cleanup requested");
+        DnsHijackManager.emergencyCleanupDnsProtection(this, new RootCommand.Callback() {
+            @Override
+            public void cbFunc(RootCommand state) {
+                mainHandler.post(() -> {
+                    if (!canUseDashboardUi()) {
+                        return;
+                    }
+                    if (state.exitCode == 0) {
+                        G.enableDnsHijack(false);
+                        G.dnsHijackBootPersistence(false);
+                        Api.setRulesUpToDate(false);
+                        DnsBlocklistUpdateReceiver.scheduleOrCancel(LogHubActivity.this);
+                        Api.toast(LogHubActivity.this,
+                                getString(R.string.dns_hijack_emergency_cleanup_complete));
+                    } else {
+                        Api.toast(LogHubActivity.this,
+                                getString(R.string.dns_hijack_emergency_cleanup_failed));
+                    }
+                    loadDnsDashboard();
+                });
+            }
+        });
+    }
+
+    private void showDashboardDnsServiceEvents() {
+        if (!canUseDashboardUi()) {
+            return;
+        }
+        dashboardExecutor.execute(() -> {
+            String events = DnsHijackManager.getRecentServiceEvents(this);
+            mainHandler.post(() -> {
+                if (!canUseDashboardUi()) {
+                    return;
+                }
+                new MaterialDialog.Builder(this)
+                        .title(R.string.dns_dashboard_service_events_title)
+                        .content(events == null || events.trim().isEmpty()
+                                ? getString(R.string.dns_dashboard_service_events_empty)
+                                : events)
+                        .positiveText(R.string.OK)
+                        .show();
+            });
+        });
+    }
+
+    private void runDashboardDnsValidation() {
+        if (!canUseDashboardUi()) {
+            return;
+        }
         if (!G.enableDnsHijack()) {
             Api.toast(this, getString(R.string.dns_dashboard_disabled));
             return;
         }
+        invalidateDashboardLoads();
+        dnsDashboardStatus.setText(R.string.dns_dashboard_validate_queued);
+        dashboardExecutor.execute(() -> {
+            String result = DnsHijackManager.validateDnsConfiguration(this);
+            mainHandler.post(() -> {
+                if (!canUseDashboardUi()) {
+                    return;
+                }
+                new MaterialDialog.Builder(this)
+                        .title(R.string.dns_dashboard_validate_title)
+                        .content(result == null || result.trim().isEmpty()
+                                ? getString(R.string.no_data_available)
+                                : result)
+                        .positiveText(R.string.OK)
+                        .show();
+                loadDnsDashboard();
+            });
+        });
+    }
+
+    private void runDashboardDnsAuthTest() {
+        if (!canUseDashboardUi()) {
+            return;
+        }
+        if (!G.enableDnsHijack()) {
+            Api.toast(this, getString(R.string.dns_dashboard_disabled));
+            return;
+        }
+        invalidateDashboardLoads();
+        dnsDashboardStatus.setText(R.string.dns_dashboard_auth_test_queued);
+        dashboardExecutor.execute(() -> {
+            String result = DnsHijackManager.runControlAuthSelfTest(this);
+            mainHandler.post(() -> {
+                if (!canUseDashboardUi()) {
+                    return;
+                }
+                new MaterialDialog.Builder(this)
+                        .title(R.string.dns_dashboard_auth_test_title)
+                        .content(result == null || result.trim().isEmpty()
+                                ? getString(R.string.no_data_available)
+                                : result)
+                        .positiveText(R.string.OK)
+                        .show();
+                loadDnsDashboard();
+            });
+        });
+    }
+
+    private void runDashboardDnsBenchmark() {
+        if (!canUseDashboardUi()) {
+            return;
+        }
+        invalidateDashboardLoads();
+        dnsDashboardStatus.setText(R.string.dns_dashboard_benchmark_queued);
+        dashboardExecutor.execute(() -> {
+            String result = DnsHijackManager.benchmarkUpstreams(this);
+            mainHandler.post(() -> {
+                if (!canUseDashboardUi()) {
+                    return;
+                }
+                new MaterialDialog.Builder(this)
+                        .title(R.string.dns_hijack_benchmark_upstreams_title)
+                        .content(result == null || result.trim().isEmpty()
+                                ? getString(R.string.dns_hijack_benchmark_empty)
+                                : result)
+                        .positiveText(R.string.OK)
+                        .show();
+                loadDnsDashboard();
+            });
+        });
+    }
+
+    private void confirmDashboardClearDnsLogs() {
+        if (!canUseDashboardUi()) {
+            return;
+        }
+        new MaterialDialog.Builder(this)
+                .title(R.string.dns_dashboard_clear_logs_title)
+                .content(R.string.dns_dashboard_clear_logs_confirm)
+                .positiveText(R.string.OK)
+                .negativeText(android.R.string.cancel)
+                .onPositive((dialog, which) -> runDashboardDaemonMaintenance(
+                        "clear_logs",
+                        R.string.dns_dashboard_clear_logs_title,
+                        R.string.dns_dashboard_clear_logs_queued))
+                .show();
+    }
+
+    private void runDashboardDaemonMaintenance(String action, int titleRes, int queuedRes) {
+        if (!canUseDashboardUi()) {
+            return;
+        }
+        invalidateDashboardLoads();
+        dnsDashboardStatus.setText(queuedRes);
+        dashboardExecutor.execute(() -> {
+            String result = DnsHijackManager.runDaemonMaintenanceAction(this, action);
+            mainHandler.post(() -> {
+                if (!canUseDashboardUi()) {
+                    return;
+                }
+                new MaterialDialog.Builder(this)
+                        .title(titleRes)
+                        .content(result == null || result.trim().isEmpty()
+                                ? getString(R.string.no_data_available)
+                                : result)
+                        .positiveText(R.string.OK)
+                        .show();
+                loadDnsDashboard();
+            });
+        });
+    }
+
+    private void showDashboardDnsModuleStatus() {
+        if (!canUseDashboardUi()) {
+            return;
+        }
+        invalidateDashboardLoads();
+        dnsDashboardStatus.setText(R.string.dns_hijack_module_status_queued);
+        ApplicationErrorLog.add(this, "DNS Magisk module status requested from Log Hub");
+        new RootCommand()
+                .setLogging(true)
+                .setReopenShell(true)
+                .setFailureToast(R.string.error_su)
+                .setCallback(new RootCommand.Callback() {
+                    @Override
+                    public void cbFunc(RootCommand state) {
+                        mainHandler.post(() -> {
+                            if (!canUseDashboardUi()) {
+                                return;
+                            }
+                            String output = state.res == null ? "" : state.res.toString().trim();
+                            if (state.exitCode == 0) {
+                                ApplicationErrorLog.add(LogHubActivity.this,
+                                        "DNS Magisk module status completed");
+                            } else {
+                                ApplicationErrorLog.add(LogHubActivity.this,
+                                        "DNS Magisk module status failed with exit "
+                                                + state.exitCode);
+                            }
+                            new MaterialDialog.Builder(LogHubActivity.this)
+                                    .title(R.string.dns_hijack_module_status_title)
+                                    .content(output.isEmpty()
+                                            ? getString(R.string.no_data_available)
+                                            : output)
+                                    .positiveText(R.string.OK)
+                                    .show();
+                            loadDnsDashboard();
+                        });
+                    }
+                })
+                .run(this, DnsHijackManager.buildMagiskModuleStatusCommands(this));
+    }
+
+    private void runDashboardDnsRestart() {
+        if (!canUseDashboardUi()) {
+            return;
+        }
+        if (!G.enableDnsHijack()) {
+            Api.toast(this, getString(R.string.dns_dashboard_disabled));
+            return;
+        }
+        invalidateDashboardLoads();
         String message = getString(R.string.dns_diagnostics_restart_queued);
         dnsDashboardStatus.setText(message);
         DnsHijackManager.runSupervisorAction(this, "restart", new RootCommand.Callback() {
             @Override
             public void cbFunc(RootCommand state) {
                 mainHandler.post(() -> {
+                    if (!canUseDashboardUi()) {
+                        return;
+                    }
                     if (state.exitCode == 0) {
                         Api.toast(LogHubActivity.this, message);
                     } else {
@@ -314,6 +657,8 @@ public class LogHubActivity extends AppCompatActivity {
         itemValues.add(EXPORT_BLOCKED_REQUESTS);
         items.add(getString(R.string.dns_queries_title));
         itemValues.add(EXPORT_DNS_QUERIES);
+        items.add(getString(R.string.dns_dashboard_service_events_title));
+        itemValues.add(EXPORT_DNS_SERVICE_EVENTS);
         items.add(getString(R.string.export_logs_iptables_ipv4));
         itemValues.add(EXPORT_IPTABLES_IPV4);
         if (G.enableIPv6()) {
@@ -418,6 +763,9 @@ public class LogHubActivity extends AppCompatActivity {
             }
             File finalAttachment = attachment;
             new Handler(Looper.getMainLooper()).post(() -> {
+                if (!isActivityActive()) {
+                    return;
+                }
                 if (G.zipLogReports() && finalAttachment != null) {
                     sendZippedLogReport(finalAttachment);
                 } else {
@@ -526,6 +874,9 @@ public class LogHubActivity extends AppCompatActivity {
         boolean finalSuccess = success;
         String finalFilename = filename;
         new Handler(Looper.getMainLooper()).post(() -> {
+            if (!isActivityActive()) {
+                return;
+            }
             if (finalSuccess) {
                 Api.toast(this, getString(R.string.export_rules_success) + finalFilename, Toast.LENGTH_LONG);
             } else {
@@ -564,6 +915,13 @@ public class LogHubActivity extends AppCompatActivity {
                     break;
                 case EXPORT_DNS_QUERIES:
                     appendExportSection(builder, getString(R.string.dns_queries_title), buildDnsQueryExport());
+                    break;
+                case EXPORT_DNS_SERVICE_EVENTS:
+                    String serviceEvents = DnsHijackManager.getRecentServiceEvents(this);
+                    appendExportSection(builder, getString(R.string.dns_dashboard_service_events_title),
+                            serviceEvents.trim().isEmpty()
+                                    ? getString(R.string.dns_dashboard_service_events_empty)
+                                    : serviceEvents);
                     break;
             }
         }
@@ -619,5 +977,21 @@ public class LogHubActivity extends AppCompatActivity {
 
     private void initTheme() {
         setTheme(G.getSelectedThemeStyle(this));
+    }
+
+    private boolean canUseDashboardUi() {
+        return isActivityActive()
+                && !dashboardExecutor.isShutdown()
+                && dnsDashboardStatus != null
+                && dnsDashboardDetails != null;
+    }
+
+    private void invalidateDashboardLoads() {
+        dashboardLoadGeneration.incrementAndGet();
+    }
+
+    private boolean isActivityActive() {
+        return !isFinishing()
+                && (Build.VERSION.SDK_INT < Build.VERSION_CODES.JELLY_BEAN_MR1 || !isDestroyed());
     }
 }

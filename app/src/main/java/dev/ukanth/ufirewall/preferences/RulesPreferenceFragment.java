@@ -23,6 +23,7 @@ import com.afollestad.materialdialogs.MaterialDialog;
 
 import java.io.File;
 import java.util.ArrayList;
+import java.util.List;
 import java.util.Locale;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -81,10 +82,34 @@ public class RulesPreferenceFragment extends PreferenceFragment implements
             });
         }
 
+        Preference validateConfig = findPreference("dnsHijackValidateConfig");
+        if (validateConfig != null) {
+            validateConfig.setOnPreferenceClickListener(preference -> {
+                runDnsConfigValidation();
+                return true;
+            });
+        }
+
+        Preference moduleStatus = findPreference("dnsHijackModuleStatus");
+        if (moduleStatus != null) {
+            moduleStatus.setOnPreferenceClickListener(preference -> {
+                showDnsModuleStatus();
+                return true;
+            });
+        }
+
         Preference removeService = findPreference("dnsHijackRemoveService");
         if (removeService != null) {
             removeService.setOnPreferenceClickListener(preference -> {
                 confirmRemoveDnsService();
+                return true;
+            });
+        }
+
+        Preference emergencyCleanup = findPreference("dnsHijackEmergencyCleanup");
+        if (emergencyCleanup != null) {
+            emergencyCleanup.setOnPreferenceClickListener(preference -> {
+                confirmEmergencyDnsCleanup();
                 return true;
             });
         }
@@ -827,7 +852,13 @@ public class RulesPreferenceFragment extends PreferenceFragment implements
                             warnIfPrivateDnsMayBypass();
                         }
                     } else {
-                        setDnsHijackChecked(!enabled);
+                        if (enabled) {
+                            setDnsHijackChecked(false);
+                        } else {
+                            setDnsBootPersistenceChecked(false);
+                            ApplicationErrorLog.add(ctx,
+                                    "DNS disable root cleanup failed; leaving DNS disabled for fail-open recovery");
+                        }
                         Api.toast(ctx, ctx.getString(enabled
                                 ? R.string.dns_hijack_enable_failed
                                 : R.string.dns_hijack_disable_failed));
@@ -878,6 +909,75 @@ public class RulesPreferenceFragment extends PreferenceFragment implements
                 });
             }
         });
+    }
+
+    private void runDnsConfigValidation() {
+        if (ctx == null || !canShowPreferenceDialogs()) {
+            return;
+        }
+        new Thread(() -> {
+            String result = DnsHijackManager.validateDnsConfiguration(ctx);
+            new Handler(Looper.getMainLooper()).post(() -> {
+                if (!canShowPreferenceDialogs()) {
+                    return;
+                }
+                new MaterialDialog.Builder(getActivity())
+                        .title(R.string.dns_hijack_validate_config_title)
+                        .content(result == null || result.trim().isEmpty()
+                                ? getString(R.string.no_data_available)
+                                : result)
+                        .positiveText(R.string.OK)
+                        .show();
+            });
+        }).start();
+    }
+
+    private void showDnsModuleStatus() {
+        if (ctx == null || !canShowPreferenceDialogs()) {
+            return;
+        }
+        final Context appContext = ctx.getApplicationContext();
+        final List<String> commands = DnsHijackManager.buildMagiskModuleStatusCommands(appContext);
+        ApplicationErrorLog.add(appContext, "DNS Magisk module status requested from rules settings");
+        Api.toast(appContext, appContext.getString(R.string.dns_hijack_module_status_queued));
+        new RootCommand()
+                .setLogging(true)
+                .setReopenShell(true)
+                .setFailureToast(R.string.error_su)
+                .setCallback(new RootCommand.Callback() {
+                    @Override
+                    public void cbFunc(RootCommand state) {
+                        new Handler(Looper.getMainLooper()).post(() -> {
+                            if (!canShowPreferenceDialogs()) {
+                                return;
+                            }
+                            String output = state.res == null ? "" : state.res.toString().trim();
+                            if (state.exitCode == 0) {
+                                ApplicationErrorLog.add(appContext, "DNS Magisk module status completed");
+                            } else {
+                                ApplicationErrorLog.add(appContext,
+                                        "DNS Magisk module status failed with exit " + state.exitCode);
+                            }
+                            new MaterialDialog.Builder(getActivity())
+                                    .title(R.string.dns_hijack_module_status_title)
+                                    .content(output.isEmpty()
+                                            ? getString(R.string.no_data_available)
+                                            : output)
+                                    .positiveText(R.string.OK)
+                                    .show();
+                        });
+                    }
+                })
+                .run(appContext, commands);
+    }
+
+    private boolean canShowPreferenceDialogs() {
+        Activity activity = getActivity();
+        return isAdded()
+                && activity != null
+                && !activity.isFinishing()
+                && (Build.VERSION.SDK_INT < Build.VERSION_CODES.JELLY_BEAN_MR1
+                || !activity.isDestroyed());
     }
 
     private void reinstallDnsRedirectsAfterSettingsChange(String key) {
@@ -940,8 +1040,6 @@ public class RulesPreferenceFragment extends PreferenceFragment implements
         if (ctx == null) {
             return;
         }
-        final boolean previousEnabled = G.enableDnsHijack();
-        final boolean previousBootPersistence = G.dnsHijackBootPersistence();
         setDnsHijackChecked(false);
         setDnsBootPersistenceChecked(false);
         Api.setRulesUpToDate(false);
@@ -953,10 +1051,45 @@ public class RulesPreferenceFragment extends PreferenceFragment implements
                     if (state.exitCode == 0) {
                         Api.toast(ctx, ctx.getString(R.string.dns_hijack_disable_complete));
                     } else {
-                        setDnsHijackChecked(previousEnabled);
-                        setDnsBootPersistenceChecked(previousBootPersistence);
-                        DnsBlocklistUpdateReceiver.scheduleOrCancel(ctx);
+                        ApplicationErrorLog.add(ctx,
+                                "DNS service removal root cleanup failed; leaving DNS disabled for fail-open recovery");
                         Api.toast(ctx, ctx.getString(R.string.dns_hijack_disable_failed));
+                    }
+                });
+            }
+        });
+    }
+
+    private void confirmEmergencyDnsCleanup() {
+        if (ctx == null || getActivity() == null) {
+            return;
+        }
+        new MaterialDialog.Builder(getActivity())
+                .title(R.string.dns_hijack_emergency_cleanup_title)
+                .content(R.string.dns_hijack_emergency_cleanup_confirm)
+                .positiveText(R.string.OK)
+                .negativeText(android.R.string.cancel)
+                .onPositive((dialog, which) -> emergencyDnsCleanup())
+                .show();
+    }
+
+    private void emergencyDnsCleanup() {
+        if (ctx == null) {
+            return;
+        }
+        ApplicationErrorLog.add(ctx, "DNS emergency cleanup requested from Rules preferences");
+        DnsHijackManager.emergencyCleanupDnsProtection(ctx, new RootCommand.Callback() {
+            @Override
+            public void cbFunc(RootCommand state) {
+                new Handler(Looper.getMainLooper()).post(() -> {
+                    if (state.exitCode == 0) {
+                        setDnsHijackChecked(false);
+                        setDnsBootPersistenceChecked(false);
+                        Api.setRulesUpToDate(false);
+                        DnsBlocklistUpdateReceiver.scheduleOrCancel(ctx);
+                        Api.toast(ctx, ctx.getString(R.string.dns_hijack_emergency_cleanup_complete));
+                    } else {
+                        Api.toast(ctx, ctx.getString(R.string.dns_hijack_emergency_cleanup_failed));
                     }
                 });
             }

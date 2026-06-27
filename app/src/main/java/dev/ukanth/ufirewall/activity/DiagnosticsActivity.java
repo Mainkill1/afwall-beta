@@ -5,9 +5,12 @@ import android.content.ActivityNotFoundException;
 import android.content.Context;
 import android.content.Intent;
 import android.net.Uri;
+import android.os.Build;
 import android.os.Bundle;
 import android.view.MenuItem;
 import android.view.SubMenu;
+
+import com.afollestad.materialdialogs.MaterialDialog;
 
 import java.io.IOException;
 import java.io.OutputStream;
@@ -18,9 +21,11 @@ import java.util.Locale;
 
 import dev.ukanth.ufirewall.Api;
 import dev.ukanth.ufirewall.R;
+import dev.ukanth.ufirewall.broadcast.DnsBlocklistUpdateReceiver;
 import dev.ukanth.ufirewall.dns.DnsHijackManager;
 import dev.ukanth.ufirewall.service.RootCommand;
 import dev.ukanth.ufirewall.util.ApplicationErrorLog;
+import dev.ukanth.ufirewall.util.G;
 
 public class DiagnosticsActivity extends RulesActivity {
 
@@ -30,6 +35,8 @@ public class DiagnosticsActivity extends RulesActivity {
     private static final int MENU_DNS_STOP = 103;
     private static final int MENU_DNS_REPAIR = 104;
     private static final int MENU_DNS_EXPORT = 105;
+    private static final int MENU_DNS_EMERGENCY_CLEANUP = 106;
+    private static final int MENU_DNS_AUTH_TEST = 107;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -44,6 +51,10 @@ public class DiagnosticsActivity extends RulesActivity {
         sub.add(0, MENU_DNS_RELOAD, 0, R.string.dns_diagnostics_reload).setIcon(R.drawable.ic_refresh);
         sub.add(0, MENU_DNS_RESTART, 0, R.string.dns_diagnostics_restart).setIcon(R.drawable.ic_apply_menu);
         sub.add(0, MENU_DNS_STOP, 0, R.string.dns_diagnostics_stop).setIcon(R.drawable.ic_clearlog);
+        sub.add(0, MENU_DNS_AUTH_TEST, 0, R.string.dns_dashboard_auth_test)
+                .setIcon(R.drawable.ic_apply_menu);
+        sub.add(0, MENU_DNS_EMERGENCY_CLEANUP, 0, R.string.dns_diagnostics_emergency_cleanup)
+                .setIcon(R.drawable.ic_clearlog);
         sub.add(0, MENU_DNS_EXPORT, 0, R.string.dns_diagnostics_export).setIcon(R.drawable.ic_export);
     }
 
@@ -76,6 +87,8 @@ public class DiagnosticsActivity extends RulesActivity {
     private void appendDnsDiagnostics(final Context ctx) {
         writeHeading(result, true, getString(R.string.dns_diagnostics_title));
         result.append(DnsHijackManager.collectLocalDiagnostics(ctx));
+        result.append("\n[control auth self-test]\n");
+        result.append(DnsHijackManager.runControlAuthSelfTest(ctx));
         updateLoadingState(getString(R.string.dns_diagnostics_loading));
         new RootCommand()
                 .setLogging(true)
@@ -83,6 +96,9 @@ public class DiagnosticsActivity extends RulesActivity {
                 .setCallback(new RootCommand.Callback() {
                     @Override
                     public void cbFunc(RootCommand state) {
+                        if (!isActivityActive()) {
+                            return;
+                        }
                         result.append("\n[root checks]\n");
                         if (state.res != null) {
                             result.append(state.res);
@@ -105,10 +121,16 @@ public class DiagnosticsActivity extends RulesActivity {
                 runDnsAction("reload", getString(R.string.dns_diagnostics_reload_queued));
                 return true;
             case MENU_DNS_RESTART:
-                runDnsAction("restart", getString(R.string.dns_diagnostics_restart_queued));
+                runDnsRestart();
                 return true;
             case MENU_DNS_STOP:
                 runDnsAction("stop", getString(R.string.dns_diagnostics_stop_queued));
+                return true;
+            case MENU_DNS_AUTH_TEST:
+                runDnsAuthTest();
+                return true;
+            case MENU_DNS_EMERGENCY_CLEANUP:
+                confirmDnsEmergencyCleanup();
                 return true;
             case MENU_DNS_EXPORT:
                 startDnsDiagnosticsExportPicker();
@@ -133,6 +155,30 @@ public class DiagnosticsActivity extends RulesActivity {
             @Override
             public void cbFunc(RootCommand state) {
                 runOnUiThread(() -> {
+                    if (!isActivityActive()) {
+                        return;
+                    }
+                    if (state.exitCode == 0) {
+                        Api.toast(DiagnosticsActivity.this, successMessage);
+                    } else {
+                        Api.toast(DiagnosticsActivity.this, getString(R.string.error_apply));
+                    }
+                    populateData(DiagnosticsActivity.this);
+                });
+            }
+        });
+    }
+
+    private void runDnsRestart() {
+        String successMessage = getString(R.string.dns_diagnostics_restart_queued);
+        updateLoadingState(successMessage);
+        DnsHijackManager.repairDnsProtection(this, new RootCommand.Callback() {
+            @Override
+            public void cbFunc(RootCommand state) {
+                runOnUiThread(() -> {
+                    if (!isActivityActive()) {
+                        return;
+                    }
                     if (state.exitCode == 0) {
                         Api.toast(DiagnosticsActivity.this, successMessage);
                     } else {
@@ -150,10 +196,70 @@ public class DiagnosticsActivity extends RulesActivity {
             @Override
             public void cbFunc(RootCommand state) {
                 runOnUiThread(() -> {
+                    if (!isActivityActive()) {
+                        return;
+                    }
                     if (state.exitCode == 0) {
                         Api.toast(DiagnosticsActivity.this, successMessage);
                     } else {
                         Api.toast(DiagnosticsActivity.this, getString(R.string.error_apply));
+                    }
+                    populateData(DiagnosticsActivity.this);
+                });
+            }
+        });
+    }
+
+    private void runDnsAuthTest() {
+        updateLoadingState(getString(R.string.dns_dashboard_auth_test_queued));
+        new Thread(() -> {
+            String result = DnsHijackManager.runControlAuthSelfTest(this);
+            runOnUiThread(() -> {
+                if (!isActivityActive()) {
+                    return;
+                }
+                new MaterialDialog.Builder(this)
+                        .title(R.string.dns_dashboard_auth_test_title)
+                        .content(result == null || result.trim().isEmpty()
+                                ? getString(R.string.no_data_available)
+                                : result)
+                        .positiveText(R.string.OK)
+                        .show();
+                populateData(DiagnosticsActivity.this);
+            });
+        }, "dns-auth-test").start();
+    }
+
+    private void confirmDnsEmergencyCleanup() {
+        new MaterialDialog.Builder(this)
+                .title(R.string.dns_hijack_emergency_cleanup_title)
+                .content(R.string.dns_hijack_emergency_cleanup_confirm)
+                .positiveText(R.string.OK)
+                .negativeText(android.R.string.cancel)
+                .onPositive((dialog, which) -> runDnsEmergencyCleanup())
+                .show();
+    }
+
+    private void runDnsEmergencyCleanup() {
+        updateLoadingState(getString(R.string.dns_hijack_emergency_cleanup_queued));
+        ApplicationErrorLog.add(this, "DNS emergency cleanup requested from diagnostics");
+        DnsHijackManager.emergencyCleanupDnsProtection(this, new RootCommand.Callback() {
+            @Override
+            public void cbFunc(RootCommand state) {
+                runOnUiThread(() -> {
+                    if (!isActivityActive()) {
+                        return;
+                    }
+                    if (state.exitCode == 0) {
+                        G.enableDnsHijack(false);
+                        G.dnsHijackBootPersistence(false);
+                        Api.setRulesUpToDate(false);
+                        DnsBlocklistUpdateReceiver.scheduleOrCancel(DiagnosticsActivity.this);
+                        Api.toast(DiagnosticsActivity.this,
+                                getString(R.string.dns_hijack_emergency_cleanup_complete));
+                    } else {
+                        Api.toast(DiagnosticsActivity.this,
+                                getString(R.string.dns_hijack_emergency_cleanup_failed));
                     }
                     populateData(DiagnosticsActivity.this);
                 });
@@ -229,5 +335,10 @@ public class DiagnosticsActivity extends RulesActivity {
             return dataText;
         }
         return result == null ? "" : result.toString();
+    }
+
+    private boolean isActivityActive() {
+        return !isFinishing()
+                && (Build.VERSION.SDK_INT < Build.VERSION_CODES.JELLY_BEAN_MR1 || !isDestroyed());
     }
 }

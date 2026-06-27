@@ -201,9 +201,25 @@
             android:title="@string/dns_hijack_repair_service_title" />
 
         <Preference
+            android:dependency="enableDnsHijack"
+            android:key="dnsHijackValidateConfig"
+            android:summary="@string/dns_hijack_validate_config_summary"
+            android:title="@string/dns_hijack_validate_config_title" />
+
+        <Preference
+            android:key="dnsHijackModuleStatus"
+            android:summary="@string/dns_hijack_module_status_summary"
+            android:title="@string/dns_hijack_module_status_title" />
+
+        <Preference
             android:key="dnsHijackRemoveService"
             android:summary="@string/dns_hijack_remove_service_summary"
             android:title="@string/dns_hijack_remove_service_title" />
+
+        <Preference
+            android:key="dnsHijackEmergencyCleanup"
+            android:summary="@string/dns_hijack_emergency_cleanup_summary"
+            android:title="@string/dns_hijack_emergency_cleanup_title" />
 
         <EditTextPreference
             android:defaultValue="2500"

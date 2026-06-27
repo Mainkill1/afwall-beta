@@ -1353,7 +1353,6 @@ public final class Api {
         }
         boolean firstLit = true;
         for (String s : in) {
-            s = s + waitTime;
             if (s.matches("#LITERAL# .*")) {
                 if (firstLit) {
                     // export vars for the benefit of custom scripts
@@ -1364,11 +1363,12 @@ public final class Api {
                             + "export IPV6=" + (ipv6 ? "1" : "0") + "; "
                             + "true");
                 }
+                // Literal commands may be supervisor/control scripts and must not inherit iptables flags.
                 out.add(s.replaceFirst("^#LITERAL# ", ""));
             } else if (s.matches("#NOCHK# .*")) {
-                out.add(s.replaceFirst("^#NOCHK# ", "#NOCHK# " + ipPath + " "));
+                out.add(s.replaceFirst("^#NOCHK# ", "#NOCHK# " + ipPath + " ") + waitTime);
             } else {
-                out.add(ipPath + " " + s);
+                out.add(ipPath + " " + s + waitTime);
             }
         }
     }

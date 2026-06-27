@@ -66,6 +66,13 @@
 #define UID_CACHE_SIZE 128
 #define UID_CACHE_TTL 15
 #define AFWALL_DNSD_SOCKET_MARK 0xAF053
+#define AFWALL_DNSD_CHAIN_V4 "afwall-dns"
+#define AFWALL_DNSD_CHAIN_V4_PRE "afwall-dns-pre"
+#define AFWALL_DNSD_CHAIN_V6 "afwall-dns6"
+#define AFWALL_DNSD_CHAIN_V6_PRE "afwall-dns6-pre"
+#define AFWALL_DNSD_CHAIN_FILTER "afwall-dns-out"
+#define AFWALL_DNSD_NFT_TABLE_V4 "afwall_dns"
+#define AFWALL_DNSD_NFT_TABLE_V6 "afwall_dns6"
 #define DNS_QTYPE_A 1
 #define DNS_QTYPE_OPT 41
 #define DNS_QTYPE_AAAA 28
@@ -211,12 +218,17 @@ typedef struct {
     int safe_search;
     int dnssec_request;
     int dnssec_auth_required;
+    int control_socket_uid;
     char control_socket[256];
+    char control_token[128];
     char log_file[256];
+    char event_log_file[256];
     char cache_file[256];
     char pid_file[256];
     char heartbeat_file[256];
     char mark_status_file[256];
+    char iptables_path[256];
+    char ip6tables_path[256];
     safe_search_target_t safe_google;
     safe_search_target_t safe_youtube;
     safe_search_target_t safe_bing;
@@ -379,6 +391,7 @@ static pthread_t g_log_thread;
 static bool g_log_thread_started = false;
 static volatile sig_atomic_t g_log_thread_running = 0;
 static char g_log_file_path[256];
+static char g_event_log_file_path[256];
 static bool g_log_persistence_enabled = true;
 static cache_entry_t *g_cache = NULL;
 static int g_cache_capacity = 0;
@@ -396,9 +409,30 @@ static int g_socket_mark_supported = 0;
 static int g_socket_mark_errno = 0;
 
 static void write_control_response(int fd, const char *fmt, ...);
+static int control_peer_uid_enforced(int expected_uid);
+static bool shell_command_word_safe(const char *value);
+static int cleanup_tool_ready(const char *configured, const char *fallback);
 
 static bool config_bool_value(const char *value) {
     return value != NULL && atoi(value) != 0;
+}
+
+static bool valid_control_token_value(const char *token) {
+    size_t i;
+    size_t len;
+    if (token == NULL) {
+        return false;
+    }
+    len = strlen(token);
+    if (len < 64 || len > 96) {
+        return false;
+    }
+    for (i = 0; i < len; i++) {
+        if (!isxdigit((unsigned char) token[i])) {
+            return false;
+        }
+    }
+    return true;
 }
 
 static uint64_t now_seconds(void) {
@@ -486,6 +520,31 @@ static void safe_copy(char *dst, size_t dst_len, const char *src) {
     }
     strncpy(dst, src, dst_len - 1);
     dst[dst_len - 1] = '\0';
+}
+
+static void set_event_log_output(const char *path) {
+    safe_copy(g_event_log_file_path, sizeof(g_event_log_file_path),
+            path == NULL ? "" : path);
+}
+
+static void write_event_log(const char *level, const char *fmt, ...) {
+    FILE *fp;
+    va_list ap;
+    if (g_event_log_file_path[0] == '\0' || fmt == NULL) {
+        return;
+    }
+    fp = fopen(g_event_log_file_path, "a");
+    if (fp == NULL) {
+        return;
+    }
+    fprintf(fp, "%llu %s ", (unsigned long long) now_seconds(),
+            level == NULL || level[0] == '\0' ? "info" : level);
+    va_start(ap, fmt);
+    vfprintf(fp, fmt, ap);
+    va_end(ap);
+    fputc('\n', fp);
+    fclose(fp);
+    chmod(g_event_log_file_path, 0644);
 }
 
 static uint32_t hash_domain_cache_key(const char *domain, uint16_t qtype, bool dnssec) {
@@ -666,6 +725,17 @@ static int cache_entry_count_by_type(bool negative) {
         if (g_cache[i].used && g_cache[i].expires_at > now && g_cache[i].negative == negative) {
             count++;
         }
+    }
+    return count;
+}
+
+static int clear_cache_entries(void) {
+    int count = cache_entry_count();
+    if (g_cache != NULL && g_cache_capacity > 0) {
+        memset(g_cache, 0, sizeof(cache_entry_t) * (size_t) g_cache_capacity);
+    }
+    if (g_cfg.cache_file[0] != '\0') {
+        unlink(g_cfg.cache_file);
     }
     return count;
 }
@@ -854,6 +924,35 @@ static void clear_log_ring(void) {
     g_log_pos = 0;
     g_log_flushed_seq = g_log_seq;
     pthread_mutex_unlock(&g_log_mutex);
+}
+
+static bool clear_query_logs(void) {
+    FILE *fp;
+    char log_file[sizeof(g_log_file_path)];
+    bool has_file;
+
+    pthread_mutex_lock(&g_log_flush_mutex);
+    pthread_mutex_lock(&g_log_mutex);
+    memset(g_logs, 0, sizeof(g_logs));
+    g_log_pos = 0;
+    g_log_flushed_seq = g_log_seq;
+    safe_copy(log_file, sizeof(log_file), g_log_file_path);
+    has_file = g_log_persistence_enabled && log_file[0] != '\0';
+    pthread_mutex_unlock(&g_log_mutex);
+
+    if (!has_file) {
+        pthread_mutex_unlock(&g_log_flush_mutex);
+        return true;
+    }
+    fp = fopen(log_file, "w");
+    if (fp == NULL) {
+        pthread_mutex_unlock(&g_log_flush_mutex);
+        return false;
+    }
+    fclose(fp);
+    chmod(log_file, 0644);
+    pthread_mutex_unlock(&g_log_flush_mutex);
+    return true;
 }
 
 static void free_regex_rule_list(regex_rule_list_t *list) {
@@ -3068,11 +3167,21 @@ static void update_socket_mark_status(void) {
         g_socket_mark_supported = 0;
         g_socket_mark_errno = errno;
         write_socket_mark_status_file();
+        write_event_log("warn", "daemon socket mark probe failed errno=%d failures=%llu",
+                g_socket_mark_errno, (unsigned long long) g_stats.socket_mark_failures);
         return;
     }
     g_socket_mark_supported = set_socket_mark(fd, false) ? 1 : 0;
     close(fd);
     write_socket_mark_status_file();
+    if (g_socket_mark_supported) {
+        write_event_log("info", "daemon socket mark supported mark=0x%x failures=%llu",
+                AFWALL_DNSD_SOCKET_MARK,
+                (unsigned long long) g_stats.socket_mark_failures);
+    } else {
+        write_event_log("warn", "daemon socket mark unavailable errno=%d failures=%llu",
+                g_socket_mark_errno, (unsigned long long) g_stats.socket_mark_failures);
+    }
 }
 
 static void mark_upstream_socket(int fd) {
@@ -3692,7 +3801,10 @@ static void default_config(config_t *cfg) {
     cfg->query_logging = 1;
     cfg->persist_query_logs = 1;
     cfg->dnssec_request = 0;
+    cfg->control_socket_uid = -1;
     safe_copy(cfg->control_socket, sizeof(cfg->control_socket), "/data/local/tmp/afwall_dnsd.sock");
+    safe_copy(cfg->iptables_path, sizeof(cfg->iptables_path), "iptables");
+    safe_copy(cfg->ip6tables_path, sizeof(cfg->ip6tables_path), "ip6tables");
     cfg->upstream_count = 1;
     init_upstream_runtime(&cfg->upstreams[0]);
     safe_copy(cfg->upstreams[0].host, sizeof(cfg->upstreams[0].host), "1.1.1.1");
@@ -3903,6 +4015,13 @@ static bool load_config(const char *path, config_t *new_cfg) {
             }
         } else if (strcmp(key, "control_socket") == 0) {
             safe_copy(new_cfg->control_socket, sizeof(new_cfg->control_socket), value);
+        } else if (strcmp(key, "control_socket_uid") == 0) {
+            int uid = atoi(value);
+            new_cfg->control_socket_uid = uid >= 0 ? uid : -1;
+        } else if (strcmp(key, "control_token") == 0) {
+            safe_copy(new_cfg->control_token, sizeof(new_cfg->control_token), value);
+        } else if (strcmp(key, "event_log_file") == 0) {
+            safe_copy(new_cfg->event_log_file, sizeof(new_cfg->event_log_file), value);
         } else if (strcmp(key, "log_file") == 0) {
             safe_copy(new_cfg->log_file, sizeof(new_cfg->log_file), value);
         } else if (strcmp(key, "cache_file") == 0) {
@@ -3913,6 +4032,10 @@ static bool load_config(const char *path, config_t *new_cfg) {
             safe_copy(new_cfg->heartbeat_file, sizeof(new_cfg->heartbeat_file), value);
         } else if (strcmp(key, "mark_status_file") == 0) {
             safe_copy(new_cfg->mark_status_file, sizeof(new_cfg->mark_status_file), value);
+        } else if (strcmp(key, "iptables_path") == 0) {
+            safe_copy(new_cfg->iptables_path, sizeof(new_cfg->iptables_path), value);
+        } else if (strcmp(key, "ip6tables_path") == 0) {
+            safe_copy(new_cfg->ip6tables_path, sizeof(new_cfg->ip6tables_path), value);
         } else if (strcmp(key, "fail_open") == 0) {
             new_cfg->fail_open = atoi(value) != 0;
         } else if (strcmp(key, "strict_mode") == 0) {
@@ -4066,6 +4189,22 @@ static bool load_config(const char *path, config_t *new_cfg) {
         }
     }
     fclose(fp);
+    /*
+     * The control socket can reload policy and mutate temporary DNS rules.
+     * Treat app-owned socket permissions and the per-install token as required
+     * config, not best-effort hardening, so stale or hand-edited configs cannot
+     * expose daemon control to other local apps.
+     */
+    if (new_cfg->control_socket[0] == '\0'
+            || new_cfg->control_socket_uid < 0
+            || !valid_control_token_value(new_cfg->control_token)) {
+        write_event_log("error",
+                "configuration rejected: control socket auth invalid socket=%d uid=%d token=%d",
+                new_cfg->control_socket[0] != '\0' ? 1 : 0,
+                new_cfg->control_socket_uid >= 0 ? 1 : 0,
+                valid_control_token_value(new_cfg->control_token) ? 1 : 0);
+        return false;
+    }
     if (new_cfg->upstream_count == 0) {
         if (upstream_configured) {
             return false;
@@ -4096,6 +4235,40 @@ static bool load_config(const char *path, config_t *new_cfg) {
     new_cfg->resolver_scope_hash = compute_resolver_scope_hash(new_cfg);
     new_cfg->generation = g_cfg.generation + 1;
     return true;
+}
+
+static void prime_event_log_from_config(const char *path) {
+    FILE *fp;
+    char line[1024];
+    if (path == NULL || path[0] == '\0') {
+        return;
+    }
+    fp = fopen(path, "r");
+    if (fp == NULL) {
+        return;
+    }
+    while (fgets(line, sizeof(line), fp) != NULL) {
+        char *eq;
+        char *key = line;
+        char *value;
+        trim(line);
+        if (line[0] == '\0' || line[0] == '#') {
+            continue;
+        }
+        eq = strchr(line, '=');
+        if (eq == NULL) {
+            continue;
+        }
+        *eq = '\0';
+        value = eq + 1;
+        trim(key);
+        trim(value);
+        if (strcmp(key, "event_log_file") == 0) {
+            set_event_log_output(value);
+            break;
+        }
+    }
+    fclose(fp);
 }
 
 static bool load_string_rule_file(string_rule_list_t *rules, const char *path) {
@@ -4161,12 +4334,16 @@ static bool reload_config(void) {
     bool migrated_cache = false;
     if (next == NULL) {
         g_stats.reload_failures++;
+        write_event_log("error", "configuration reload allocation failed failures=%llu",
+                (unsigned long long) g_stats.reload_failures);
         return false;
     }
     if (!load_config(g_config_path, next)) {
         free_config_dynamic(next);
         free(next);
         g_stats.reload_failures++;
+        write_event_log("error", "configuration reload rejected path=%s failures=%llu",
+                g_config_path, (unsigned long long) g_stats.reload_failures);
         return false;
     }
     if (next->cache_size > 0) {
@@ -4175,6 +4352,8 @@ static bool reload_config(void) {
             free_config_dynamic(next);
             free(next);
             g_stats.reload_failures++;
+            write_event_log("error", "configuration reload cache allocation failed size=%d failures=%llu",
+                    next->cache_size, (unsigned long long) g_stats.reload_failures);
             return false;
         }
     }
@@ -4207,12 +4386,21 @@ static bool reload_config(void) {
     free(g_cache);
     g_cache = next_cache;
     g_cache_capacity = g_cfg.cache_size;
+    set_event_log_output(g_cfg.event_log_file);
     set_log_output(g_cfg.log_file, g_cfg.persist_query_logs != 0);
     update_socket_mark_status();
     if (!g_cfg.query_logging) {
         clear_log_ring();
     }
     g_stats.reloads++;
+    write_event_log("info",
+            "configuration active generation=%llu port=%d upstreams=%d split_upstreams=%d query_logging=%d persist_query_logs=%d",
+            (unsigned long long) g_cfg.generation,
+            g_cfg.listen_port,
+            g_cfg.upstream_count,
+            g_cfg.split_upstream_count,
+            g_cfg.query_logging,
+            g_cfg.persist_query_logs);
     return true;
 }
 
@@ -4226,6 +4414,8 @@ static void write_validate_response(int client) {
     g_stats.validations++;
     if (candidate == NULL) {
         g_stats.validation_failures++;
+        write_event_log("error", "configuration validation allocation failed failures=%llu",
+                (unsigned long long) g_stats.validation_failures);
         write_control_response(client,
                 "validate=0\nstatus=allocation_failed\nactive_generation=%llu\n"
                 "validations=%llu\nvalidation_failures=%llu\n",
@@ -4238,6 +4428,9 @@ static void write_validate_response(int client) {
         free_config_dynamic(candidate);
         free(candidate);
         g_stats.validation_failures++;
+        write_event_log("error", "configuration validation rejected active_generation=%llu failures=%llu",
+                (unsigned long long) g_cfg.generation,
+                (unsigned long long) g_stats.validation_failures);
         write_control_response(client,
                 "validate=0\nstatus=config_rejected\nactive_generation=%llu\n"
                 "validations=%llu\nvalidation_failures=%llu\n",
@@ -4250,13 +4443,19 @@ static void write_validate_response(int client) {
     candidate_reusable_udp_sockets = reusable_udp_upstream_socket_count(candidate);
     active_cache_entries = cache_entry_count();
     read_log_stats(&log_ring_entries, &log_unflushed_entries);
+    write_event_log("info", "configuration validation accepted candidate_generation=%llu",
+            (unsigned long long) candidate->generation);
     write_control_response(client,
             "validate=1\nstatus=ok\nactive_generation=%llu\ncandidate_generation=%llu\n"
             "validations=%llu\nvalidation_failures=%llu\n"
             "runtime_ready=%d\nudp_listener=%d\ntcp_listener=%d\ncontrol_listener=%d\n"
             "udp_listener_v4=%d\nudp_listener_v6=%d\n"
             "tcp_listener_v4=%d\ntcp_listener_v6=%d\n"
-            "control_socket_configured=%d\npid_file_configured=%d\nheartbeat_file_configured=%d\n"
+            "control_socket_configured=%d\ncontrol_socket_uid=%d\ncontrol_auth_configured=%d\n"
+            "control_peer_uid_enforced=%d\n"
+            "fail_open_control_supported=1\n"
+            "cleanup_iptables_safe=%d\ncleanup_ip6tables_safe=%d\n"
+            "pid_file_configured=%d\nheartbeat_file_configured=%d\n"
             "mark_status_file_configured=%d\n"
             "daemon_socket_mark=0x%x\nsocket_mark_supported=%d\n"
             "socket_mark_errno=%d\nsocket_mark_failures=%llu\n"
@@ -4292,6 +4491,11 @@ static void write_validate_response(int client) {
             g_tcp_listener_v4_ready,
             g_tcp_listener_v6_ready,
             candidate->control_socket[0] != '\0' ? 1 : 0,
+            candidate->control_socket_uid,
+            valid_control_token_value(candidate->control_token) ? 1 : 0,
+            control_peer_uid_enforced(candidate->control_socket_uid),
+            cleanup_tool_ready(candidate->iptables_path, "iptables"),
+            cleanup_tool_ready(candidate->ip6tables_path, "ip6tables"),
             candidate->pid_file[0] != '\0' ? 1 : 0,
             candidate->heartbeat_file[0] != '\0' ? 1 : 0,
             candidate->mark_status_file[0] != '\0' ? 1 : 0,
@@ -4453,7 +4657,7 @@ static int create_tcp_socket6(int port) {
     return fd;
 }
 
-static int create_control_socket(const char *path) {
+static int create_control_socket(const char *path, int owner_uid) {
     int fd;
     struct sockaddr_un addr;
     if (path == NULL || path[0] == '\0') {
@@ -4471,8 +4675,152 @@ static int create_control_socket(const char *path) {
         close(fd);
         return -1;
     }
-    chmod(path, 0666);
+    if (owner_uid >= 0) {
+        if (chown(path, (uid_t) owner_uid, (gid_t) owner_uid) != 0) {
+            write_event_log("warn", "control socket owner update failed path=%s uid=%d errno=%d",
+                    path, owner_uid, errno);
+        }
+    }
+    if (chmod(path, 0600) != 0) {
+        write_event_log("warn", "control socket permission update failed path=%s errno=%d",
+                path, errno);
+    }
     return fd;
+}
+
+static bool control_peer_authorized(int client, int expected_uid) {
+#ifdef SO_PEERCRED
+    struct ucred cred;
+    socklen_t cred_len = sizeof(cred);
+    if (client < 0 || expected_uid < 0) {
+        return false;
+    }
+    memset(&cred, 0, sizeof(cred));
+    if (getsockopt(client, SOL_SOCKET, SO_PEERCRED, &cred, &cred_len) != 0) {
+        write_event_log("warn", "control peer credential lookup failed errno=%d", errno);
+        return false;
+    }
+    if ((int) cred.uid == expected_uid) {
+        return true;
+    }
+    write_event_log("warn",
+            "control command rejected from uid=%d pid=%d expected_uid=%d",
+            (int) cred.uid, (int) cred.pid, expected_uid);
+    return false;
+#else
+    (void) client;
+    (void) expected_uid;
+    write_event_log("error", "control peer credential lookup unavailable");
+    return false;
+#endif
+}
+
+static int control_peer_uid_enforced(int expected_uid) {
+#ifdef SO_PEERCRED
+    return expected_uid >= 0 ? 1 : 0;
+#else
+    (void) expected_uid;
+    return 0;
+#endif
+}
+
+static bool shell_command_word_safe(const char *value) {
+    const unsigned char *p = (const unsigned char *) value;
+    if (value == NULL || value[0] == '\0') {
+        return false;
+    }
+    while (*p != '\0') {
+        if (!(isalnum(*p) || *p == '/' || *p == '.' || *p == '_' || *p == '-')) {
+            return false;
+        }
+        p++;
+    }
+    return true;
+}
+
+static bool shell_command_available(const char *tool) {
+    char cmd[512];
+    if (!shell_command_word_safe(tool)) {
+        return false;
+    }
+    if (strchr(tool, '/') != NULL) {
+        return access(tool, X_OK) == 0;
+    }
+    snprintf(cmd, sizeof(cmd), "command -v %s >/dev/null 2>&1", tool);
+    return system(cmd) == 0;
+}
+
+static const char *cleanup_tool_path(const char *configured, const char *fallback) {
+    if (shell_command_available(configured)) {
+        return configured;
+    }
+    return fallback;
+}
+
+static int cleanup_tool_ready(const char *configured, const char *fallback) {
+    const char *tool = cleanup_tool_path(configured, fallback);
+    return shell_command_available(tool) ? 1 : 0;
+}
+
+static int run_cleanup_command(const char *tool, const char *args) {
+    char cmd[768];
+    if (!shell_command_available(tool) || args == NULL || args[0] == '\0') {
+        return 0;
+    }
+    snprintf(cmd, sizeof(cmd), "%s %s >/dev/null 2>&1 || true", tool, args);
+    (void) system(cmd);
+    return 1;
+}
+
+static int cleanup_redirect_family(const char *tool, const char *chain, const char *pre_chain) {
+    char args[256];
+    int commands = 0;
+    snprintf(args, sizeof(args), "-t nat -D OUTPUT -p udp --dport 53 -j %s", chain);
+    commands += run_cleanup_command(tool, args);
+    snprintf(args, sizeof(args), "-t nat -D OUTPUT -p tcp --dport 53 -j %s", chain);
+    commands += run_cleanup_command(tool, args);
+    snprintf(args, sizeof(args), "-t nat -D PREROUTING -p udp --dport 53 -j %s", pre_chain);
+    commands += run_cleanup_command(tool, args);
+    snprintf(args, sizeof(args), "-t nat -D PREROUTING -p tcp --dport 53 -j %s", pre_chain);
+    commands += run_cleanup_command(tool, args);
+    snprintf(args, sizeof(args), "-t nat -F %s", chain);
+    commands += run_cleanup_command(tool, args);
+    snprintf(args, sizeof(args), "-t nat -F %s", pre_chain);
+    commands += run_cleanup_command(tool, args);
+    snprintf(args, sizeof(args), "-t nat -X %s", chain);
+    commands += run_cleanup_command(tool, args);
+    snprintf(args, sizeof(args), "-t nat -X %s", pre_chain);
+    commands += run_cleanup_command(tool, args);
+    return commands;
+}
+
+static int cleanup_dns_redirects_from_daemon(void) {
+    char args[256];
+    const char *iptables = cleanup_tool_path(g_cfg.iptables_path, "iptables");
+    const char *ip6tables = cleanup_tool_path(g_cfg.ip6tables_path, "ip6tables");
+    int commands = 0;
+    snprintf(args, sizeof(args), "-D OUTPUT -m mark --mark 0x%x -j ACCEPT",
+            AFWALL_DNSD_SOCKET_MARK);
+    commands += run_cleanup_command(iptables, args);
+    commands += run_cleanup_command(ip6tables, args);
+    snprintf(args, sizeof(args), "-D OUTPUT -j %s", AFWALL_DNSD_CHAIN_FILTER);
+    commands += run_cleanup_command(iptables, args);
+    commands += run_cleanup_command(ip6tables, args);
+    snprintf(args, sizeof(args), "-F %s", AFWALL_DNSD_CHAIN_FILTER);
+    commands += run_cleanup_command(iptables, args);
+    commands += run_cleanup_command(ip6tables, args);
+    snprintf(args, sizeof(args), "-X %s", AFWALL_DNSD_CHAIN_FILTER);
+    commands += run_cleanup_command(iptables, args);
+    commands += run_cleanup_command(ip6tables, args);
+    commands += cleanup_redirect_family(iptables,
+            AFWALL_DNSD_CHAIN_V4, AFWALL_DNSD_CHAIN_V4_PRE);
+    commands += cleanup_redirect_family(ip6tables,
+            AFWALL_DNSD_CHAIN_V6, AFWALL_DNSD_CHAIN_V6_PRE);
+    snprintf(args, sizeof(args), "delete table ip %s", AFWALL_DNSD_NFT_TABLE_V4);
+    commands += run_cleanup_command("nft", args);
+    snprintf(args, sizeof(args), "delete table ip6 %s", AFWALL_DNSD_NFT_TABLE_V6);
+    commands += run_cleanup_command("nft", args);
+    return commands;
 }
 
 static void finish_dns_query(const char *domain, const char *action, const char *transport,
@@ -5036,6 +5384,9 @@ static void write_health_response(int client) {
             "udp_listener=%d\ntcp_listener=%d\ncontrol_listener=%d\n"
             "udp_listener_v4=%d\nudp_listener_v6=%d\n"
             "tcp_listener_v4=%d\ntcp_listener_v6=%d\n"
+            "control_socket_uid=%d\ncontrol_peer_uid_enforced=%d\n"
+            "fail_open_control_supported=1\n"
+            "cleanup_iptables_safe=%d\ncleanup_ip6tables_safe=%d\n"
             "generation=%llu\nupstreams=%d\nsplit_upstreams=%d\nupstream_probe=%s\n"
             "compiled_upstream_addresses=%d\nreusable_udp_upstream_sockets=%d\n"
             "upstream_backoff_active=%d\n"
@@ -5092,6 +5443,10 @@ static void write_health_response(int client) {
             g_udp_listener_v6_ready,
             g_tcp_listener_v4_ready,
             g_tcp_listener_v6_ready,
+            g_cfg.control_socket_uid,
+            control_peer_uid_enforced(g_cfg.control_socket_uid),
+            cleanup_tool_ready(g_cfg.iptables_path, "iptables"),
+            cleanup_tool_ready(g_cfg.ip6tables_path, "ip6tables"),
             (unsigned long long) g_cfg.generation,
             g_cfg.upstream_count,
             g_cfg.split_upstream_count,
@@ -5295,13 +5650,21 @@ static void write_history_response(int client, const char *filter) {
 
 static void handle_control(int fd) {
     int client = accept(fd, NULL, NULL);
-    char cmd[128];
+    char request[512];
+    char cmd[256];
+    char *payload;
+    char *newline;
     ssize_t n;
     if (client < 0) {
         return;
     }
+    if (!control_peer_authorized(client, g_cfg.control_socket_uid)) {
+        write_control_response(client, "error unauthorized\n");
+        close(client);
+        return;
+    }
     set_socket_timeout(client, CLIENT_TIMEOUT_MS);
-    n = recv(client, cmd, sizeof(cmd) - 1, 0);
+    n = recv(client, request, sizeof(request) - 1, 0);
     if (n <= 0) {
         if (socket_timed_out()) {
             g_stats.control_client_timeouts++;
@@ -5309,7 +5672,31 @@ static void handle_control(int fd) {
         close(client);
         return;
     }
-    cmd[n] = '\0';
+    request[n] = '\0';
+    payload = request;
+    if (g_cfg.control_token[0] != '\0') {
+        newline = strchr(request, '\n');
+        if (newline == NULL) {
+            write_control_response(client, "error unauthorized\n");
+            write_event_log("warn", "control command rejected without token");
+            close(client);
+            return;
+        }
+        *newline = '\0';
+        payload = newline + 1;
+        trim(request);
+        if (strncmp(request, "token ", 6) == 0) {
+            memmove(request, request + 6, strlen(request + 6) + 1);
+            trim(request);
+        }
+        if (strcmp(request, g_cfg.control_token) != 0) {
+            write_control_response(client, "error unauthorized\n");
+            write_event_log("warn", "control command rejected with invalid token");
+            close(client);
+            return;
+        }
+    }
+    safe_copy(cmd, sizeof(cmd), payload);
     trim(cmd);
     if (strcmp(cmd, "status") == 0 || strcmp(cmd, "stats") == 0) {
         long memory_rss_kb = read_proc_status_kb("VmRSS");
@@ -5333,6 +5720,9 @@ static void handle_control(int fd) {
                 "udp_listener=%d\ntcp_listener=%d\ncontrol_listener=%d\n"
                 "udp_listener_v4=%d\nudp_listener_v6=%d\n"
                 "tcp_listener_v4=%d\ntcp_listener_v6=%d\n"
+                "control_socket_uid=%d\ncontrol_peer_uid_enforced=%d\n"
+                "fail_open_control_supported=1\n"
+                "cleanup_iptables_safe=%d\ncleanup_ip6tables_safe=%d\n"
                 "queries=%llu\nudp_queries=%llu\ntcp_queries=%llu\ninvalid_queries=%llu\n"
                 "queries_today=%llu\nblocked_today=%llu\nallowed_today=%llu\n"
                 "stats_day_start=%llu\n"
@@ -5395,6 +5785,10 @@ static void handle_control(int fd) {
                 g_udp_listener_v6_ready,
                 g_tcp_listener_v4_ready,
                 g_tcp_listener_v6_ready,
+                g_cfg.control_socket_uid,
+                control_peer_uid_enforced(g_cfg.control_socket_uid),
+                cleanup_tool_ready(g_cfg.iptables_path, "iptables"),
+                cleanup_tool_ready(g_cfg.ip6tables_path, "ip6tables"),
                 (unsigned long long) g_stats.queries,
                 (unsigned long long) g_stats.udp_queries,
                 (unsigned long long) g_stats.tcp_queries,
@@ -5526,6 +5920,44 @@ static void handle_control(int fd) {
                     (unsigned long long) g_cfg.generation,
                     (unsigned long long) g_stats.reload_failures);
         }
+    } else if (strcmp(cmd, "flush_cache") == 0) {
+        int cleared = clear_cache_entries();
+        write_event_log("info", "control flushed DNS cache entries=%d", cleared);
+        write_control_response(client, "ok flush_cache entries=%d\n", cleared);
+    } else if (strcmp(cmd, "flush_logs") == 0) {
+        uint64_t before_ring;
+        uint64_t before_unflushed;
+        uint64_t after_ring;
+        uint64_t after_unflushed;
+        read_log_stats(&before_ring, &before_unflushed);
+        flush_logs();
+        read_log_stats(&after_ring, &after_unflushed);
+        write_event_log("info",
+                "control flushed DNS query logs pending_before=%llu pending_after=%llu",
+                (unsigned long long) before_unflushed,
+                (unsigned long long) after_unflushed);
+        write_control_response(client,
+                "ok flush_logs ring_entries=%llu pending_before=%llu pending_after=%llu\n",
+                (unsigned long long) after_ring,
+                (unsigned long long) before_unflushed,
+                (unsigned long long) after_unflushed);
+    } else if (strcmp(cmd, "clear_logs") == 0) {
+        uint64_t before_ring;
+        uint64_t before_unflushed;
+        read_log_stats(&before_ring, &before_unflushed);
+        if (clear_query_logs()) {
+            write_event_log("info",
+                    "control cleared DNS query logs ring_entries=%llu pending=%llu",
+                    (unsigned long long) before_ring,
+                    (unsigned long long) before_unflushed);
+            write_control_response(client,
+                    "ok clear_logs ring_entries=%llu pending=%llu\n",
+                    (unsigned long long) before_ring,
+                    (unsigned long long) before_unflushed);
+        } else {
+            write_event_log("error", "control failed to clear DNS query logs");
+            write_control_response(client, "error clear_logs\n");
+        }
     } else if (strcmp(cmd, "logs") == 0) {
         int i;
         int count = 0;
@@ -5562,6 +5994,15 @@ static void handle_control(int fd) {
         write_history_response(client, filter);
     } else if (strcmp(cmd, "stop") == 0) {
         write_control_response(client, "ok stopping\n");
+        g_running = 0;
+    } else if (strcmp(cmd, "fail_open") == 0) {
+        int cleanup_commands = cleanup_dns_redirects_from_daemon();
+        write_event_log("warn",
+                "control fail-open cleanup requested commands=%d; daemon stopping",
+                cleanup_commands);
+        write_control_response(client,
+                "ok fail_open cleanup_commands=%d stopping=1\n",
+                cleanup_commands);
         g_running = 0;
     } else {
         write_control_response(client, "error unknown_command\n");
@@ -5603,7 +6044,11 @@ int main(int argc, char **argv) {
         usage(argv[0]);
         return 2;
     }
+    prime_event_log_from_config(g_config_path);
+    write_event_log("info", "daemon start requested config=%s", g_config_path);
     if (!reload_config()) {
+        write_event_log("error", "daemon failed to load config path=%s failures=%llu",
+                g_config_path, (unsigned long long) g_stats.reload_failures);
         fprintf(stderr, "failed to load config: %s\n", g_config_path);
         return 1;
     }
@@ -5614,8 +6059,9 @@ int main(int argc, char **argv) {
     udp6_fd = create_udp_socket6(g_cfg.listen_port);
     tcp4_fd = create_tcp_socket4(g_cfg.listen_port);
     tcp6_fd = create_tcp_socket6(g_cfg.listen_port);
-    control_fd = create_control_socket(g_cfg.control_socket);
+    control_fd = create_control_socket(g_cfg.control_socket, g_cfg.control_socket_uid);
     if (udp4_fd < 0 || tcp4_fd < 0 || control_fd < 0) {
+        int listener_errno = errno;
         if (udp4_fd >= 0) {
             close(udp4_fd);
         }
@@ -5636,6 +6082,9 @@ int main(int argc, char **argv) {
         if (g_cfg.heartbeat_file[0] != '\0') {
             unlink(g_cfg.heartbeat_file);
         }
+        write_event_log("error",
+                "daemon listener setup failed port=%d udp4_fd=%d udp6_fd=%d tcp4_fd=%d tcp6_fd=%d control_fd=%d errno=%d",
+                g_cfg.listen_port, udp4_fd, udp6_fd, tcp4_fd, tcp6_fd, control_fd, listener_errno);
         fprintf(stderr, "failed to create listeners on port %d\n", g_cfg.listen_port);
         return 1;
     }
@@ -5651,6 +6100,14 @@ int main(int argc, char **argv) {
     write_heartbeat_file();
     last_heartbeat = now_seconds();
     start_log_thread();
+    write_event_log("info",
+            "daemon listeners ready port=%d udp4=%d udp6=%d tcp4=%d tcp6=%d control=1 pid=%ld",
+            g_cfg.listen_port,
+            g_udp_listener_v4_ready,
+            g_udp_listener_v6_ready,
+            g_tcp_listener_v4_ready,
+            g_tcp_listener_v6_ready,
+            (long) getpid());
     while (g_running) {
         fd_set readfds;
         struct timeval timeout;
@@ -5659,7 +6116,11 @@ int main(int argc, char **argv) {
         int ready;
         if (g_reload_requested) {
             g_reload_requested = 0;
-            reload_config();
+            if (!reload_config()) {
+                write_event_log("error", "daemon reload signal failed active_generation=%llu failures=%llu",
+                        (unsigned long long) g_cfg.generation,
+                        (unsigned long long) g_stats.reload_failures);
+            }
         }
         FD_ZERO(&readfds);
         FD_SET(udp4_fd, &readfds);
@@ -5756,6 +6217,7 @@ int main(int argc, char **argv) {
     if (g_cfg.heartbeat_file[0] != '\0') {
         unlink(g_cfg.heartbeat_file);
     }
+    write_event_log("info", "daemon shutdown complete");
     free_config_dynamic(&g_cfg);
     return 0;
 }

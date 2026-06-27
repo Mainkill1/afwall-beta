@@ -102,6 +102,34 @@
                             android:text="@string/dns_dashboard_capture_test" />
 
                         <Button
+                            android:id="@+id/log_hub_dns_dashboard_service_events"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="6dp"
+                            android:text="@string/dns_dashboard_service_events" />
+
+                        <Button
+                            android:id="@+id/log_hub_dns_dashboard_validate"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="6dp"
+                            android:text="@string/dns_dashboard_validate" />
+
+                        <Button
+                            android:id="@+id/log_hub_dns_dashboard_auth_test"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="6dp"
+                            android:text="@string/dns_dashboard_auth_test" />
+
+                        <Button
+                            android:id="@+id/log_hub_dns_dashboard_benchmark"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="6dp"
+                            android:text="@string/dns_hijack_benchmark_upstreams_title" />
+
+                        <Button
                             android:id="@+id/log_hub_dns_dashboard_pause_resume"
                             android:layout_width="match_parent"
                             android:layout_height="wrap_content"
@@ -116,6 +144,27 @@
                             android:text="@string/dns_hijack_update_blocklists_title" />
 
                         <Button
+                            android:id="@+id/log_hub_dns_dashboard_flush_cache"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="6dp"
+                            android:text="@string/dns_dashboard_flush_cache" />
+
+                        <Button
+                            android:id="@+id/log_hub_dns_dashboard_flush_logs"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="6dp"
+                            android:text="@string/dns_dashboard_flush_logs" />
+
+                        <Button
+                            android:id="@+id/log_hub_dns_dashboard_clear_logs"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="6dp"
+                            android:text="@string/dns_dashboard_clear_logs" />
+
+                        <Button
                             android:id="@+id/log_hub_dns_dashboard_restart"
                             android:layout_width="match_parent"
                             android:layout_height="wrap_content"
@@ -128,6 +177,27 @@
                             android:layout_height="wrap_content"
                             android:layout_marginTop="6dp"
                             android:text="@string/dns_diagnostics_repair" />
+
+                        <Button
+                            android:id="@+id/log_hub_dns_dashboard_module_status"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="6dp"
+                            android:text="@string/dns_hijack_module_status_title" />
+
+                        <Button
+                            android:id="@+id/log_hub_dns_dashboard_remove_service"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="6dp"
+                            android:text="@string/dns_hijack_remove_service_title" />
+
+                        <Button
+                            android:id="@+id/log_hub_dns_dashboard_emergency_cleanup"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="6dp"
+                            android:text="@string/dns_hijack_emergency_cleanup_title" />
                     </LinearLayout>
                 </LinearLayout>
             </androidx.cardview.widget.CardView>
