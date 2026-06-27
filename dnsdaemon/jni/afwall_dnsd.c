@@ -177,6 +177,8 @@ typedef struct {
     uint64_t cache_evictions;
     uint64_t cache_ttl_rewrites;
     uint64_t cache_lru_evictions;
+    uint64_t cache_reload_preserved;
+    uint64_t cache_reload_dropped;
     uint64_t udp_queries;
     uint64_t tcp_queries;
     uint64_t invalid_queries;
@@ -1588,6 +1590,85 @@ static void cache_store(const char *domain, uint16_t qtype, const uint8_t *respo
     }
 }
 
+static bool cache_insert_existing(cache_entry_t *cache, int capacity,
+                                  const cache_entry_t *source, time_t now) {
+    uint32_t slot;
+    uint32_t i;
+    uint32_t probe_count;
+    cache_entry_t *entry = NULL;
+    cache_entry_t *lru = NULL;
+    if (cache == NULL || capacity <= 0 || source == NULL || !source->used
+            || source->expires_at <= now || source->response_len == 0
+            || source->response_len > MAX_PACKET) {
+        return false;
+    }
+    slot = source->hash % (uint32_t) capacity;
+    probe_count = capacity < 8 ? (uint32_t) capacity : 8u;
+    for (i = 0; i < probe_count; i++) {
+        cache_entry_t *candidate = &cache[(slot + i) % (uint32_t) capacity];
+        if (candidate->used && candidate->hash == source->hash
+                && candidate->qtype == source->qtype
+                && strcmp(candidate->domain, source->domain) == 0) {
+            entry = candidate;
+            break;
+        }
+        if (!candidate->used || candidate->expires_at <= now) {
+            entry = candidate;
+            break;
+        }
+        if (lru == NULL || candidate->last_access < lru->last_access) {
+            lru = candidate;
+        }
+    }
+    if (entry == NULL) {
+        entry = lru != NULL ? lru : &cache[slot];
+    }
+    *entry = *source;
+    entry->used = true;
+    return true;
+}
+
+static int cache_count_entries_in(const cache_entry_t *cache, int capacity, time_t now) {
+    int i;
+    int count = 0;
+    if (cache == NULL || capacity <= 0) {
+        return 0;
+    }
+    for (i = 0; i < capacity; i++) {
+        if (cache[i].used && cache[i].expires_at > now) {
+            count++;
+        }
+    }
+    return count;
+}
+
+static void migrate_cache_entries(cache_entry_t *old_cache, int old_capacity,
+                                  cache_entry_t *new_cache, int new_capacity) {
+    int i;
+    int candidates = 0;
+    int preserved;
+    time_t now = time(NULL);
+    if (old_cache == NULL || old_capacity <= 0) {
+        return;
+    }
+    if (new_cache == NULL || new_capacity <= 0) {
+        g_stats.cache_reload_dropped += (uint64_t) cache_count_entries_in(old_cache,
+                old_capacity, now);
+        return;
+    }
+    for (i = 0; i < old_capacity; i++) {
+        if (old_cache[i].used && old_cache[i].expires_at > now) {
+            candidates++;
+            cache_insert_existing(new_cache, new_capacity, &old_cache[i], now);
+        }
+    }
+    preserved = cache_count_entries_in(new_cache, new_capacity, now);
+    g_stats.cache_reload_preserved += (uint64_t) preserved;
+    if (candidates > preserved) {
+        g_stats.cache_reload_dropped += (uint64_t) (candidates - preserved);
+    }
+}
+
 static void compile_upstream_address(upstream_t *upstream) {
     struct sockaddr_in *addr4;
     struct sockaddr_in6 *addr6;
@@ -2357,6 +2438,7 @@ static bool reload_config(void) {
             return false;
         }
     }
+    migrate_cache_entries(g_cache, g_cache_capacity, next_cache, next->cache_size);
     free_config_dynamic(&g_cfg);
     g_cfg = *next;
     free(next);
@@ -2724,6 +2806,7 @@ static void write_health_response(int client) {
             "cache_positive_hits=%llu\ncache_negative_hits=%llu\n"
             "cache_positive_stores=%llu\ncache_negative_stores=%llu\n"
             "cache_ttl_rewrites=%llu\ncache_lru_evictions=%llu\n"
+            "cache_reload_preserved=%llu\ncache_reload_dropped=%llu\n"
             "upstream_tcp_fallbacks=%llu\nupstream_truncated_responses=%llu\n"
             "upstream_udp_socket_reuses=%llu\nupstream_udp_stale_replies=%llu\n"
             "tcp_client_timeouts=%llu\ncontrol_client_timeouts=%llu\n"
@@ -2763,6 +2846,8 @@ static void write_health_response(int client) {
             (unsigned long long) g_stats.cache_negative_stores,
             (unsigned long long) g_stats.cache_ttl_rewrites,
             (unsigned long long) g_stats.cache_lru_evictions,
+            (unsigned long long) g_stats.cache_reload_preserved,
+            (unsigned long long) g_stats.cache_reload_dropped,
             (unsigned long long) g_stats.upstream_tcp_fallbacks,
             (unsigned long long) g_stats.upstream_truncated_responses,
             (unsigned long long) g_stats.upstream_udp_socket_reuses,
@@ -2930,6 +3015,7 @@ static void handle_control(int fd) {
                 "cache_positive_stores=%llu\ncache_negative_stores=%llu\n"
                 "cache_expired=%llu\ncache_evictions=%llu\ncache_ttl_rewrites=%llu\n"
                 "cache_lru_evictions=%llu\n"
+                "cache_reload_preserved=%llu\ncache_reload_dropped=%llu\n"
                 "upstream_requests=%llu\nupstream_successes=%llu\nupstream_failures=%llu\n"
                 "upstream_tcp_fallbacks=%llu\nupstream_truncated_responses=%llu\n"
                 "upstream_udp_socket_reuses=%llu\nupstream_udp_stale_replies=%llu\n"
@@ -2984,6 +3070,8 @@ static void handle_control(int fd) {
                 (unsigned long long) g_stats.cache_evictions,
                 (unsigned long long) g_stats.cache_ttl_rewrites,
                 (unsigned long long) g_stats.cache_lru_evictions,
+                (unsigned long long) g_stats.cache_reload_preserved,
+                (unsigned long long) g_stats.cache_reload_dropped,
                 (unsigned long long) g_stats.upstream_requests,
                 (unsigned long long) g_stats.upstream_successes,
                 (unsigned long long) g_stats.upstream_failures,
