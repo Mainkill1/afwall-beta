@@ -393,6 +393,7 @@ public final class DnsHijackManager {
         out.append("blocklist_storage=").append(G.dnsHijackBlocklistDirectoryName("dnsd_blocklists"))
                 .append('\n');
         out.append("boot_persistence_pref=").append(G.dnsHijackBootPersistence()).append('\n');
+        out.append("boot_restore_ipv6_enabled=").append(G.enableIPv6()).append('\n');
         out.append("port=").append(G.dnsHijackPort(DEFAULT_PORT)).append('\n');
         out.append("\n[android dns compatibility]\n");
         appendAndroidDnsCompatibility(context, out);
@@ -3399,6 +3400,7 @@ public final class DnsHijackManager {
         String iptables = Api.getBinaryPath(context, false);
         String ip6tables = Api.getBinaryPath(context, true);
         int port = G.dnsHijackPort(DEFAULT_PORT);
+        String ipv6Enabled = G.enableIPv6() ? "1" : "0";
 
         return "#!/system/bin/sh\n"
                 + "PATH=/system/bin:/system/xbin:/vendor/bin:/sbin:/su/bin:/data/adb/magisk:$PATH\n"
@@ -3408,6 +3410,7 @@ public final class DnsHijackManager {
                 + "IPTABLES=" + shellQuote(iptables) + "\n"
                 + "IP6TABLES=" + shellQuote(ip6tables) + "\n"
                 + "PORT=" + port + "\n"
+                + "IPV6_ENABLED=" + ipv6Enabled + "\n"
                 + "LOG=" + shellQuote(log) + "\n"
                 + "CHAIN4=" + CHAIN_V4 + "\n"
                 + "PRE4=" + CHAIN_V4_PRE + "\n"
@@ -3504,7 +3507,7 @@ public final class DnsHijackManager {
                 + "if [ ! -d \"$DIR\" ] || [ ! -x \"$SUPERVISOR\" ] || [ ! -f \"$MARKER\" ]; then cleanup_stale_install; exit 0; fi\n"
                 + "\"$SUPERVISOR\" start >> \"$LOG\" 2>&1\n"
                 + "restore_v4\n"
-                + "restore_v6\n"
+                + "if [ \"$IPV6_ENABLED\" = 1 ]; then restore_v6; else log_msg 'DNS boot restore skipped IPv6 redirects because IPv6 is disabled'; fi\n"
                 + "log_msg 'DNS boot restore complete'\n";
     }
 
