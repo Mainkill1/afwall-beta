@@ -580,6 +580,65 @@ public class G extends Application implements Application.ActivityLifecycleCallb
         return editor.commit();
     }
 
+    public static boolean applyDnsHijackProfilePreset(String presetId) {
+        if (gPrefs == null || presetId == null) {
+            return false;
+        }
+        String preset = presetId.trim().toLowerCase(java.util.Locale.US);
+        SharedPreferences.Editor editor = gPrefs.edit();
+        if ("default".equals(preset)) {
+            putDnsHijackPreset(editor,
+                    "1.1.1.1:53\n8.8.8.8:53",
+                    "1.1.1.1:53\n8.8.8.8:53",
+                    true, false, false, false, false,
+                    "2500", "1024", "300",
+                    false, true, true,
+                    "", false, "24");
+        } else if ("strict".equals(preset)) {
+            putDnsHijackPreset(editor,
+                    "9.9.9.9:53\n1.1.1.1:53",
+                    "9.9.9.9:53\n1.1.1.1:53",
+                    false, true, true, true, false,
+                    "2500", "2048", "0",
+                    true, true, true,
+                    "https://raw.githubusercontent.com/stevenblack/hosts/master/hosts\n"
+                            + "https://small.oisd.nl/\n"
+                            + "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/domains/light.txt",
+                    true, "12");
+        } else if ("kids".equals(preset)) {
+            putDnsHijackPreset(editor,
+                    "1.1.1.3:53\n1.0.0.3:53",
+                    "1.1.1.1:53\n8.8.8.8:53",
+                    false, true, true, false, false,
+                    "2500", "2048", "0",
+                    true, true, true,
+                    "https://raw.githubusercontent.com/stevenblack/hosts/master/hosts\n"
+                            + "https://small.oisd.nl/\n"
+                            + "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/domains/light.txt",
+                    true, "12");
+        } else if ("work".equals(preset)) {
+            putDnsHijackPreset(editor,
+                    "9.9.9.9:53\n1.1.1.1:53",
+                    "9.9.9.9:53\n1.1.1.1:53",
+                    true, false, false, true, false,
+                    "2500", "1024", "300",
+                    false, true, true,
+                    "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/domains/light.txt",
+                    true, "24");
+        } else if ("gaming".equals(preset)) {
+            putDnsHijackPreset(editor,
+                    "1.1.1.1:53\n8.8.8.8:53",
+                    "1.1.1.1:53\n8.8.8.8:53",
+                    true, false, false, false, false,
+                    "1500", "2048", "600",
+                    true, false, false,
+                    "", false, "24");
+        } else {
+            return false;
+        }
+        return editor.commit();
+    }
+
     public static String dnsHijackBlocklistDirectoryName(String defaultName) {
         if (!usingActiveDnsProfilePolicy()) {
             return defaultName;
@@ -591,6 +650,62 @@ public class G extends Application implements Application.ActivityLifecycleCallb
             safeProfile = Api.DEFAULT_PREFS_NAME;
         }
         return defaultName + "_" + safeProfile;
+    }
+
+    private static void putDnsHijackPreset(SharedPreferences.Editor editor,
+                                           String upstreams,
+                                           String bootstrapUpstreams,
+                                           boolean failOpen,
+                                           boolean strictMode,
+                                           boolean safeSearch,
+                                           boolean dnssecRequest,
+                                           boolean dnssecAuthRequired,
+                                           String timeoutMs,
+                                           String cacheSize,
+                                           String staleCacheSeconds,
+                                           boolean persistCache,
+                                           boolean queryLogging,
+                                           boolean persistQueryLogs,
+                                           String blocklistUrls,
+                                           boolean scheduledBlocklistUpdates,
+                                           String updateIntervalHours) {
+        // Presets seed the exact policy keys consumed by config generation, avoiding a second
+        // profile implementation that could drift from daemon behavior.
+        editor.putString(DNS_HIJACK_UPSTREAMS, upstreams);
+        editor.putString(DNS_HIJACK_BOOTSTRAP_UPSTREAMS, bootstrapUpstreams);
+        editor.putString(DNS_HIJACK_SPLIT_UPSTREAMS, "");
+        editor.putString(DNS_HIJACK_CAPTURE_UIDS, "");
+        editor.putString(DNS_HIJACK_BYPASS_UIDS, "");
+        editor.putString(DNS_HIJACK_CAPTURE_INTERFACES, "");
+        editor.putString(DNS_HIJACK_BYPASS_INTERFACES, "");
+        editor.putBoolean(DNS_HIJACK_FAIL_OPEN, failOpen);
+        editor.putBoolean(DNS_HIJACK_STRICT_MODE, strictMode);
+        editor.putBoolean(DNS_HIJACK_SAFE_SEARCH, safeSearch);
+        editor.putBoolean(DNS_HIJACK_DNSSEC_REQUEST, dnssecRequest);
+        editor.putBoolean(DNS_HIJACK_DNSSEC_AUTH_REQUIRED, dnssecAuthRequired);
+        editor.putString(DNS_HIJACK_TIMEOUT_MS, timeoutMs);
+        editor.putString(DNS_HIJACK_CACHE_SIZE, cacheSize);
+        editor.putString(DNS_HIJACK_STALE_CACHE_SECONDS, staleCacheSeconds);
+        editor.putBoolean(DNS_HIJACK_PERSIST_CACHE, persistCache);
+        editor.putBoolean(DNS_HIJACK_QUERY_LOGGING, queryLogging);
+        editor.putBoolean(DNS_HIJACK_PERSIST_QUERY_LOGS, persistQueryLogs);
+        editor.putString(DNS_HIJACK_ALLOW_EXACT, "");
+        editor.putString(DNS_HIJACK_ALLOW_SUFFIX, "");
+        editor.putString(DNS_HIJACK_BLOCK_EXACT, "");
+        editor.putString(DNS_HIJACK_BLOCK_SUFFIX, "");
+        editor.putString(DNS_HIJACK_APP_ALLOW_EXACT, "");
+        editor.putString(DNS_HIJACK_APP_BLOCK_EXACT, "");
+        editor.putString(DNS_HIJACK_APP_ALLOW_SUFFIX, "");
+        editor.putString(DNS_HIJACK_APP_BLOCK_SUFFIX, "");
+        editor.putString(DNS_HIJACK_NETWORK_ALLOW, "");
+        editor.putString(DNS_HIJACK_NETWORK_BLOCK, "");
+        editor.putString(DNS_HIJACK_ALLOW_REGEX, "");
+        editor.putString(DNS_HIJACK_BLOCK_REGEX, "");
+        editor.putString(DNS_HIJACK_TEMP_ALLOW, "");
+        editor.putString(DNS_HIJACK_TEMP_BLOCK, "");
+        editor.putString(DNS_HIJACK_BLOCKLIST_URLS, blocklistUrls);
+        editor.putBoolean(DNS_HIJACK_SCHEDULED_BLOCKLIST_UPDATES, scheduledBlocklistUpdates);
+        editor.putString(DNS_HIJACK_BLOCKLIST_UPDATE_INTERVAL_HOURS, updateIntervalHours);
     }
 
     public static boolean appendDnsHijackAllowExact(String domain) {

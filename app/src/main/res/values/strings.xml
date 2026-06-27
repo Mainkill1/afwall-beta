@@ -358,10 +358,14 @@
     <string name="dns_hijack_persist_query_logs_summary">Write daemon query logs to app-private storage for historical search and export.</string>
     <string name="dns_hijack_profile_policy_title">Use active profile DNS policy</string>
     <string name="dns_hijack_profile_policy_summary">When enabled, saved DNS settings and compiled blocklists follow the active firewall profile.</string>
+    <string name="dns_hijack_profile_presets_title">Apply DNS profile preset</string>
+    <string name="dns_hijack_profile_presets_summary">Seed common Default, Strict, Kids, Work, or Gaming DNS policy values into the current settings.</string>
     <string name="dns_hijack_save_profile_policy_title">Save DNS policy to active profile</string>
     <string name="dns_hijack_save_profile_policy_summary">Copy the current DNS upstreams, rules, blocklist URLs, and update schedule into the active profile.</string>
     <string name="dns_hijack_clear_profile_policy_title">Clear active profile DNS policy</string>
     <string name="dns_hijack_clear_profile_policy_summary">Remove the active profile DNS override and fall back to the global DNS settings.</string>
+    <string name="dns_hijack_profile_preset_applied">DNS profile preset applied: %1$s.</string>
+    <string name="dns_hijack_profile_preset_failed">Unable to apply DNS profile preset.</string>
     <string name="dns_hijack_profile_policy_saved">DNS policy saved for active profile.</string>
     <string name="dns_hijack_profile_policy_cleared">Active profile DNS policy cleared.</string>
     <string name="dns_hijack_profile_policy_failed">Unable to update active profile DNS policy.</string>
@@ -440,6 +444,22 @@
         <item>https://adaway.org/hosts.txt</item>
         <item>https://small.oisd.nl/</item>
         <item>https://raw.githubusercontent.com/hagezi/dns-blocklists/main/domains/light.txt</item>
+    </string-array>
+
+    <string-array name="dns_hijack_profile_preset_names">
+        <item>Default</item>
+        <item>Strict</item>
+        <item>Kids</item>
+        <item>Work</item>
+        <item>Gaming</item>
+    </string-array>
+
+    <string-array name="dns_hijack_profile_preset_values">
+        <item>default</item>
+        <item>strict</item>
+        <item>kids</item>
+        <item>work</item>
+        <item>gaming</item>
     </string-array>
     <string name="dns_queries_title">DNS Queries</string>
     <string name="dns_queries_summary">View recent daemon DNS queries and quickly add allow or block rules.</string>

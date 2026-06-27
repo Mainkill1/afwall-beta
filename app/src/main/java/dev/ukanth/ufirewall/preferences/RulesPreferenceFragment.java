@@ -31,6 +31,7 @@ import dev.ukanth.ufirewall.broadcast.DnsBlocklistUpdateReceiver;
 import dev.ukanth.ufirewall.dns.DnsBlocklistManager;
 import dev.ukanth.ufirewall.dns.DnsHijackManager;
 import dev.ukanth.ufirewall.service.RootCommand;
+import dev.ukanth.ufirewall.util.ApplicationErrorLog;
 import dev.ukanth.ufirewall.util.G;
 
 public class RulesPreferenceFragment extends PreferenceFragment implements
@@ -148,6 +149,14 @@ public class RulesPreferenceFragment extends PreferenceFragment implements
                 return true;
             });
         }
+
+        Preference profilePresets = findPreference("dnsHijackProfilePresets");
+        if (profilePresets != null) {
+            profilePresets.setOnPreferenceClickListener(preference -> {
+                showDnsProfilePresetDialog();
+                return true;
+            });
+        }
     }
 
     private void updateRuleStatus() {
@@ -224,6 +233,7 @@ public class RulesPreferenceFragment extends PreferenceFragment implements
                             getPreferenceScreen().removeAll();
                             addPreferencesFromResource(R.xml.rules_preferences);
                             wireDnsBlocklistActions();
+                            wireDnsServiceActions();
                         }
                     }
                 }));
@@ -362,6 +372,55 @@ public class RulesPreferenceFragment extends PreferenceFragment implements
                         added, existing))
                 .positiveText(R.string.OK)
                 .show();
+    }
+
+    private void showDnsProfilePresetDialog() {
+        if (getActivity() == null) {
+            return;
+        }
+        String[] names = getResources().getStringArray(R.array.dns_hijack_profile_preset_names);
+        String[] values = getResources().getStringArray(R.array.dns_hijack_profile_preset_values);
+        new MaterialDialog.Builder(getActivity())
+                .title(R.string.dns_hijack_profile_presets_title)
+                .items(names)
+                .itemsCallback((dialog, view, which, text) -> {
+                    if (which >= 0 && which < values.length) {
+                        applyDnsProfilePreset(values[which], text == null ? "" : text.toString());
+                    }
+                })
+                .negativeText(R.string.Cancel)
+                .show();
+    }
+
+    private void applyDnsProfilePreset(String presetId, String presetName) {
+        if (ctx == null) {
+            return;
+        }
+        boolean success;
+        boolean profileCopy = true;
+        suppressDnsLifecycle = true;
+        try {
+            success = G.applyDnsHijackProfilePreset(presetId);
+            if (success && G.dnsHijackUseProfilePolicy()) {
+                profileCopy = G.saveActiveDnsHijackProfilePolicy()
+                        && DnsBlocklistManager.copyGlobalBlocklistToActiveProfile(ctx);
+            }
+        } finally {
+            suppressDnsLifecycle = false;
+        }
+        if (!success || !profileCopy) {
+            ApplicationErrorLog.add(ctx, "DNS profile preset failed: " + presetId);
+            Api.toast(ctx, getString(R.string.dns_hijack_profile_preset_failed));
+            return;
+        }
+        Api.setRulesUpToDate(false);
+        DnsBlocklistUpdateReceiver.scheduleOrCancel(ctx);
+        if (G.enableDnsHijack()) {
+            DnsHijackManager.requestReload(ctx);
+        }
+        ApplicationErrorLog.add(ctx, "DNS profile preset applied: " + presetId
+                + (G.dnsHijackUseProfilePolicy() ? " with active profile policy" : " globally"));
+        Api.toast(ctx, getString(R.string.dns_hijack_profile_preset_applied, presetName));
     }
 
     private void runDnsBlocklistRollback() {

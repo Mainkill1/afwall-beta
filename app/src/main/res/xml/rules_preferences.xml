@@ -237,6 +237,12 @@
             android:title="@string/dns_hijack_profile_policy_title" />
 
         <Preference
+            android:dependency="enableDnsHijack"
+            android:key="dnsHijackProfilePresets"
+            android:summary="@string/dns_hijack_profile_presets_summary"
+            android:title="@string/dns_hijack_profile_presets_title" />
+
+        <Preference
             android:dependency="dnsHijackUseProfilePolicy"
             android:key="dnsHijackSaveProfilePolicy"
             android:summary="@string/dns_hijack_save_profile_policy_summary"
