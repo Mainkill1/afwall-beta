@@ -3236,6 +3236,7 @@ static bool load_regex_rule_file(regex_rule_list_t *rules, const char *path);
 static bool load_config(const char *path, config_t *new_cfg) {
     FILE *fp;
     char line[1024];
+    bool upstream_configured = false;
     default_config(new_cfg);
     fp = fopen(path, "r");
     if (fp == NULL) {
@@ -3303,9 +3304,26 @@ static bool load_config(const char *path, config_t *new_cfg) {
         } else if (strcmp(key, "safe_search_address") == 0) {
             parse_safe_search_address(new_cfg, value);
         } else if (strcmp(key, "upstream") == 0) {
-            parse_upstream(new_cfg, value);
+            /*
+             * Upstream entries define resolver behavior. Reject malformed or
+             * over-limit entries during reload so the daemon keeps the last
+             * working generation instead of silently falling back to defaults.
+             */
+            upstream_configured = true;
+            if (!parse_upstream(new_cfg, value)) {
+                fclose(fp);
+                return false;
+            }
         } else if (strcmp(key, "split_upstream") == 0) {
-            parse_split_upstream(new_cfg, value);
+            /*
+             * Split DNS routes are policy, not hints. Dropping a bad route
+             * during reload would send matching domains through the wrong
+             * resolver until the next successful configuration write.
+             */
+            if (!parse_split_upstream(new_cfg, value)) {
+                fclose(fp);
+                return false;
+            }
         } else if (strcmp(key, "allow_exact") == 0) {
             if (!add_string_rule(&new_cfg->exact_allow, value)) {
                 fclose(fp);
@@ -3394,6 +3412,9 @@ static bool load_config(const char *path, config_t *new_cfg) {
     }
     fclose(fp);
     if (new_cfg->upstream_count == 0) {
+        if (upstream_configured) {
+            return false;
+        }
         safe_copy(new_cfg->upstreams[0].host, sizeof(new_cfg->upstreams[0].host), "1.1.1.1");
         new_cfg->upstreams[0].port = 53;
         new_cfg->upstreams[0].protocol = UPSTREAM_PROTO_AUTO;
