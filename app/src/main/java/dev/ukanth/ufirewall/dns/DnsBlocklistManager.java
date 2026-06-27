@@ -478,7 +478,7 @@ public final class DnsBlocklistManager {
             return;
         }
 
-        if (line.startsWith("@@")) {
+        if (line.startsWith("@@") || isUnsupportedAdblockRule(line)) {
             result.skipped++;
             return;
         }
@@ -489,24 +489,28 @@ public final class DnsBlocklistManager {
             return;
         }
 
+        if (parseDnsmasqAddressRule(line, result)) {
+            return;
+        }
+
+        if (parseUnboundLocalZoneRule(line, result)) {
+            return;
+        }
+
         if (line.startsWith("0.0.0.0 ") || line.startsWith("127.0.0.1 ")
                 || line.startsWith("::1 ") || line.startsWith(":: ")) {
-            String[] parts = line.split("\\s+");
-            if (parts.length >= 2) {
-                String domain = normalizeDomain(parts[1]);
-                addDomain(result.exactRules, domain, result);
-                return;
-            }
+            parseHostsDomains(line.split("\\s+"), 1, result);
+            return;
         }
 
         String[] parts = line.split("\\s+");
         if (parts.length > 1 && isAddressToken(parts[0])) {
-            String domain = normalizeDomain(parts[1]);
-            addDomain(result.exactRules, domain, result);
+            parseHostsDomains(parts, 1, result);
             return;
         }
 
         String candidate = line.split("[#\\s]")[0];
+        candidate = stripAdblockAnchors(candidate);
         if (candidate.startsWith("*.") || candidate.startsWith(".")) {
             addDomain(result.suffixRules, normalizeDomain(candidate), result);
         } else {
@@ -514,9 +518,83 @@ public final class DnsBlocklistManager {
         }
     }
 
+    private static void parseHostsDomains(String[] parts, int start, Result result) {
+        boolean parsed = false;
+        for (int i = start; i < parts.length; i++) {
+            String token = parts[i] == null ? "" : parts[i].trim();
+            if (token.isEmpty() || token.startsWith("#")) {
+                break;
+            }
+            if (isAddressToken(token)) {
+                continue;
+            }
+            addDomain(result.exactRules, normalizeDomain(token), result);
+            parsed = true;
+        }
+        if (!parsed) {
+            result.skipped++;
+        }
+    }
+
+    private static boolean parseDnsmasqAddressRule(String line, Result result) {
+        String prefix = "address=/";
+        int end;
+        if (!line.startsWith(prefix)) {
+            return false;
+        }
+        end = line.indexOf('/', prefix.length());
+        if (end <= prefix.length()) {
+            result.invalid++;
+            return true;
+        }
+        addDomain(result.suffixRules, normalizeDomain(line.substring(prefix.length(), end)), result);
+        return true;
+    }
+
+    private static boolean parseUnboundLocalZoneRule(String line, Result result) {
+        String lower = line.toLowerCase(Locale.US);
+        String value;
+        int firstQuote;
+        int secondQuote;
+        if (!lower.startsWith("local-zone:")) {
+            return false;
+        }
+        if (!(lower.contains("always_null") || lower.contains("always_nxdomain")
+                || lower.contains("redirect") || lower.contains("static"))) {
+            result.skipped++;
+            return true;
+        }
+        firstQuote = line.indexOf('"');
+        secondQuote = firstQuote >= 0 ? line.indexOf('"', firstQuote + 1) : -1;
+        if (firstQuote >= 0 && secondQuote > firstQuote) {
+            value = line.substring(firstQuote + 1, secondQuote);
+        } else {
+            String[] parts = line.substring("local-zone:".length()).trim().split("\\s+");
+            value = parts.length == 0 ? "" : parts[0];
+        }
+        addDomain(result.suffixRules, normalizeDomain(value), result);
+        return true;
+    }
+
+    private static boolean isUnsupportedAdblockRule(String line) {
+        return line.startsWith("/") || line.contains("##") || line.contains("#@#")
+                || line.contains("#?#") || line.contains("#$#")
+                || line.contains("$scriptlet") || line.contains("$removeparam");
+    }
+
+    private static String stripAdblockAnchors(String candidate) {
+        String value = candidate == null ? "" : candidate.trim();
+        value = value.replaceFirst("^\\|+", "");
+        value = value.replaceFirst("[\\^|].*$", "");
+        return value;
+    }
+
     private static void addDomain(Set<String> target, String domain, Result result) {
-        if (domain == null || domain.isEmpty() || !DOMAIN_PATTERN.matcher(domain).matches()
-                || "localhost".equals(domain)) {
+        if (domain == null || domain.isEmpty() || "localhost".equals(domain)) {
+            result.skipped++;
+            return;
+        }
+        if (!DOMAIN_PATTERN.matcher(domain).matches()) {
             result.invalid++;
             return;
         }
