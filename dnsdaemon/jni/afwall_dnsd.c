@@ -127,6 +127,14 @@ typedef struct {
     struct sockaddr_storage addr;
     socklen_t addr_len;
     int udp_fd;
+    uint64_t requests;
+    uint64_t successes;
+    uint64_t failures;
+    uint64_t total_latency_ms;
+    uint64_t max_latency_ms;
+    uint64_t last_used;
+    int last_latency_ms;
+    int last_rcode;
 } upstream_t;
 
 typedef struct {
@@ -2517,8 +2525,8 @@ static const char *upstream_protocol_name(upstream_protocol_t protocol) {
     }
 }
 
-static const upstream_t *select_upstreams(const config_t *cfg, const char *domain,
-                                          int *count, const char **route) {
+static upstream_t *select_upstreams(config_t *cfg, const char *domain,
+                                    int *count, const char **route) {
     int i;
     int best = -1;
     size_t best_len = 0;
@@ -2582,6 +2590,7 @@ static int reusable_udp_upstream_socket_count(const config_t *cfg) {
 }
 
 static bool dns_response_truncated(const uint8_t *response, size_t response_len);
+static int response_rcode(const uint8_t *response, size_t response_len);
 static ssize_t forward_tcp_to_upstream(const upstream_t *upstream, int timeout_ms,
                                        const uint8_t *query, size_t query_len,
                                        uint8_t *response, size_t response_len);
@@ -2589,7 +2598,57 @@ static ssize_t forward_udp_to_upstream(const upstream_t *upstream, int timeout_m
                                        const uint8_t *query, size_t query_len,
                                        uint8_t *response, size_t response_len);
 
-static ssize_t forward_udp(const config_t *cfg, const char *domain, const uint8_t *query,
+static void record_upstream_attempt(upstream_t *upstream, ssize_t response_len,
+                                    int latency_ms, const uint8_t *response) {
+    if (upstream == NULL) {
+        return;
+    }
+    upstream->requests++;
+    upstream->last_used = now_seconds();
+    upstream->last_latency_ms = latency_ms;
+    upstream->last_rcode = response_len > 0 ? response_rcode(response, (size_t) response_len) : -1;
+    if (latency_ms > 0) {
+        upstream->total_latency_ms += (uint64_t) latency_ms;
+        if ((uint64_t) latency_ms > upstream->max_latency_ms) {
+            upstream->max_latency_ms = (uint64_t) latency_ms;
+        }
+    }
+    if (response_len > 0) {
+        upstream->successes++;
+    } else {
+        upstream->failures++;
+    }
+}
+
+static ssize_t attempt_udp_upstream(upstream_t *upstream, int timeout_ms,
+                                    const uint8_t *query, size_t query_len,
+                                    uint8_t *response, size_t response_len) {
+    struct timeval start;
+    struct timeval end;
+    ssize_t got;
+    gettimeofday(&start, NULL);
+    got = forward_udp_to_upstream(upstream, timeout_ms, query, query_len,
+            response, response_len);
+    gettimeofday(&end, NULL);
+    record_upstream_attempt(upstream, got, elapsed_ms(&start, &end), response);
+    return got;
+}
+
+static ssize_t attempt_tcp_upstream(upstream_t *upstream, int timeout_ms,
+                                    const uint8_t *query, size_t query_len,
+                                    uint8_t *response, size_t response_len) {
+    struct timeval start;
+    struct timeval end;
+    ssize_t got;
+    gettimeofday(&start, NULL);
+    got = forward_tcp_to_upstream(upstream, timeout_ms, query, query_len,
+            response, response_len);
+    gettimeofday(&end, NULL);
+    record_upstream_attempt(upstream, got, elapsed_ms(&start, &end), response);
+    return got;
+}
+
+static ssize_t forward_udp(config_t *cfg, const char *domain, const uint8_t *query,
                            size_t query_len, uint8_t *response, size_t response_len,
                            const char **route) {
     int i;
@@ -2597,13 +2656,13 @@ static ssize_t forward_udp(const config_t *cfg, const char *domain, const uint8_
     uint8_t truncated_response[MAX_PACKET];
     ssize_t truncated_len = -1;
     bool split_route = false;
-    const upstream_t *upstreams = select_upstreams(cfg, domain, &count, route);
+    upstream_t *upstreams = select_upstreams(cfg, domain, &count, route);
     split_route = route != NULL && *route != NULL && strcmp(*route, "split_upstream") == 0;
     for (i = 0; i < count; i++) {
         bool udp_only = upstreams[i].protocol == UPSTREAM_PROTO_UDP;
         ssize_t got;
         if (upstreams[i].protocol == UPSTREAM_PROTO_TCP) {
-            got = forward_tcp_to_upstream(&upstreams[i], cfg->timeout_ms,
+            got = attempt_tcp_upstream(&upstreams[i], cfg->timeout_ms,
                     query, query_len, response, response_len);
             if (got > 0) {
                 if (route != NULL) {
@@ -2613,7 +2672,7 @@ static ssize_t forward_udp(const config_t *cfg, const char *domain, const uint8_
             }
             continue;
         }
-        got = forward_udp_to_upstream(&upstreams[i], cfg->timeout_ms,
+        got = attempt_udp_upstream(&upstreams[i], cfg->timeout_ms,
                 query, query_len, response, response_len);
         if (got > 0) {
             if (dns_response_truncated(response, (size_t) got)) {
@@ -2629,7 +2688,7 @@ static ssize_t forward_udp(const config_t *cfg, const char *domain, const uint8_
                     memcpy(truncated_response, response, (size_t) got);
                     truncated_len = got;
                 }
-                tcp_got = forward_tcp_to_upstream(&upstreams[i], cfg->timeout_ms,
+                tcp_got = attempt_tcp_upstream(&upstreams[i], cfg->timeout_ms,
                         query, query_len, response, response_len);
                 if (tcp_got > 0) {
                     g_stats.upstream_tcp_fallbacks++;
@@ -2786,13 +2845,13 @@ static ssize_t forward_tcp_to_upstream(const upstream_t *upstream, int timeout_m
     return rlen;
 }
 
-static ssize_t forward_tcp(const config_t *cfg, const char *domain, const uint8_t *query,
+static ssize_t forward_tcp(config_t *cfg, const char *domain, const uint8_t *query,
                            size_t query_len, uint8_t *response, size_t response_len,
                            const char **route) {
     int i;
     int count = 0;
     bool split_route = false;
-    const upstream_t *upstreams;
+    upstream_t *upstreams;
     if (query_len > 65535) {
         return -1;
     }
@@ -2800,9 +2859,9 @@ static ssize_t forward_tcp(const config_t *cfg, const char *domain, const uint8_
     split_route = route != NULL && *route != NULL && strcmp(*route, "split_upstream") == 0;
     for (i = 0; i < count; i++) {
         ssize_t got = upstreams[i].protocol == UPSTREAM_PROTO_UDP
-                ? forward_udp_to_upstream(&upstreams[i], cfg->timeout_ms,
+                ? attempt_udp_upstream(&upstreams[i], cfg->timeout_ms,
                 query, query_len, response, response_len)
-                : forward_tcp_to_upstream(&upstreams[i], cfg->timeout_ms,
+                : attempt_tcp_upstream(&upstreams[i], cfg->timeout_ms,
                 query, query_len, response, response_len);
         if (got > 0) {
             if (route != NULL) {
@@ -3448,7 +3507,7 @@ static void finish_dns_query(const char *domain, const char *action, const char 
     add_log(domain, action, transport, source, uid, qtype, result, rule, upstream, latency_ms);
 }
 
-static void handle_dns_query(const config_t *cfg, const uint8_t *query, size_t query_len,
+static void handle_dns_query(config_t *cfg, const uint8_t *query, size_t query_len,
                              uint8_t *response, size_t *response_len, const char **action_out,
                              int tcp, const char *source, int uid) {
     char domain[MAX_DOMAIN];
@@ -3819,6 +3878,65 @@ static int response_rcode(const uint8_t *response, size_t response_len) {
     return response[3] & 0x0f;
 }
 
+static void write_upstream_runtime_line(int client, const char *key, int index,
+                                        const char *suffix, const upstream_t *upstream) {
+    if (upstream == NULL) {
+        return;
+    }
+    if (suffix != NULL && suffix[0] != '\0') {
+        write_control_response(client,
+                "%s[%d]=suffix=%s upstream=%s:%d protocol=%s requests=%llu successes=%llu "
+                "failures=%llu avg_latency_ms=%llu max_latency_ms=%llu "
+                "last_latency_ms=%d last_rcode=%d last_used=%llu\n",
+                key,
+                index,
+                suffix,
+                upstream->host,
+                upstream->port,
+                upstream_protocol_name(upstream->protocol),
+                (unsigned long long) upstream->requests,
+                (unsigned long long) upstream->successes,
+                (unsigned long long) upstream->failures,
+                (unsigned long long) div_u64(upstream->total_latency_ms, upstream->requests),
+                (unsigned long long) upstream->max_latency_ms,
+                upstream->last_latency_ms,
+                upstream->last_rcode,
+                (unsigned long long) upstream->last_used);
+        return;
+    }
+    write_control_response(client,
+            "%s[%d]=%s:%d protocol=%s requests=%llu successes=%llu failures=%llu "
+            "avg_latency_ms=%llu max_latency_ms=%llu last_latency_ms=%d "
+            "last_rcode=%d last_used=%llu\n",
+            key,
+            index,
+            upstream->host,
+            upstream->port,
+            upstream_protocol_name(upstream->protocol),
+            (unsigned long long) upstream->requests,
+            (unsigned long long) upstream->successes,
+            (unsigned long long) upstream->failures,
+            (unsigned long long) div_u64(upstream->total_latency_ms, upstream->requests),
+            (unsigned long long) upstream->max_latency_ms,
+            upstream->last_latency_ms,
+            upstream->last_rcode,
+            (unsigned long long) upstream->last_used);
+}
+
+static void write_upstream_runtime_stats(int client, const config_t *cfg) {
+    int i;
+    if (cfg == NULL) {
+        return;
+    }
+    for (i = 0; i < cfg->upstream_count; i++) {
+        write_upstream_runtime_line(client, "upstream_runtime", i, NULL, &cfg->upstreams[i]);
+    }
+    for (i = 0; i < cfg->split_upstream_count; i++) {
+        write_upstream_runtime_line(client, "split_upstream_runtime", i,
+                cfg->split_upstreams[i].suffix, &cfg->split_upstreams[i].upstream);
+    }
+}
+
 static void write_health_response(int client) {
     uint8_t query[MAX_PACKET];
     uint8_t response[MAX_PACKET];
@@ -3971,6 +4089,7 @@ static void write_health_response(int client) {
                     + g_cfg.temp_allow_count + g_cfg.temp_block_count
                     + g_cfg.app_exact_allow.count + g_cfg.app_exact_block.count
                     + g_cfg.app_suffix_allow.count + g_cfg.app_suffix_block.count);
+    write_upstream_runtime_stats(client, &g_cfg);
 }
 
 static void write_benchmark_response(int client) {
@@ -4236,6 +4355,7 @@ static void handle_control(int fd) {
                 g_cfg.temp_allow_count,
                 g_cfg.temp_block_count,
                 g_cfg.split_upstream_count);
+        write_upstream_runtime_stats(client, &g_cfg);
     } else if (strcmp(cmd, "health") == 0) {
         write_health_response(client);
     } else if (strcmp(cmd, "benchmark") == 0) {
