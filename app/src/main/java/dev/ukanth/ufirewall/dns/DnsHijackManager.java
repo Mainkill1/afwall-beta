@@ -175,7 +175,48 @@ public final class DnsHijackManager {
     }
 
     public static void requestReload(Context context) {
+        if (context == null) {
+            return;
+        }
+        if (prepareDaemon(context)) {
+            String response = queryControl(context, "reload");
+            if (response.startsWith("ok reload")) {
+                ApplicationErrorLog.add(context, "DNS daemon control reload completed: "
+                        + compactControlResponse(response));
+                return;
+            }
+            ApplicationErrorLog.add(context,
+                    "DNS daemon control reload unavailable; falling back to supervisor reload: "
+                            + compactControlResponse(response));
+        }
         runSupervisorAction(context, "reload", null);
+    }
+
+    public static String validateDnsConfiguration(Context context) {
+        if (context == null) {
+            return "validation unavailable: missing context\n";
+        }
+        String response = queryControl(context, "validate");
+        if (isDnsValidationRejected(response)) {
+            ApplicationErrorLog.add(context, "DNS daemon validation rejected config: "
+                    + compactControlResponse(response));
+        } else if (response.startsWith("validate=1")) {
+            ApplicationErrorLog.add(context, "DNS daemon validation accepted config: "
+                    + compactControlResponse(response));
+        } else {
+            ApplicationErrorLog.add(context, "DNS daemon validation unavailable: "
+                    + compactControlResponse(response));
+        }
+        return response;
+    }
+
+    public static boolean isDnsValidationRejected(String response) {
+        if (response == null) {
+            return false;
+        }
+        return response.startsWith("validate=0") || response.contains("\nvalidate=0")
+                || response.contains("status=config_rejected")
+                || response.contains("status=allocation_failed");
     }
 
     public static void runSupervisorAction(Context context, String action, RootCommand.Callback callback) {
@@ -829,6 +870,14 @@ public final class DnsHijackManager {
         } catch (IOException e) {
             return "control socket error: " + e.getMessage() + "\n";
         }
+    }
+
+    private static String compactControlResponse(String response) {
+        String compact = response == null ? "" : response.trim().replace('\n', ' ');
+        if (compact.length() > 240) {
+            compact = compact.substring(0, 240);
+        }
+        return compact.isEmpty() ? "empty response" : compact;
     }
 
     private static List<QueryEntry> parseQueryEntries(String raw) {

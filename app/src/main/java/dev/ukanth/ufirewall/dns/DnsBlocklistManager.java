@@ -644,6 +644,7 @@ public final class DnsBlocklistManager {
         try {
             replaceFromTemp(exactTmp, exact);
             replaceFromTemp(suffixTmp, suffix);
+            validateActivatedBlocklist(context, exactBackup, suffixBackup, exact, suffix);
         } catch (IOException e) {
             boolean restored = true;
             try {
@@ -666,6 +667,21 @@ public final class DnsBlocklistManager {
         result.message = "Activated DNS blocklist: " + result.exactRules.size()
                 + " exact, " + result.suffixRules.size() + " wildcard";
         ApplicationErrorLog.add(context, result.message + " in " + formatDuration(result.durationMs()));
+    }
+
+    private static void validateActivatedBlocklist(Context context, File exactBackup, File suffixBackup,
+                                                   File exact, File suffix) throws IOException {
+        if (!G.enableDnsHijack()) {
+            return;
+        }
+        String validation = DnsHijackManager.validateDnsConfiguration(context);
+        if (!DnsHijackManager.isDnsValidationRejected(validation)) {
+            return;
+        }
+        restoreBackup(exactBackup, exact);
+        restoreBackup(suffixBackup, suffix);
+        throw new IOException("DNS blocklist activation rejected by daemon validation; "
+                + "previous blocklist restored");
     }
 
     private static void writeTempRuleFile(File tmp, Set<String> rules) throws IOException {
