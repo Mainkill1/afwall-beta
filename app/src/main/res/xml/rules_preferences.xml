@@ -235,6 +235,18 @@
 
         <EditTextPreference
             android:dependency="enableDnsHijack"
+            android:key="dnsHijackAppAllowExact"
+            android:summary="@string/dns_hijack_app_allow_exact_summary"
+            android:title="@string/dns_hijack_app_allow_exact_title" />
+
+        <EditTextPreference
+            android:dependency="enableDnsHijack"
+            android:key="dnsHijackAppBlockExact"
+            android:summary="@string/dns_hijack_app_block_exact_summary"
+            android:title="@string/dns_hijack_app_block_exact_title" />
+
+        <EditTextPreference
+            android:dependency="enableDnsHijack"
             android:key="dnsHijackAllowRegex"
             android:summary="@string/dns_hijack_allow_regex_summary"
             android:title="@string/dns_hijack_allow_regex_title" />

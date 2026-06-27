@@ -222,12 +222,20 @@ public class DnsQueriesActivity extends AppCompatActivity {
                 DnsHijackManager.RULE_ALLOW_SUFFIX);
         addQueryAction(labels, actions, R.string.dns_query_temp_allow,
                 DnsHijackManager.RULE_TEMP_ALLOW);
+        if (parseQueryUid(entry) >= 0) {
+            addQueryAction(labels, actions, R.string.dns_query_app_allow_exact,
+                    DnsHijackManager.RULE_APP_ALLOW_EXACT);
+        }
         addQueryAction(labels, actions, R.string.dns_query_block_exact,
                 DnsHijackManager.RULE_BLOCK_EXACT);
         addQueryAction(labels, actions, R.string.dns_query_block_suffix,
                 DnsHijackManager.RULE_BLOCK_SUFFIX);
         addQueryAction(labels, actions, R.string.dns_query_temp_block,
                 DnsHijackManager.RULE_TEMP_BLOCK);
+        if (parseQueryUid(entry) >= 0) {
+            addQueryAction(labels, actions, R.string.dns_query_app_block_exact,
+                    DnsHijackManager.RULE_APP_BLOCK_EXACT);
+        }
         addQueryAction(labels, actions, R.string.dns_query_view_rule,
                 QUERY_ACTION_VIEW_RULE);
         if (resolveAppPackage(entry) != null) {
@@ -268,6 +276,9 @@ public class DnsQueriesActivity extends AppCompatActivity {
             case DnsHijackManager.RULE_TEMP_ALLOW:
                 action = DnsHijackManager.RULE_TEMP_ALLOW;
                 break;
+            case DnsHijackManager.RULE_APP_ALLOW_EXACT:
+                action = DnsHijackManager.RULE_APP_ALLOW_EXACT;
+                break;
             case DnsHijackManager.RULE_BLOCK_EXACT:
                 action = DnsHijackManager.RULE_BLOCK_EXACT;
                 break;
@@ -276,6 +287,9 @@ public class DnsQueriesActivity extends AppCompatActivity {
                 break;
             case DnsHijackManager.RULE_TEMP_BLOCK:
                 action = DnsHijackManager.RULE_TEMP_BLOCK;
+                break;
+            case DnsHijackManager.RULE_APP_BLOCK_EXACT:
+                action = DnsHijackManager.RULE_APP_BLOCK_EXACT;
                 break;
             default:
                 return;

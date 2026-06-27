@@ -192,6 +192,8 @@ public class G extends Application implements Application.ActivityLifecycleCallb
     private static final String DNS_HIJACK_ALLOW_SUFFIX = "dnsHijackAllowSuffix";
     private static final String DNS_HIJACK_BLOCK_EXACT = "dnsHijackBlockExact";
     private static final String DNS_HIJACK_BLOCK_SUFFIX = "dnsHijackBlockSuffix";
+    private static final String DNS_HIJACK_APP_ALLOW_EXACT = "dnsHijackAppAllowExact";
+    private static final String DNS_HIJACK_APP_BLOCK_EXACT = "dnsHijackAppBlockExact";
     private static final String DNS_HIJACK_ALLOW_REGEX = "dnsHijackAllowRegex";
     private static final String DNS_HIJACK_BLOCK_REGEX = "dnsHijackBlockRegex";
     private static final String DNS_HIJACK_TEMP_ALLOW = "dnsHijackTempAllow";
@@ -220,6 +222,8 @@ public class G extends Application implements Application.ActivityLifecycleCallb
             DNS_HIJACK_ALLOW_SUFFIX,
             DNS_HIJACK_BLOCK_EXACT,
             DNS_HIJACK_BLOCK_SUFFIX,
+            DNS_HIJACK_APP_ALLOW_EXACT,
+            DNS_HIJACK_APP_BLOCK_EXACT,
             DNS_HIJACK_ALLOW_REGEX,
             DNS_HIJACK_BLOCK_REGEX,
             DNS_HIJACK_TEMP_ALLOW,
@@ -407,6 +411,14 @@ public class G extends Application implements Application.ActivityLifecycleCallb
         return dnsPolicyPrefs().getString(DNS_HIJACK_BLOCK_SUFFIX, "");
     }
 
+    public static String dnsHijackAppAllowExact() {
+        return dnsPolicyPrefs().getString(DNS_HIJACK_APP_ALLOW_EXACT, "");
+    }
+
+    public static String dnsHijackAppBlockExact() {
+        return dnsPolicyPrefs().getString(DNS_HIJACK_APP_BLOCK_EXACT, "");
+    }
+
     public static String dnsHijackAllowRegex() {
         return dnsPolicyPrefs().getString(DNS_HIJACK_ALLOW_REGEX, "");
     }
@@ -509,6 +521,14 @@ public class G extends Application implements Application.ActivityLifecycleCallb
 
     public static boolean appendDnsHijackBlockSuffix(String domain) {
         return appendLinePreference(dnsWritablePolicyPrefs(), DNS_HIJACK_BLOCK_SUFFIX, domain);
+    }
+
+    public static boolean appendDnsHijackAppAllowExact(int uid, String domain) {
+        return appendUidDomainPreference(dnsWritablePolicyPrefs(), DNS_HIJACK_APP_ALLOW_EXACT, uid, domain);
+    }
+
+    public static boolean appendDnsHijackAppBlockExact(int uid, String domain) {
+        return appendUidDomainPreference(dnsWritablePolicyPrefs(), DNS_HIJACK_APP_BLOCK_EXACT, uid, domain);
     }
 
     public static boolean appendDnsHijackTempAllow(String domain, long expiresAtSeconds) {
@@ -631,6 +651,18 @@ public class G extends Application implements Application.ActivityLifecycleCallb
             prefs.edit().putString(key, android.text.TextUtils.join("\n", values)).commit();
         }
         return added || changed;
+    }
+
+    private static boolean appendUidDomainPreference(SharedPreferences prefs, String key,
+                                                     int uid, String rawDomain) {
+        if (uid < 0 || rawDomain == null) {
+            return false;
+        }
+        String domain = rawDomain.trim().toLowerCase(java.util.Locale.US);
+        if (domain.isEmpty()) {
+            return false;
+        }
+        return appendLinePreference(prefs, key, uid + "|" + domain);
     }
 
     private static void pruneExpiredTemporaryPreference(SharedPreferences prefs, String key) {

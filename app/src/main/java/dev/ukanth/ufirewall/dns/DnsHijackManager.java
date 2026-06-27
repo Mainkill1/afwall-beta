@@ -65,6 +65,8 @@ public final class DnsHijackManager {
     public static final int RULE_BLOCK_SUFFIX = 4;
     public static final int RULE_TEMP_ALLOW = 5;
     public static final int RULE_TEMP_BLOCK = 6;
+    public static final int RULE_APP_ALLOW_EXACT = 7;
+    public static final int RULE_APP_BLOCK_EXACT = 8;
     private static final long TEMP_RULE_DURATION_SECONDS = 15L * 60L;
 
     private DnsHijackManager() {
@@ -278,6 +280,8 @@ public final class DnsHijackManager {
         out.append("scheduled_blocklist_updates=").append(G.dnsHijackScheduledBlocklistUpdates()).append('\n');
         out.append("blocklist_update_interval_hours=")
                 .append(G.dnsHijackBlocklistUpdateIntervalHours()).append('\n');
+        out.append("app_allow_exact_entries=").append(countLines(G.dnsHijackAppAllowExact())).append('\n');
+        out.append("app_block_exact_entries=").append(countLines(G.dnsHijackAppBlockExact())).append('\n');
         out.append("temporary_allow_entries=").append(countLines(G.dnsHijackTempAllow())).append('\n');
         out.append("temporary_block_entries=").append(countLines(G.dnsHijackTempBlock())).append('\n');
         out.append("\n[blocklists]\n");
@@ -409,11 +413,18 @@ public final class DnsHijackManager {
             case RULE_TEMP_BLOCK:
                 added = G.appendDnsHijackTempBlock(domain, temporaryRuleExpiresAt());
                 break;
+            case RULE_APP_ALLOW_EXACT:
+                added = G.appendDnsHijackAppAllowExact(parseQueryUid(entry), domain);
+                break;
+            case RULE_APP_BLOCK_EXACT:
+                added = G.appendDnsHijackAppBlockExact(parseQueryUid(entry), domain);
+                break;
             default:
                 return false;
         }
         if (added) {
-            ApplicationErrorLog.add(context, "DNS query action added rule for " + domain + " action=" + action);
+            ApplicationErrorLog.add(context, "DNS query action added rule for " + domain
+                    + " uid=" + parseQueryUid(entry) + " action=" + action);
             requestReload(context);
         }
         return added;
@@ -798,6 +809,17 @@ public final class DnsHijackManager {
             }
         }
         return count;
+    }
+
+    private static int parseQueryUid(QueryEntry entry) {
+        if (entry == null || entry.uid == null) {
+            return -1;
+        }
+        try {
+            return Integer.parseInt(entry.uid.trim());
+        } catch (NumberFormatException e) {
+            return -1;
+        }
     }
 
     private static void logRedirectPolicy(Context context, String prefix) {
@@ -1600,6 +1622,8 @@ public final class DnsHijackManager {
         appendConfigEntries(config, "allow_suffix", G.dnsHijackAllowSuffix());
         appendConfigEntries(config, "block_exact", G.dnsHijackBlockExact());
         appendConfigEntries(config, "block_suffix", G.dnsHijackBlockSuffix());
+        appendConfigEntries(config, "app_allow_exact", G.dnsHijackAppAllowExact());
+        appendConfigEntries(config, "app_block_exact", G.dnsHijackAppBlockExact());
         appendConfigEntries(config, "allow_regex", G.dnsHijackAllowRegex());
         appendConfigEntries(config, "block_regex", G.dnsHijackBlockRegex());
         appendConfigEntries(config, "temp_allow", G.dnsHijackTempAllow());

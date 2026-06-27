@@ -353,6 +353,10 @@
     <string name="dns_hijack_block_exact_summary">Domains that should be blocked exactly. One entry per line.</string>
     <string name="dns_hijack_block_suffix_title">Wildcard block suffixes</string>
     <string name="dns_hijack_block_suffix_summary">Suffix rules that block matching subdomains and domains.</string>
+    <string name="dns_hijack_app_allow_exact_title">Per-app exact allow domains</string>
+    <string name="dns_hijack_app_allow_exact_summary">UID and domain pairs that should be allowed before global block rules. Use one uid|domain entry per line.</string>
+    <string name="dns_hijack_app_block_exact_title">Per-app exact block domains</string>
+    <string name="dns_hijack_app_block_exact_summary">UID and domain pairs that should be blocked for one app. Use one uid|domain entry per line.</string>
     <string name="dns_hijack_allow_regex_title">Regex allow rules</string>
     <string name="dns_hijack_allow_regex_summary">Regular expressions that allow matching queries.</string>
     <string name="dns_hijack_block_regex_title">Regex block rules</string>
@@ -422,9 +426,11 @@
     <string name="dns_query_allow_exact">Allow this domain</string>
     <string name="dns_query_allow_suffix">Allow this domain and subdomains</string>
     <string name="dns_query_temp_allow">Temporarily allow this domain</string>
+    <string name="dns_query_app_allow_exact">Allow for this app</string>
     <string name="dns_query_block_exact">Block this domain</string>
     <string name="dns_query_block_suffix">Block this domain and subdomains</string>
     <string name="dns_query_temp_block">Temporarily block this domain</string>
+    <string name="dns_query_app_block_exact">Block for this app</string>
     <string name="dns_query_view_rule">View rule</string>
     <string name="dns_query_rule_details_title">DNS decision</string>
     <string name="dns_query_view_app">View app</string>

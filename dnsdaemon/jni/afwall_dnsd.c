@@ -85,6 +85,17 @@ typedef struct {
 } string_rule_list_t;
 
 typedef struct {
+    int uid;
+    char domain[MAX_DOMAIN];
+} app_exact_rule_t;
+
+typedef struct {
+    app_exact_rule_t *items;
+    int count;
+    int capacity;
+} app_exact_rule_list_t;
+
+typedef struct {
     regex_t compiled;
     char pattern[MAX_DOMAIN];
     bool valid;
@@ -164,6 +175,12 @@ typedef struct {
     string_rule_list_t suffix_allow;
     string_rule_list_t exact_block;
     string_rule_list_t suffix_block;
+    app_exact_rule_list_t app_exact_allow;
+    app_exact_rule_list_t app_exact_block;
+    int *app_exact_allow_index;
+    int app_exact_allow_index_size;
+    int *app_exact_block_index;
+    int app_exact_block_index_size;
     int *exact_allow_index;
     int exact_allow_index_size;
     int *exact_block_index;
@@ -731,6 +748,16 @@ static void free_string_rule_list(string_rule_list_t *list) {
     list->capacity = 0;
 }
 
+static void free_app_exact_rule_list(app_exact_rule_list_t *list) {
+    if (list == NULL) {
+        return;
+    }
+    free(list->items);
+    list->items = NULL;
+    list->count = 0;
+    list->capacity = 0;
+}
+
 static void close_upstream_udp_sockets(config_t *cfg) {
     int i;
     if (cfg == NULL) {
@@ -761,6 +788,14 @@ static void free_config_dynamic(config_t *cfg) {
     free_string_rule_list(&cfg->suffix_allow);
     free_string_rule_list(&cfg->exact_block);
     free_string_rule_list(&cfg->suffix_block);
+    free_app_exact_rule_list(&cfg->app_exact_allow);
+    free_app_exact_rule_list(&cfg->app_exact_block);
+    free(cfg->app_exact_allow_index);
+    cfg->app_exact_allow_index = NULL;
+    cfg->app_exact_allow_index_size = 0;
+    free(cfg->app_exact_block_index);
+    cfg->app_exact_block_index = NULL;
+    cfg->app_exact_block_index_size = 0;
     free(cfg->exact_allow_index);
     cfg->exact_allow_index = NULL;
     cfg->exact_allow_index_size = 0;
@@ -808,6 +843,83 @@ static bool add_string_rule(string_rule_list_t *rules, const char *value) {
     }
     safe_copy(rules->items[rules->count].value, sizeof(rules->items[rules->count].value), value);
     lower_ascii(rules->items[rules->count].value);
+    rules->count++;
+    return true;
+}
+
+static bool valid_domain_rule(const char *value);
+
+static bool reserve_app_exact_rule_list(app_exact_rule_list_t *list, int needed) {
+    int next_capacity;
+    app_exact_rule_t *items;
+    if (list == NULL || needed < 0) {
+        return false;
+    }
+    if (list->capacity >= needed) {
+        return true;
+    }
+    next_capacity = list->capacity <= 0 ? INITIAL_REGEX_CAPACITY : list->capacity;
+    while (next_capacity < needed) {
+        if (next_capacity > INT_MAX / 2) {
+            return false;
+        }
+        next_capacity *= 2;
+    }
+    items = (app_exact_rule_t *) realloc(list->items,
+            (size_t) next_capacity * sizeof(app_exact_rule_t));
+    if (items == NULL) {
+        return false;
+    }
+    memset(items + list->capacity, 0,
+            (size_t) (next_capacity - list->capacity) * sizeof(app_exact_rule_t));
+    list->items = items;
+    list->capacity = next_capacity;
+    return true;
+}
+
+static bool add_app_exact_rule(app_exact_rule_list_t *rules, const char *value) {
+    char line[512];
+    char *separator;
+    char *uid_text;
+    char *domain;
+    char *end;
+    long uid;
+    if (rules == NULL || value == NULL || value[0] == '\0') {
+        return false;
+    }
+    safe_copy(line, sizeof(line), value);
+    trim(line);
+    uid_text = line;
+    separator = strchr(line, '|');
+    if (separator == NULL) {
+        separator = strchr(line, '=');
+    }
+    if (separator == NULL) {
+        separator = line;
+        while (*separator && !isspace((unsigned char) *separator) && *separator != ',') {
+            separator++;
+        }
+    }
+    if (separator == NULL || *separator == '\0') {
+        return false;
+    }
+    *separator = '\0';
+    domain = separator + 1;
+    trim(uid_text);
+    trim(domain);
+    lower_ascii(domain);
+    errno = 0;
+    uid = strtol(uid_text, &end, 10);
+    if (errno != 0 || end == uid_text || *end != '\0' || uid < 0 || uid > INT_MAX
+            || !valid_domain_rule(domain)) {
+        return false;
+    }
+    if (!reserve_app_exact_rule_list(rules, rules->count + 1)) {
+        return false;
+    }
+    rules->items[rules->count].uid = (int) uid;
+    safe_copy(rules->items[rules->count].domain,
+            sizeof(rules->items[rules->count].domain), domain);
     rules->count++;
     return true;
 }
@@ -995,6 +1107,91 @@ static bool exact_match_indexed(const string_rule_list_t *rules, const int *inde
         }
         if (ref > 0 && ref <= rules->count
                 && strcmp(rules->items[ref - 1].value, domain) == 0) {
+            return true;
+        }
+        slot = (slot + 1) % (uint32_t) index_size;
+    }
+    return false;
+}
+
+static uint32_t hash_app_exact_key(int uid, const char *domain) {
+    uint32_t h = hash_domain(domain, 0);
+    unsigned int value = (unsigned int) uid;
+    int i;
+    for (i = 0; i < 4; i++) {
+        h ^= (uint8_t) ((value >> (i * 8)) & 0xffu);
+        h *= 16777619u;
+    }
+    return h;
+}
+
+static bool build_app_exact_index(const app_exact_rule_list_t *rules,
+                                  int **index_out, int *index_size_out) {
+    int i;
+    int index_size;
+    int *index;
+    if (rules == NULL || index_out == NULL || index_size_out == NULL) {
+        return false;
+    }
+    free(*index_out);
+    *index_out = NULL;
+    *index_size_out = 0;
+    if (rules->count <= 0) {
+        return true;
+    }
+    index_size = choose_exact_index_size(rules->count);
+    if (index_size <= 0) {
+        return false;
+    }
+    index = (int *) calloc((size_t) index_size, sizeof(int));
+    if (index == NULL) {
+        return false;
+    }
+    for (i = 0; i < rules->count; i++) {
+        uint32_t slot = hash_app_exact_key(rules->items[i].uid,
+                rules->items[i].domain) % (uint32_t) index_size;
+        uint32_t probe;
+        for (probe = 0; probe < (uint32_t) index_size; probe++) {
+            int existing = index[slot];
+            if (existing == 0) {
+                index[slot] = i + 1;
+                break;
+            }
+            if (existing > 0 && existing <= rules->count
+                    && rules->items[existing - 1].uid == rules->items[i].uid
+                    && strcmp(rules->items[existing - 1].domain,
+                    rules->items[i].domain) == 0) {
+                break;
+            }
+            slot = (slot + 1) % (uint32_t) index_size;
+        }
+        if (probe == (uint32_t) index_size) {
+            free(index);
+            return false;
+        }
+    }
+    *index_out = index;
+    *index_size_out = index_size;
+    return true;
+}
+
+static bool app_exact_match_indexed(const app_exact_rule_list_t *rules, const int *index,
+                                    int index_size, int uid, const char *domain) {
+    uint32_t slot;
+    uint32_t probe;
+    if (rules == NULL || index == NULL || index_size <= 0 || uid == UID_UNKNOWN
+            || domain == NULL || domain[0] == '\0') {
+        return false;
+    }
+    slot = hash_app_exact_key(uid, domain) % (uint32_t) index_size;
+    for (probe = 0; probe < (uint32_t) index_size; probe++) {
+        int ref = index[slot];
+        if (ref == 0) {
+            return false;
+        }
+        if (ref > 0 && ref <= rules->count
+                && rules->items[ref - 1].uid == uid
+                && strcmp(rules->items[ref - 1].domain, domain) == 0) {
             return true;
         }
         slot = (slot + 1) % (uint32_t) index_size;
@@ -1205,9 +1402,12 @@ static bool regex_match_rules(const regex_rule_list_t *rules, const char *domain
     return false;
 }
 
-static decision_t evaluate_domain(const config_t *cfg, const char *domain, const char **reason) {
+static decision_t evaluate_domain(const config_t *cfg, const char *domain, int uid,
+                                  const char **reason) {
     uint64_t now = now_seconds();
     bool temp_allow = temp_match(cfg->temp_allow, cfg->temp_allow_count, domain, now);
+    bool app_allow = app_exact_match_indexed(&cfg->app_exact_allow,
+            cfg->app_exact_allow_index, cfg->app_exact_allow_index_size, uid, domain);
     bool exact_allow = exact_match_indexed(&cfg->exact_allow, cfg->exact_allow_index,
             cfg->exact_allow_index_size, domain);
     bool suffix_allow = suffix_trie_match(&cfg->suffix_allow_trie, domain);
@@ -1216,6 +1416,10 @@ static decision_t evaluate_domain(const config_t *cfg, const char *domain, const
 
     if (temp_match(cfg->temp_block, cfg->temp_block_count, domain, now)) {
         *reason = "temp_block";
+        block = true;
+    } else if (app_exact_match_indexed(&cfg->app_exact_block, cfg->app_exact_block_index,
+            cfg->app_exact_block_index_size, uid, domain)) {
+        *reason = "app_exact_block";
         block = true;
     } else if (exact_match_indexed(&cfg->exact_block, cfg->exact_block_index,
             cfg->exact_block_index_size, domain)) {
@@ -1234,6 +1438,10 @@ static decision_t evaluate_domain(const config_t *cfg, const char *domain, const
     }
     if (temp_allow) {
         *reason = "temp_allow";
+        return DECISION_ALLOW;
+    }
+    if (app_allow) {
+        *reason = "app_exact_allow";
         return DECISION_ALLOW;
     }
     if (exact_allow) {
@@ -2604,6 +2812,16 @@ static bool load_config(const char *path, config_t *new_cfg) {
                 fclose(fp);
                 return false;
             }
+        } else if (strcmp(key, "app_allow_exact") == 0) {
+            if (!add_app_exact_rule(&new_cfg->app_exact_allow, value)) {
+                fclose(fp);
+                return false;
+            }
+        } else if (strcmp(key, "app_block_exact") == 0) {
+            if (!add_app_exact_rule(&new_cfg->app_exact_block, value)) {
+                fclose(fp);
+                return false;
+            }
         } else if (strcmp(key, "allow_regex") == 0) {
             if (!add_regex_rule(&new_cfg->regex_allow, value)) {
                 fclose(fp);
@@ -2642,6 +2860,10 @@ static bool load_config(const char *path, config_t *new_cfg) {
             &new_cfg->exact_allow_index_size)
             || !build_exact_index(&new_cfg->exact_block, &new_cfg->exact_block_index,
             &new_cfg->exact_block_index_size)
+            || !build_app_exact_index(&new_cfg->app_exact_allow,
+            &new_cfg->app_exact_allow_index, &new_cfg->app_exact_allow_index_size)
+            || !build_app_exact_index(&new_cfg->app_exact_block,
+            &new_cfg->app_exact_block_index, &new_cfg->app_exact_block_index_size)
             || !build_suffix_trie(&new_cfg->suffix_allow, &new_cfg->suffix_allow_trie)
             || !build_suffix_trie(&new_cfg->suffix_block, &new_cfg->suffix_block_trie)) {
         return false;
@@ -2876,7 +3098,7 @@ static void handle_dns_query(const config_t *cfg, const uint8_t *query, size_t q
                 "block", "parse", "none", &start);
         return;
     }
-    if (evaluate_domain(cfg, domain, &reason) == DECISION_BLOCK) {
+    if (evaluate_domain(cfg, domain, uid, &reason) == DECISION_BLOCK) {
         *response_len = build_block_response(query, query_len, response, MAX_PACKET);
         g_stats.blocked++;
         *action_out = reason;
@@ -3264,7 +3486,9 @@ static void write_health_response(int client) {
             "safe_search=%d\nsafe_search_rewrites=%llu\n"
             "log_writer_thread=%d\nlog_ring_entries=%llu\nlog_unflushed_entries=%llu\n"
             "exact_allow_index_size=%d\nexact_block_index_size=%d\n"
+            "app_exact_allow_index_size=%d\napp_exact_block_index_size=%d\n"
             "suffix_allow_trie_nodes=%d\nsuffix_block_trie_nodes=%d\n"
+            "rules_app_exact_allow=%d\nrules_app_exact_block=%d\n"
             "rules_total=%d\n",
             (long) getpid(),
             (unsigned long long) (now_seconds() - g_stats.start_time),
@@ -3322,12 +3546,17 @@ static void write_health_response(int client) {
             (unsigned long long) log_unflushed_entries,
             g_cfg.exact_allow_index_size,
             g_cfg.exact_block_index_size,
+            g_cfg.app_exact_allow_index_size,
+            g_cfg.app_exact_block_index_size,
             g_cfg.suffix_allow_trie.count,
             g_cfg.suffix_block_trie.count,
+            g_cfg.app_exact_allow.count,
+            g_cfg.app_exact_block.count,
             g_cfg.exact_allow.count + g_cfg.suffix_allow.count
                     + g_cfg.exact_block.count + g_cfg.suffix_block.count
                     + g_cfg.regex_allow.count + g_cfg.regex_block.count
-                    + g_cfg.temp_allow_count + g_cfg.temp_block_count);
+                    + g_cfg.temp_allow_count + g_cfg.temp_block_count
+                    + g_cfg.app_exact_allow.count + g_cfg.app_exact_block.count);
 }
 
 static void write_benchmark_response(int client) {
@@ -3482,9 +3711,11 @@ static void handle_control(int fd) {
                 "resolver_scope_hash=%llu\n"
                 "avg_latency_ms=%llu\nmax_latency_ms=%llu\nupstream_avg_latency_ms=%llu\n"
                 "reloads=%llu\nexact_allow_index_size=%d\nexact_block_index_size=%d\n"
+                "app_exact_allow_index_size=%d\napp_exact_block_index_size=%d\n"
                 "suffix_allow_trie_nodes=%d\n"
                 "suffix_block_trie_nodes=%d\nrules_exact_allow=%d\nrules_suffix_allow=%d\nrules_exact_block=%d\n"
-                "rules_suffix_block=%d\nrules_regex_allow=%d\nrules_regex_block=%d\n"
+                "rules_suffix_block=%d\nrules_app_exact_allow=%d\nrules_app_exact_block=%d\n"
+                "rules_regex_allow=%d\nrules_regex_block=%d\n"
                 "rules_temp_allow=%d\nrules_temp_block=%d\nsplit_upstreams=%d\n",
                 (long) getpid(),
                 (unsigned long long) (now_seconds() - g_stats.start_time),
@@ -3554,12 +3785,16 @@ static void handle_control(int fd) {
                 (unsigned long long) g_stats.reloads,
                 g_cfg.exact_allow_index_size,
                 g_cfg.exact_block_index_size,
+                g_cfg.app_exact_allow_index_size,
+                g_cfg.app_exact_block_index_size,
                 g_cfg.suffix_allow_trie.count,
                 g_cfg.suffix_block_trie.count,
                 g_cfg.exact_allow.count,
                 g_cfg.suffix_allow.count,
                 g_cfg.exact_block.count,
                 g_cfg.suffix_block.count,
+                g_cfg.app_exact_allow.count,
+                g_cfg.app_exact_block.count,
                 g_cfg.regex_allow.count,
                 g_cfg.regex_block.count,
                 g_cfg.temp_allow_count,
