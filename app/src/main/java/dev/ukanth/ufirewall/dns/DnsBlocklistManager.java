@@ -147,8 +147,8 @@ public final class DnsBlocklistManager {
             return result;
         }
         try {
-            copyIfExists(exactBackup, new File(dir, EXACT_FILE));
-            copyIfExists(suffixBackup, new File(dir, SUFFIX_FILE));
+            restoreBackup(exactBackup, new File(dir, EXACT_FILE));
+            restoreBackup(suffixBackup, new File(dir, SUFFIX_FILE));
             result.finish();
             writeMetadata(context, "rollback", "rollback", countLines(new File(dir, EXACT_FILE)),
                     countLines(new File(dir, SUFFIX_FILE)), 0, 0, 0, 0, 0,
@@ -633,10 +633,32 @@ public final class DnsBlocklistManager {
         }
         File exact = new File(dir, EXACT_FILE);
         File suffix = new File(dir, SUFFIX_FILE);
-        copyIfExists(exact, new File(dir, EXACT_BACKUP));
-        copyIfExists(suffix, new File(dir, SUFFIX_BACKUP));
-        writeRuleFile(new File(dir, EXACT_FILE + ".tmp"), exact, result.exactRules);
-        writeRuleFile(new File(dir, SUFFIX_FILE + ".tmp"), suffix, result.suffixRules);
+        File exactBackup = new File(dir, EXACT_BACKUP);
+        File suffixBackup = new File(dir, SUFFIX_BACKUP);
+        File exactTmp = new File(dir, EXACT_FILE + ".tmp");
+        File suffixTmp = new File(dir, SUFFIX_FILE + ".tmp");
+        writeTempRuleFile(exactTmp, result.exactRules);
+        writeTempRuleFile(suffixTmp, result.suffixRules);
+        backupCurrent(exact, exactBackup);
+        backupCurrent(suffix, suffixBackup);
+        try {
+            replaceFromTemp(exactTmp, exact);
+            replaceFromTemp(suffixTmp, suffix);
+        } catch (IOException e) {
+            boolean restored = true;
+            try {
+                restoreBackup(exactBackup, exact);
+                restoreBackup(suffixBackup, suffix);
+            } catch (IOException restoreError) {
+                restored = false;
+                e.addSuppressed(restoreError);
+            }
+            throw new IOException("DNS blocklist activation failed; previous blocklist "
+                    + (restored ? "restored" : "restore failed") + ": " + e.getMessage(), e);
+        } finally {
+            deleteIfExists(exactTmp);
+            deleteIfExists(suffixTmp);
+        }
         result.finish();
         writeMetadata(context, result.sourceLabel, "active", result.exactRules.size(), result.suffixRules.size(),
                 result.duplicates, result.invalid, result.skipped, result.sources, result.lines,
@@ -646,7 +668,7 @@ public final class DnsBlocklistManager {
         ApplicationErrorLog.add(context, result.message + " in " + formatDuration(result.durationMs()));
     }
 
-    private static void writeRuleFile(File tmp, File target, Set<String> rules) throws IOException {
+    private static void writeTempRuleFile(File tmp, Set<String> rules) throws IOException {
         if (tmp.exists() && !tmp.delete()) {
             throw new IOException("Unable to replace temporary " + tmp.getName());
         }
@@ -656,11 +678,30 @@ public final class DnsBlocklistManager {
                 writer.write('\n');
             }
         }
+    }
+
+    private static void replaceFromTemp(File tmp, File target) throws IOException {
         if (target.exists() && !target.delete()) {
             throw new IOException("Unable to replace " + target.getName());
         }
         if (!tmp.renameTo(target)) {
             throw new IOException("Unable to activate " + target.getName());
+        }
+    }
+
+    private static void backupCurrent(File source, File backup) throws IOException {
+        if (source.exists()) {
+            copyIfExists(source, backup);
+        } else {
+            deleteIfExists(backup);
+        }
+    }
+
+    private static void restoreBackup(File backup, File target) throws IOException {
+        if (backup.exists()) {
+            copyIfExists(backup, target);
+        } else {
+            deleteIfExists(target);
         }
     }
 
@@ -737,6 +778,12 @@ public final class DnsBlocklistManager {
             while ((read = input.read(buffer)) != -1) {
                 output.write(buffer, 0, read);
             }
+        }
+    }
+
+    private static void deleteIfExists(File file) throws IOException {
+        if (file.exists() && !file.delete()) {
+            throw new IOException("Unable to delete " + file.getName());
         }
     }
 
