@@ -224,6 +224,7 @@ typedef struct {
     char domain[MAX_DOMAIN];
     char action[32];
     char transport[8];
+    char source[64];
     char result[16];
     char rule[32];
     char upstream[32];
@@ -490,6 +491,7 @@ static int cache_entry_count_by_type(bool negative) {
 }
 
 static void add_log(const char *domain, const char *action, const char *transport,
+                    const char *source,
                     uint16_t qtype, const char *result, const char *rule,
                     const char *upstream, int latency_ms) {
     log_entry_t *entry;
@@ -502,6 +504,7 @@ static void add_log(const char *domain, const char *action, const char *transpor
     safe_copy(entry->domain, sizeof(entry->domain), domain);
     safe_copy(entry->action, sizeof(entry->action), action);
     safe_copy(entry->transport, sizeof(entry->transport), transport);
+    safe_copy(entry->source, sizeof(entry->source), source == NULL ? "unknown" : source);
     safe_copy(entry->result, sizeof(entry->result), result);
     safe_copy(entry->rule, sizeof(entry->rule), rule);
     safe_copy(entry->upstream, sizeof(entry->upstream), upstream);
@@ -584,12 +587,13 @@ static void flush_logs(void) {
 
     for (i = 0; i < pending_count; i++) {
         const log_entry_t *entry = &pending[i];
-        fprintf(fp, "%llu %s %s %dms transport=%s qtype=%u result=%s rule=%s upstream=%s\n",
+        fprintf(fp, "%llu %s %s %dms transport=%s source=%s qtype=%u result=%s rule=%s upstream=%s\n",
                 (unsigned long long) entry->timestamp,
                 entry->action,
                 entry->domain,
                 entry->latency_ms,
                 entry->transport,
+                entry->source,
                 (unsigned int) entry->qtype,
                 entry->result,
                 entry->rule,
@@ -2811,19 +2815,20 @@ static int create_control_socket(const char *path) {
 }
 
 static void finish_dns_query(const char *domain, const char *action, const char *transport,
-                             uint16_t qtype, const char *result, const char *rule,
+                             const char *source, uint16_t qtype,
+                             const char *result, const char *rule,
                              const char *upstream, const struct timeval *start) {
     struct timeval end;
     int latency_ms;
     gettimeofday(&end, NULL);
     latency_ms = elapsed_ms(start, &end);
     record_query_latency(latency_ms);
-    add_log(domain, action, transport, qtype, result, rule, upstream, latency_ms);
+    add_log(domain, action, transport, source, qtype, result, rule, upstream, latency_ms);
 }
 
 static void handle_dns_query(const config_t *cfg, const uint8_t *query, size_t query_len,
                              uint8_t *response, size_t *response_len, const char **action_out,
-                             int tcp) {
+                             int tcp, const char *source) {
     char domain[MAX_DOMAIN];
     uint16_t qtype = 0;
     const char *reason = "parse";
@@ -2847,7 +2852,7 @@ static void handle_dns_query(const config_t *cfg, const uint8_t *query, size_t q
         *action_out = "invalid";
         g_stats.invalid_queries++;
         g_stats.blocked++;
-        finish_dns_query("unknown", "invalid", transport, qtype,
+        finish_dns_query("unknown", "invalid", transport, source, qtype,
                 "block", "parse", "none", &start);
         return;
     }
@@ -2855,7 +2860,7 @@ static void handle_dns_query(const config_t *cfg, const uint8_t *query, size_t q
         *response_len = build_block_response(query, query_len, response, MAX_PACKET);
         g_stats.blocked++;
         *action_out = reason;
-        finish_dns_query(domain, reason, transport, qtype,
+        finish_dns_query(domain, reason, transport, source, qtype,
                 "block", reason, "none", &start);
         return;
     }
@@ -2865,7 +2870,7 @@ static void handle_dns_query(const config_t *cfg, const uint8_t *query, size_t q
         g_stats.allowed++;
         g_stats.safe_search_rewrites++;
         *action_out = "safe_search";
-        finish_dns_query(domain, *action_out, transport, qtype,
+        finish_dns_query(domain, *action_out, transport, source, qtype,
                 "allow", "safe_search", "local", &start);
         return;
     }
@@ -2878,7 +2883,7 @@ static void handle_dns_query(const config_t *cfg, const uint8_t *query, size_t q
         }
         g_stats.allowed++;
         *action_out = cache_negative ? "cache_negative" : "cache";
-        finish_dns_query(domain, *action_out, transport, qtype,
+        finish_dns_query(domain, *action_out, transport, source, qtype,
                 "allow", *action_out, "cache", &start);
         return;
     }
@@ -2901,7 +2906,7 @@ static void handle_dns_query(const config_t *cfg, const uint8_t *query, size_t q
         g_stats.allowed++;
         g_stats.upstream_successes++;
         *action_out = route;
-        finish_dns_query(domain, route, transport, qtype,
+        finish_dns_query(domain, route, transport, source, qtype,
                 "allow", "upstream", route, &start);
         return;
     }
@@ -2910,15 +2915,42 @@ static void handle_dns_query(const config_t *cfg, const uint8_t *query, size_t q
         *response_len = 0;
         *action_out = "upstream_failed";
         g_stats.fail_open_drops++;
-        finish_dns_query(domain, *action_out, transport, qtype,
+        finish_dns_query(domain, *action_out, transport, source, qtype,
                 "fail_open", "upstream_failed", route, &start);
     } else {
         *response_len = build_block_response(query, query_len, response, MAX_PACKET);
         g_stats.blocked++;
         *action_out = "fail_closed";
         g_stats.fail_closed_blocks++;
-        finish_dns_query(domain, *action_out, transport, qtype,
+        finish_dns_query(domain, *action_out, transport, source, qtype,
                 "block", "fail_closed", route, &start);
+    }
+}
+
+static void format_sockaddr_endpoint(const struct sockaddr_storage *addr, char *out, size_t out_len) {
+    char host[INET6_ADDRSTRLEN];
+    uint16_t port;
+    if (out == NULL || out_len == 0) {
+        return;
+    }
+    safe_copy(out, out_len, "unknown");
+    if (addr == NULL) {
+        return;
+    }
+    if (addr->ss_family == AF_INET) {
+        const struct sockaddr_in *in = (const struct sockaddr_in *) addr;
+        if (inet_ntop(AF_INET, &in->sin_addr, host, sizeof(host)) == NULL) {
+            return;
+        }
+        port = ntohs(in->sin_port);
+        snprintf(out, out_len, "%s:%u", host, (unsigned int) port);
+    } else if (addr->ss_family == AF_INET6) {
+        const struct sockaddr_in6 *in6 = (const struct sockaddr_in6 *) addr;
+        if (inet_ntop(AF_INET6, &in6->sin6_addr, host, sizeof(host)) == NULL) {
+            return;
+        }
+        port = ntohs(in6->sin6_port);
+        snprintf(out, out_len, "[%s]:%u", host, (unsigned int) port);
     }
 }
 
@@ -2927,6 +2959,7 @@ static bool handle_udp(int fd, int flags) {
     uint8_t response[MAX_PACKET];
     struct sockaddr_storage peer;
     socklen_t peer_len = sizeof(peer);
+    char source[64];
     ssize_t got;
     size_t response_len = 0;
     const char *action = "none";
@@ -2936,21 +2969,22 @@ static bool handle_udp(int fd, int flags) {
     if (got <= 0) {
         return false;
     }
+    format_sockaddr_endpoint(&peer, source, sizeof(source));
     gettimeofday(&start, NULL);
-    handle_dns_query(&g_cfg, query, (size_t) got, response, &response_len, &action, 0);
+    handle_dns_query(&g_cfg, query, (size_t) got, response, &response_len, &action, 0, source);
     gettimeofday(&end, NULL);
     (void) action;
     if (response_len > 0) {
         sendto(fd, response, response_len, 0, (struct sockaddr *) &peer, peer_len);
     }
     if (response_len == 0 && !g_cfg.fail_open) {
-        add_log("unknown", "no_response", "udp", 0,
+        add_log("unknown", "no_response", "udp", source, 0,
                 "block", "no_response", "none", elapsed_ms(&start, &end));
     }
     return true;
 }
 
-static void handle_tcp_client(int client) {
+static void handle_tcp_client(int client, const char *source) {
     uint8_t lenbuf[2];
     uint8_t query[MAX_PACKET];
     uint8_t response[MAX_PACKET + 2];
@@ -2974,7 +3008,7 @@ static void handle_tcp_client(int client) {
         }
         return;
     }
-    handle_dns_query(&g_cfg, query, qlen, response + 2, &response_len, &action, 1);
+    handle_dns_query(&g_cfg, query, qlen, response + 2, &response_len, &action, 1, source);
     (void) action;
     if (response_len > 0) {
         response[0] = (uint8_t) ((response_len >> 8) & 0xffu);
@@ -2984,9 +3018,13 @@ static void handle_tcp_client(int client) {
 }
 
 static void handle_tcp(int fd) {
-    int client = accept(fd, NULL, NULL);
+    struct sockaddr_storage peer;
+    socklen_t peer_len = sizeof(peer);
+    char source[64];
+    int client = accept(fd, (struct sockaddr *) &peer, &peer_len);
     if (client >= 0) {
-        handle_tcp_client(client);
+        format_sockaddr_endpoint(&peer, source, sizeof(source));
+        handle_tcp_client(client, source);
         close(client);
     }
 }
@@ -3412,12 +3450,13 @@ static void handle_control(int fd) {
         pthread_mutex_unlock(&g_log_mutex);
         for (i = 0; i < count; i++) {
             write_control_response(client,
-                    "%llu %s %s %dms transport=%s qtype=%u result=%s rule=%s upstream=%s\n",
+                    "%llu %s %s %dms transport=%s source=%s qtype=%u result=%s rule=%s upstream=%s\n",
                     (unsigned long long) entries[i].timestamp,
                     entries[i].action,
                     entries[i].domain,
                     entries[i].latency_ms,
                     entries[i].transport,
+                    entries[i].source,
                     (unsigned int) entries[i].qtype,
                     entries[i].result,
                     entries[i].rule,

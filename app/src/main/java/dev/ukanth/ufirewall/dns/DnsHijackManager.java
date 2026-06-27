@@ -1188,10 +1188,11 @@ public final class DnsHijackManager {
         public final String result;
         public final String rule;
         public final String upstream;
+        public final String source;
 
         private QueryEntry(long timestamp, String action, String domain, String latency,
                            String transport, String qtype, String result, String rule,
-                           String upstream) {
+                           String upstream, String source) {
             this.timestamp = timestamp;
             this.action = action;
             this.domain = domain;
@@ -1201,6 +1202,7 @@ public final class DnsHijackManager {
             this.result = emptyFallback(result, action);
             this.rule = emptyFallback(rule, action);
             this.upstream = emptyFallback(upstream, "unknown");
+            this.source = emptyFallback(source, "unknown");
         }
 
         private static QueryEntry parse(String line) {
@@ -1222,7 +1224,7 @@ public final class DnsHijackManager {
                 return new QueryEntry(timestamp, action, domain, parts[3],
                         extras.get("transport"), extras.get("qtype"),
                         extras.get("result"), extras.get("rule"),
-                        extras.get("upstream"));
+                        extras.get("upstream"), extras.get("source"));
             } catch (NumberFormatException e) {
                 return null;
             }
@@ -1235,6 +1237,7 @@ public final class DnsHijackManager {
         public String displayLine() {
             return timestamp + "  " + action + "  " + domain + "  " + latency
                     + "  transport=" + transport
+                    + "  source=" + source
                     + "  qtype=" + qtype
                     + "  result=" + result
                     + "  rule=" + rule
