@@ -534,6 +534,7 @@ public final class DnsHijackManager {
         boolean tcpListener = "1".equals(firstValue(statusValues, healthValues, "tcp_listener"));
         boolean controlListener = "1".equals(firstValue(statusValues, healthValues, "control_listener"));
         boolean privateDnsBypass = androidPrivateDnsMayBypass(context);
+        boolean rootUidBypass = true;
         long upstreamLatency = parseLong(firstValue(healthValues, statusValues, "upstream_probe_ms"), -1L);
         String upstreamProbe = firstValue(healthValues, statusValues, "upstream_probe");
         boolean listenersReady = udpListener && tcpListener && controlListener;
@@ -597,6 +598,7 @@ public final class DnsHijackManager {
                 + " | Profile: " + profile
                 + (G.dnsHijackUseProfilePolicy() ? " override" : " global")
                 + privateDnsDashboardLine(context)
+                + rootUidBypassDashboardLine()
                 + "\nBlocklist updated: " + blocklistUpdated
                 + "\nToday: " + allowedToday + " allowed | " + blockedToday + " blocked"
                 + "\nTotal: " + queries + " queries | Restarts: " + restartCount
@@ -612,7 +614,7 @@ public final class DnsHijackManager {
                 + " | TCP " + listenerLabel(tcpListener)
                 + " | Control " + listenerLabel(controlListener);
         return new DnsDashboardSnapshot(statusLine, details, enabled, running,
-                listenersReady, upstreamHealthy, privateDnsBypass, powerStatus);
+                listenersReady, upstreamHealthy, privateDnsBypass, rootUidBypass, powerStatus);
     }
 
     public static boolean androidPrivateDnsMayBypass(Context context) {
@@ -788,8 +790,10 @@ public final class DnsHijackManager {
     }
 
     private static void appendAndroidDnsCompatibility(Context context, StringBuilder out) {
-        out.append("capture_scope=udp_tcp_port_53_output_and_prerouting\n");
+        out.append("capture_scope=udp_tcp_port_53_output_and_prerouting_except_uid0_output\n");
         out.append("encrypted_dns_note=Private DNS/DoT on 853 and in-app DoH are not port-53 DNS and can bypass NAT capture\n");
+        out.append("root_uid_output_bypass=enabled_to_prevent_daemon_upstream_recursion\n");
+        out.append("root_uid_capture_warning=").append(rootUidBypassWarning()).append('\n');
         out.append("private_dns_mode=").append(readAndroidPrivateDnsMode(context)).append('\n');
         String specifier = readAndroidPrivateDnsSpecifier(context);
         out.append("private_dns_specifier=")
@@ -822,6 +826,15 @@ public final class DnsHijackManager {
             return "Power: root daemon watchdog runs outside app power limits; app updates are not battery-optimized";
         }
         return "Power: root daemon watchdog runs outside app power limits; app update power state " + optimized;
+    }
+
+    private static String rootUidBypassDashboardLine() {
+        return "\nAndroid DNS routing: root-owned DNS output bypasses capture to prevent daemon recursion";
+    }
+
+    private static String rootUidBypassWarning() {
+        return "UID 0 OUTPUT DNS is returned before redirect so the root daemon can reach upstream resolvers; "
+                + "devices that emit normal DNS through root-owned system services can bypass capture";
     }
 
     private static String readAndroidPrivateDnsMode(Context context) {
@@ -1012,6 +1025,9 @@ public final class DnsHijackManager {
         }
         if (snapshot.privateDnsMayBypass) {
             warnings.add("Android Private DNS may bypass capture");
+        }
+        if (snapshot.rootUidMayBypass) {
+            warnings.add("root/system DNS may bypass capture");
         }
         if (!blockers.isEmpty()) {
             return "Readiness: repair needed (" + joinLabels(blockers) + ")";
@@ -2284,12 +2300,13 @@ public final class DnsHijackManager {
         public final boolean listenersReady;
         public final boolean upstreamProbeHealthy;
         public final boolean privateDnsMayBypass;
+        public final boolean rootUidMayBypass;
         public final String powerLine;
 
         private DnsDashboardSnapshot(String statusLine, String detailLine, boolean enabled,
                                      boolean daemonRunning, boolean listenersReady,
                                      boolean upstreamProbeHealthy, boolean privateDnsMayBypass,
-                                     String powerLine) {
+                                     boolean rootUidMayBypass, String powerLine) {
             this.statusLine = statusLine;
             this.detailLine = detailLine;
             this.enabled = enabled;
@@ -2297,6 +2314,7 @@ public final class DnsHijackManager {
             this.listenersReady = listenersReady;
             this.upstreamProbeHealthy = upstreamProbeHealthy;
             this.privateDnsMayBypass = privateDnsMayBypass;
+            this.rootUidMayBypass = rootUidMayBypass;
             this.powerLine = powerLine;
         }
     }
