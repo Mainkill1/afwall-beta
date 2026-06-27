@@ -106,6 +106,8 @@ typedef struct {
     int fail_open;
     int timeout_ms;
     int cache_size;
+    int query_logging;
+    int persist_query_logs;
     char control_socket[256];
     char log_file[256];
     char pid_file[256];
@@ -204,9 +206,14 @@ static pthread_t g_log_thread;
 static bool g_log_thread_started = false;
 static volatile sig_atomic_t g_log_thread_running = 0;
 static char g_log_file_path[256];
+static bool g_log_persistence_enabled = true;
 static cache_entry_t *g_cache = NULL;
 static int g_cache_capacity = 0;
 static char g_config_path[256];
+
+static bool config_bool_value(const char *value) {
+    return value != NULL && atoi(value) != 0;
+}
 
 static uint64_t now_seconds(void) {
     return (uint64_t) time(NULL);
@@ -433,6 +440,9 @@ static void add_log(const char *domain, const char *action, const char *transpor
                     uint16_t qtype, const char *result, const char *rule,
                     const char *upstream, int latency_ms) {
     log_entry_t *entry;
+    if (!g_cfg.query_logging) {
+        return;
+    }
     pthread_mutex_lock(&g_log_mutex);
     entry = &g_logs[g_log_pos % LOG_RING];
     entry->seq = ++g_log_seq;
@@ -449,9 +459,13 @@ static void add_log(const char *domain, const char *action, const char *transpor
     pthread_mutex_unlock(&g_log_mutex);
 }
 
-static void set_log_file_path(const char *path) {
+static void set_log_output(const char *path, bool persist) {
     pthread_mutex_lock(&g_log_mutex);
     safe_copy(g_log_file_path, sizeof(g_log_file_path), path == NULL ? "" : path);
+    g_log_persistence_enabled = persist;
+    if (!g_log_persistence_enabled) {
+        g_log_flushed_seq = g_log_seq;
+    }
     pthread_mutex_unlock(&g_log_mutex);
 }
 
@@ -462,7 +476,7 @@ static bool copy_log_file_path(char *out, size_t out_len) {
     }
     pthread_mutex_lock(&g_log_mutex);
     safe_copy(out, out_len, g_log_file_path);
-    has_path = out[0] != '\0';
+    has_path = g_log_persistence_enabled && out[0] != '\0';
     pthread_mutex_unlock(&g_log_mutex);
     return has_path;
 }
@@ -479,7 +493,13 @@ static void flush_logs(void) {
 
     pthread_mutex_lock(&g_log_flush_mutex);
     pthread_mutex_lock(&g_log_mutex);
-    if (g_log_file_path[0] == '\0' || g_log_flushed_seq == g_log_seq) {
+    if (!g_log_persistence_enabled || g_log_file_path[0] == '\0') {
+        g_log_flushed_seq = g_log_seq;
+        pthread_mutex_unlock(&g_log_mutex);
+        pthread_mutex_unlock(&g_log_flush_mutex);
+        return;
+    }
+    if (g_log_flushed_seq == g_log_seq) {
         pthread_mutex_unlock(&g_log_mutex);
         pthread_mutex_unlock(&g_log_flush_mutex);
         return;
@@ -587,6 +607,14 @@ static void read_log_stats(uint64_t *ring_entries, uint64_t *unflushed_entries) 
     if (unflushed_entries != NULL) {
         *unflushed_entries = unflushed;
     }
+}
+
+static void clear_log_ring(void) {
+    pthread_mutex_lock(&g_log_mutex);
+    memset(g_logs, 0, sizeof(g_logs));
+    g_log_pos = 0;
+    g_log_flushed_seq = g_log_seq;
+    pthread_mutex_unlock(&g_log_mutex);
 }
 
 static void free_regex_rules(config_t *cfg) {
@@ -1590,6 +1618,8 @@ static void default_config(config_t *cfg) {
     cfg->fail_open = 1;
     cfg->timeout_ms = DEFAULT_TIMEOUT_MS;
     cfg->cache_size = DEFAULT_CACHE_SIZE;
+    cfg->query_logging = 1;
+    cfg->persist_query_logs = 1;
     safe_copy(cfg->control_socket, sizeof(cfg->control_socket), "/data/local/tmp/afwall_dnsd.sock");
     cfg->upstream_count = 1;
     safe_copy(cfg->upstreams[0].host, sizeof(cfg->upstreams[0].host), "1.1.1.1");
@@ -1754,6 +1784,10 @@ static bool load_config(const char *path, config_t *new_cfg) {
             if (cache_size >= 0 && cache_size <= MAX_CACHE_SIZE) {
                 new_cfg->cache_size = cache_size;
             }
+        } else if (strcmp(key, "query_logging") == 0) {
+            new_cfg->query_logging = config_bool_value(value);
+        } else if (strcmp(key, "persist_query_logs") == 0) {
+            new_cfg->persist_query_logs = config_bool_value(value);
         } else if (strcmp(key, "upstream") == 0) {
             parse_upstream(new_cfg, value);
         } else if (strcmp(key, "split_upstream") == 0) {
@@ -1874,7 +1908,10 @@ static bool reload_config(void) {
     free(g_cache);
     g_cache = next_cache;
     g_cache_capacity = g_cfg.cache_size;
-    set_log_file_path(g_cfg.log_file);
+    set_log_output(g_cfg.log_file, g_cfg.persist_query_logs != 0);
+    if (!g_cfg.query_logging) {
+        clear_log_ring();
+    }
     g_stats.reloads++;
     return true;
 }
@@ -2214,6 +2251,7 @@ static void write_health_response(int client) {
             "upstream_tcp_fallbacks=%llu\nupstream_truncated_responses=%llu\n"
             "memory_rss_kb=%ld\nmemory_hwm_kb=%ld\ncpu_user_ms=%llu\n"
             "cpu_system_ms=%llu\ncpu_total_ms=%llu\n"
+            "query_logging=%d\npersist_query_logs=%d\n"
             "log_writer_thread=%d\nlog_ring_entries=%llu\nlog_unflushed_entries=%llu\n"
             "exact_index_size=%d\nsuffix_allow_trie_nodes=%d\nsuffix_block_trie_nodes=%d\n"
             "rules_total=%d\n",
@@ -2245,6 +2283,8 @@ static void write_health_response(int client) {
             (unsigned long long) cpu_user_ms,
             (unsigned long long) cpu_system_ms,
             (unsigned long long) cpu_total_ms,
+            g_cfg.query_logging,
+            g_cfg.persist_query_logs,
             g_log_thread_started ? 1 : 0,
             (unsigned long long) log_ring_entries,
             (unsigned long long) log_unflushed_entries,
@@ -2382,6 +2422,7 @@ static void handle_control(int fd) {
                 "allowed=%llu\nblocked=%llu\nfail_open_drops=%llu\nfail_closed_blocks=%llu\n"
                 "memory_rss_kb=%ld\nmemory_hwm_kb=%ld\ncpu_user_ms=%llu\n"
                 "cpu_system_ms=%llu\ncpu_total_ms=%llu\n"
+                "query_logging=%d\npersist_query_logs=%d\n"
                 "log_writer_thread=%d\nlog_ring_entries=%llu\nlog_unflushed_entries=%llu\n"
                 "cache_size=%d\ncache_entries=%d\ncache_hits=%llu\ncache_misses=%llu\n"
                 "cache_positive_entries=%d\ncache_negative_entries=%d\n"
@@ -2412,6 +2453,8 @@ static void handle_control(int fd) {
                 (unsigned long long) cpu_user_ms,
                 (unsigned long long) cpu_system_ms,
                 (unsigned long long) cpu_total_ms,
+                g_cfg.query_logging,
+                g_cfg.persist_query_logs,
                 g_log_thread_started ? 1 : 0,
                 (unsigned long long) log_ring_entries,
                 (unsigned long long) log_unflushed_entries,

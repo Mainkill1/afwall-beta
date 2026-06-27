@@ -643,6 +643,8 @@ public class RulesPreferenceFragment extends PreferenceFragment implements
                 || key.equals("dnsHijackBootPersistence")
                 || key.equals("dnsHijackTimeoutMs")
                 || key.equals("dnsHijackCacheSize")
+                || key.equals("dnsHijackQueryLogging")
+                || key.equals("dnsHijackPersistQueryLogs")
                 || key.equals("dnsHijackAllowExact")
                 || key.equals("dnsHijackAllowSuffix")
                 || key.equals("dnsHijackBlockExact")

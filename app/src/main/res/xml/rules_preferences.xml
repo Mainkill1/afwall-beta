@@ -170,6 +170,20 @@
             android:title="@string/dns_hijack_cache_size_title" />
 
         <CheckBoxPreference
+            android:defaultValue="true"
+            android:dependency="enableDnsHijack"
+            android:key="dnsHijackQueryLogging"
+            android:summary="@string/dns_hijack_query_logging_summary"
+            android:title="@string/dns_hijack_query_logging_title" />
+
+        <CheckBoxPreference
+            android:defaultValue="true"
+            android:dependency="dnsHijackQueryLogging"
+            android:key="dnsHijackPersistQueryLogs"
+            android:summary="@string/dns_hijack_persist_query_logs_summary"
+            android:title="@string/dns_hijack_persist_query_logs_title" />
+
+        <CheckBoxPreference
             android:defaultValue="false"
             android:dependency="enableDnsHijack"
             android:key="dnsHijackUseProfilePolicy"

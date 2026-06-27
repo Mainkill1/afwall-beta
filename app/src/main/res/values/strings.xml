@@ -330,6 +330,10 @@
     <string name="dns_hijack_timeout_summary">DNS upstream timeout in milliseconds.</string>
     <string name="dns_hijack_cache_size_title">DNS cache size</string>
     <string name="dns_hijack_cache_size_summary">Maximum daemon DNS cache entries. Use 0 to disable caching; maximum is 4096.</string>
+    <string name="dns_hijack_query_logging_title">DNS query logging</string>
+    <string name="dns_hijack_query_logging_summary">Keep live DNS query rows in the daemon ring buffer for diagnostics and the query viewer.</string>
+    <string name="dns_hijack_persist_query_logs_title">Save DNS query history</string>
+    <string name="dns_hijack_persist_query_logs_summary">Write daemon query logs to app-private storage for historical search and export.</string>
     <string name="dns_hijack_profile_policy_title">Use active profile DNS policy</string>
     <string name="dns_hijack_profile_policy_summary">When enabled, saved DNS settings and compiled blocklists follow the active firewall profile.</string>
     <string name="dns_hijack_save_profile_policy_title">Save DNS policy to active profile</string>
