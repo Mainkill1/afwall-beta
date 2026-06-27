@@ -380,6 +380,10 @@ static int g_uid_cache_pos = 0;
 static char g_config_path[256];
 static int g_udp_listener_ready = 0;
 static int g_tcp_listener_ready = 0;
+static int g_udp_listener_v4_ready = 0;
+static int g_udp_listener_v6_ready = 0;
+static int g_tcp_listener_v4_ready = 0;
+static int g_tcp_listener_v6_ready = 0;
 static int g_control_listener_ready = 0;
 
 static void write_control_response(int fd, const char *fmt, ...);
@@ -4181,6 +4185,8 @@ static void write_validate_response(int client) {
             "validate=1\nstatus=ok\nactive_generation=%llu\ncandidate_generation=%llu\n"
             "validations=%llu\nvalidation_failures=%llu\n"
             "runtime_ready=%d\nudp_listener=%d\ntcp_listener=%d\ncontrol_listener=%d\n"
+            "udp_listener_v4=%d\nudp_listener_v6=%d\n"
+            "tcp_listener_v4=%d\ntcp_listener_v6=%d\n"
             "control_socket_configured=%d\npid_file_configured=%d\nheartbeat_file_configured=%d\n"
             "upstreams=%d\nsplit_upstreams=%d\n"
             "compiled_upstream_addresses=%d\nreusable_udp_upstream_sockets=%d\n"
@@ -4209,6 +4215,10 @@ static void write_validate_response(int client) {
             g_udp_listener_ready,
             g_tcp_listener_ready,
             g_control_listener_ready,
+            g_udp_listener_v4_ready,
+            g_udp_listener_v6_ready,
+            g_tcp_listener_v4_ready,
+            g_tcp_listener_v6_ready,
             candidate->control_socket[0] != '\0' ? 1 : 0,
             candidate->pid_file[0] != '\0' ? 1 : 0,
             candidate->heartbeat_file[0] != '\0' ? 1 : 0,
@@ -4280,16 +4290,36 @@ static void write_heartbeat_file(void) {
     }
 }
 
-static int create_udp_socket(int port) {
+static int create_udp_socket4(int port) {
     int fd;
-    int off = 0;
+    int on = 1;
+    struct sockaddr_in addr;
+    fd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (fd < 0) {
+        return -1;
+    }
+    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on));
+    set_socket_buffers(fd);
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_ANY);
+    addr.sin_port = htons((uint16_t) port);
+    if (bind(fd, (struct sockaddr *) &addr, sizeof(addr)) != 0) {
+        close(fd);
+        return -1;
+    }
+    return fd;
+}
+
+static int create_udp_socket6(int port) {
+    int fd;
     int on = 1;
     struct sockaddr_in6 addr6;
     fd = socket(AF_INET6, SOCK_DGRAM, 0);
     if (fd < 0) {
         return -1;
     }
-    setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &off, sizeof(off));
+    setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &on, sizeof(on));
     setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on));
     set_socket_buffers(fd);
     memset(&addr6, 0, sizeof(addr6));
@@ -4303,16 +4333,36 @@ static int create_udp_socket(int port) {
     return fd;
 }
 
-static int create_tcp_socket(int port) {
+static int create_tcp_socket4(int port) {
     int fd;
-    int off = 0;
+    int on = 1;
+    struct sockaddr_in addr;
+    fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) {
+        return -1;
+    }
+    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on));
+    set_socket_buffers(fd);
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_ANY);
+    addr.sin_port = htons((uint16_t) port);
+    if (bind(fd, (struct sockaddr *) &addr, sizeof(addr)) != 0 || listen(fd, 16) != 0) {
+        close(fd);
+        return -1;
+    }
+    return fd;
+}
+
+static int create_tcp_socket6(int port) {
+    int fd;
     int on = 1;
     struct sockaddr_in6 addr6;
     fd = socket(AF_INET6, SOCK_STREAM, 0);
     if (fd < 0) {
         return -1;
     }
-    setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &off, sizeof(off));
+    setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &on, sizeof(on));
     setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on));
     set_socket_buffers(fd);
     memset(&addr6, 0, sizeof(addr6));
@@ -4907,6 +4957,8 @@ static void write_health_response(int client) {
     write_control_response(client,
             "health=1\nrunning=1\npid=%ld\nuptime=%llu\nlisten_port=%d\n"
             "udp_listener=%d\ntcp_listener=%d\ncontrol_listener=%d\n"
+            "udp_listener_v4=%d\nudp_listener_v6=%d\n"
+            "tcp_listener_v4=%d\ntcp_listener_v6=%d\n"
             "generation=%llu\nupstreams=%d\nsplit_upstreams=%d\nupstream_probe=%s\n"
             "compiled_upstream_addresses=%d\nreusable_udp_upstream_sockets=%d\n"
             "upstream_backoff_active=%d\n"
@@ -4957,6 +5009,10 @@ static void write_health_response(int client) {
             g_udp_listener_ready,
             g_tcp_listener_ready,
             g_control_listener_ready,
+            g_udp_listener_v4_ready,
+            g_udp_listener_v6_ready,
+            g_tcp_listener_v4_ready,
+            g_tcp_listener_v6_ready,
             (unsigned long long) g_cfg.generation,
             g_cfg.upstream_count,
             g_cfg.split_upstream_count,
@@ -5192,6 +5248,8 @@ static void handle_control(int fd) {
         write_control_response(client,
                 "running=1\npid=%ld\nuptime=%llu\ngeneration=%llu\nlisten_port=%d\n"
                 "udp_listener=%d\ntcp_listener=%d\ncontrol_listener=%d\n"
+                "udp_listener_v4=%d\nudp_listener_v6=%d\n"
+                "tcp_listener_v4=%d\ntcp_listener_v6=%d\n"
                 "queries=%llu\nudp_queries=%llu\ntcp_queries=%llu\ninvalid_queries=%llu\n"
                 "queries_today=%llu\nblocked_today=%llu\nallowed_today=%llu\n"
                 "stats_day_start=%llu\n"
@@ -5248,6 +5306,10 @@ static void handle_control(int fd) {
                 g_udp_listener_ready,
                 g_tcp_listener_ready,
                 g_control_listener_ready,
+                g_udp_listener_v4_ready,
+                g_udp_listener_v6_ready,
+                g_tcp_listener_v4_ready,
+                g_tcp_listener_v6_ready,
                 (unsigned long long) g_stats.queries,
                 (unsigned long long) g_stats.udp_queries,
                 (unsigned long long) g_stats.tcp_queries,
@@ -5431,8 +5493,10 @@ static void usage(const char *argv0) {
 }
 
 int main(int argc, char **argv) {
-    int udp_fd;
-    int tcp_fd;
+    int udp4_fd;
+    int udp6_fd;
+    int tcp4_fd;
+    int tcp6_fd;
     int control_fd;
     int i;
     uint64_t last_heartbeat = 0;
@@ -5457,15 +5521,23 @@ int main(int argc, char **argv) {
     signal(SIGTERM, signal_handler);
     signal(SIGINT, signal_handler);
     signal(SIGHUP, signal_handler);
-    udp_fd = create_udp_socket(g_cfg.listen_port);
-    tcp_fd = create_tcp_socket(g_cfg.listen_port);
+    udp4_fd = create_udp_socket4(g_cfg.listen_port);
+    udp6_fd = create_udp_socket6(g_cfg.listen_port);
+    tcp4_fd = create_tcp_socket4(g_cfg.listen_port);
+    tcp6_fd = create_tcp_socket6(g_cfg.listen_port);
     control_fd = create_control_socket(g_cfg.control_socket);
-    if (udp_fd < 0 || tcp_fd < 0 || control_fd < 0) {
-        if (udp_fd >= 0) {
-            close(udp_fd);
+    if (udp4_fd < 0 || tcp4_fd < 0 || control_fd < 0) {
+        if (udp4_fd >= 0) {
+            close(udp4_fd);
         }
-        if (tcp_fd >= 0) {
-            close(tcp_fd);
+        if (udp6_fd >= 0) {
+            close(udp6_fd);
+        }
+        if (tcp4_fd >= 0) {
+            close(tcp4_fd);
+        }
+        if (tcp6_fd >= 0) {
+            close(tcp6_fd);
         }
         if (control_fd >= 0) {
             close(control_fd);
@@ -5478,8 +5550,12 @@ int main(int argc, char **argv) {
         fprintf(stderr, "failed to create listeners on port %d\n", g_cfg.listen_port);
         return 1;
     }
-    g_udp_listener_ready = 1;
-    g_tcp_listener_ready = 1;
+    g_udp_listener_v4_ready = udp4_fd >= 0 ? 1 : 0;
+    g_udp_listener_v6_ready = udp6_fd >= 0 ? 1 : 0;
+    g_tcp_listener_v4_ready = tcp4_fd >= 0 ? 1 : 0;
+    g_tcp_listener_v6_ready = tcp6_fd >= 0 ? 1 : 0;
+    g_udp_listener_ready = g_udp_listener_v4_ready;
+    g_tcp_listener_ready = g_tcp_listener_v4_ready;
     g_control_listener_ready = 1;
     /* Publish the PID only after listeners exist so supervisors do not accept a half-start. */
     write_pid_file();
@@ -5490,23 +5566,35 @@ int main(int argc, char **argv) {
         fd_set readfds;
         struct timeval timeout;
         uint64_t heartbeat_now;
-        int maxfd = udp_fd;
+        int maxfd = control_fd;
         int ready;
         if (g_reload_requested) {
             g_reload_requested = 0;
             reload_config();
         }
         FD_ZERO(&readfds);
-        FD_SET(udp_fd, &readfds);
-        FD_SET(tcp_fd, &readfds);
+        FD_SET(udp4_fd, &readfds);
+        if (udp6_fd >= 0) {
+            FD_SET(udp6_fd, &readfds);
+        }
+        FD_SET(tcp4_fd, &readfds);
+        if (tcp6_fd >= 0) {
+            FD_SET(tcp6_fd, &readfds);
+        }
         FD_SET(control_fd, &readfds);
         timeout.tv_sec = 1;
         timeout.tv_usec = 0;
-        if (tcp_fd > maxfd) {
-            maxfd = tcp_fd;
+        if (udp4_fd > maxfd) {
+            maxfd = udp4_fd;
         }
-        if (control_fd > maxfd) {
-            maxfd = control_fd;
+        if (udp6_fd > maxfd) {
+            maxfd = udp6_fd;
+        }
+        if (tcp4_fd > maxfd) {
+            maxfd = tcp4_fd;
+        }
+        if (tcp6_fd > maxfd) {
+            maxfd = tcp6_fd;
         }
         ready = select(maxfd + 1, &readfds, NULL, NULL, &timeout);
         if (ready < 0) {
@@ -5515,11 +5603,11 @@ int main(int argc, char **argv) {
             }
             break;
         }
-        if (FD_ISSET(udp_fd, &readfds)) {
+        if (FD_ISSET(udp4_fd, &readfds)) {
             int drained = 0;
             int limit = AFWALL_HAS_MSG_DONTWAIT ? UDP_DRAIN_LIMIT : 1;
             /* Drain a bounded UDP burst so queued DNS packets are not left behind under load. */
-            while (drained < limit && handle_udp(udp_fd, MSG_DONTWAIT)) {
+            while (drained < limit && handle_udp(udp4_fd, MSG_DONTWAIT)) {
                 drained++;
             }
             if (drained > 1) {
@@ -5527,8 +5615,22 @@ int main(int argc, char **argv) {
                 g_stats.udp_drain_packets += (uint64_t) drained;
             }
         }
-        if (FD_ISSET(tcp_fd, &readfds)) {
-            handle_tcp(tcp_fd);
+        if (udp6_fd >= 0 && FD_ISSET(udp6_fd, &readfds)) {
+            int drained = 0;
+            int limit = AFWALL_HAS_MSG_DONTWAIT ? UDP_DRAIN_LIMIT : 1;
+            while (drained < limit && handle_udp(udp6_fd, MSG_DONTWAIT)) {
+                drained++;
+            }
+            if (drained > 1) {
+                g_stats.udp_drain_batches++;
+                g_stats.udp_drain_packets += (uint64_t) drained;
+            }
+        }
+        if (FD_ISSET(tcp4_fd, &readfds)) {
+            handle_tcp(tcp4_fd);
+        }
+        if (tcp6_fd >= 0 && FD_ISSET(tcp6_fd, &readfds)) {
+            handle_tcp(tcp6_fd);
         }
         if (FD_ISSET(control_fd, &readfds)) {
             handle_control(control_fd);
@@ -5546,9 +5648,19 @@ int main(int argc, char **argv) {
     write_cache_snapshot(&g_cfg, g_cache, g_cache_capacity);
     g_udp_listener_ready = 0;
     g_tcp_listener_ready = 0;
+    g_udp_listener_v4_ready = 0;
+    g_udp_listener_v6_ready = 0;
+    g_tcp_listener_v4_ready = 0;
+    g_tcp_listener_v6_ready = 0;
     g_control_listener_ready = 0;
-    close(udp_fd);
-    close(tcp_fd);
+    close(udp4_fd);
+    if (udp6_fd >= 0) {
+        close(udp6_fd);
+    }
+    close(tcp4_fd);
+    if (tcp6_fd >= 0) {
+        close(tcp6_fd);
+    }
     close(control_fd);
     unlink(g_cfg.control_socket);
     unlink(g_cfg.pid_file);

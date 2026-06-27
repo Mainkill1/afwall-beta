@@ -530,14 +530,25 @@ public final class DnsHijackManager {
         if (ruleCount < 0L) {
             ruleCount = sumDashboardRuleCounts(statusValues, healthValues);
         }
+        boolean ipv6Expected = G.enableIPv6();
         boolean udpListener = "1".equals(firstValue(statusValues, healthValues, "udp_listener"));
         boolean tcpListener = "1".equals(firstValue(statusValues, healthValues, "tcp_listener"));
+        boolean udpListenerV4 = listenerFamilyReady(statusValues, healthValues,
+                "udp_listener_v4", "udp_listener");
+        boolean udpListenerV6 = listenerFamilyReady(statusValues, healthValues,
+                "udp_listener_v6", "udp_listener");
+        boolean tcpListenerV4 = listenerFamilyReady(statusValues, healthValues,
+                "tcp_listener_v4", "tcp_listener");
+        boolean tcpListenerV6 = listenerFamilyReady(statusValues, healthValues,
+                "tcp_listener_v6", "tcp_listener");
         boolean controlListener = "1".equals(firstValue(statusValues, healthValues, "control_listener"));
         boolean privateDnsBypass = androidPrivateDnsMayBypass(context);
         boolean rootUidBypass = true;
         long upstreamLatency = parseLong(firstValue(healthValues, statusValues, "upstream_probe_ms"), -1L);
         String upstreamProbe = firstValue(healthValues, statusValues, "upstream_probe");
-        boolean listenersReady = udpListener && tcpListener && controlListener;
+        boolean listenersReady = controlListener && udpListener && tcpListener
+                && udpListenerV4 && tcpListenerV4
+                && (!ipv6Expected || (udpListenerV6 && tcpListenerV6));
         boolean upstreamHealthy = upstreamLatency >= 0L && "ok".equalsIgnoreCase(upstreamProbe);
         String powerStatus = androidPowerDashboardLine(context);
         String restartCount = readSmallFileValue(new File(workDir(context), RESTART_COUNT), "0");
@@ -610,8 +621,10 @@ public final class DnsHijackManager {
                 + "\n" + systemLine
                 + "\n" + powerStatus
                 + "\n" + rulesLine
-                + "\nListeners: UDP " + listenerLabel(udpListener)
-                + " | TCP " + listenerLabel(tcpListener)
+                + "\nListeners: UDP v4 " + listenerLabel(udpListenerV4)
+                + " | UDP v6 " + listenerFamilyLabel(udpListenerV6, ipv6Expected)
+                + " | TCP v4 " + listenerLabel(tcpListenerV4)
+                + " | TCP v6 " + listenerFamilyLabel(tcpListenerV6, ipv6Expected)
                 + " | Control " + listenerLabel(controlListener);
         return new DnsDashboardSnapshot(statusLine, details, enabled, running,
                 listenersReady, upstreamHealthy, privateDnsBypass, rootUidBypass, powerStatus);
@@ -1789,6 +1802,23 @@ public final class DnsHijackManager {
 
     private static String listenerLabel(boolean ready) {
         return ready ? "ready" : "missing";
+    }
+
+    private static String listenerFamilyLabel(boolean ready, boolean expected) {
+        if (!expected) {
+            return "disabled";
+        }
+        return listenerLabel(ready);
+    }
+
+    private static boolean listenerFamilyReady(Map<String, String> primaryValues,
+                                               Map<String, String> fallbackValues,
+                                               String familyKey, String aggregateKey) {
+        String familyValue = firstValue(primaryValues, fallbackValues, familyKey);
+        if (familyValue != null && !familyValue.trim().isEmpty()) {
+            return "1".equals(familyValue);
+        }
+        return "1".equals(firstValue(primaryValues, fallbackValues, aggregateKey));
     }
 
     private static String normalizeSupervisorAction(String action) {
