@@ -2768,7 +2768,6 @@ int main(int argc, char **argv) {
         fprintf(stderr, "failed to load config: %s\n", g_config_path);
         return 1;
     }
-    write_pid_file();
     signal(SIGTERM, signal_handler);
     signal(SIGINT, signal_handler);
     signal(SIGHUP, signal_handler);
@@ -2776,9 +2775,22 @@ int main(int argc, char **argv) {
     tcp_fd = create_tcp_socket(g_cfg.listen_port);
     control_fd = create_control_socket(g_cfg.control_socket);
     if (udp_fd < 0 || tcp_fd < 0 || control_fd < 0) {
+        if (udp_fd >= 0) {
+            close(udp_fd);
+        }
+        if (tcp_fd >= 0) {
+            close(tcp_fd);
+        }
+        if (control_fd >= 0) {
+            close(control_fd);
+            unlink(g_cfg.control_socket);
+        }
+        unlink(g_cfg.pid_file);
         fprintf(stderr, "failed to create listeners on port %d\n", g_cfg.listen_port);
         return 1;
     }
+    /* Publish the PID only after listeners exist so supervisors do not accept a half-start. */
+    write_pid_file();
     start_log_thread();
     while (g_running) {
         fd_set readfds;
