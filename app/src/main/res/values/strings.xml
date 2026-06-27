@@ -305,6 +305,10 @@
     <string name="dns_hijack_port_summary">Port used by the local root DNS daemon. Reapply firewall rules after changing this.</string>
     <string name="dns_hijack_upstreams_title">Upstream DNS servers</string>
     <string name="dns_hijack_upstreams_summary">One upstream per line. Use host:port, udp://host:port, tcp://host:port, or bracketed IPv6.</string>
+    <string name="dns_hijack_upstream_providers_title">Upstream DNS provider presets</string>
+    <string name="dns_hijack_upstream_providers_summary">Choose a known resolver pair using supported UDP or TCP DNS transports.</string>
+    <string name="dns_hijack_upstream_provider_applied">DNS upstream provider applied: %1$s.</string>
+    <string name="dns_hijack_upstream_provider_failed">Unable to apply DNS upstream provider.</string>
     <string name="dns_hijack_bootstrap_upstreams_title">Bootstrap DNS servers</string>
     <string name="dns_hijack_bootstrap_upstreams_summary">Resolvers used to resolve hostname-based upstreams before writing daemon config.</string>
     <string name="dns_hijack_benchmark_upstreams_title">Benchmark upstream DNS</string>
@@ -447,6 +451,26 @@
         <item>https://adaway.org/hosts.txt</item>
         <item>https://small.oisd.nl/</item>
         <item>https://raw.githubusercontent.com/hagezi/dns-blocklists/main/domains/light.txt</item>
+    </string-array>
+
+    <string-array name="dns_hijack_upstream_provider_names">
+        <item>Cloudflare UDP</item>
+        <item>Cloudflare TCP</item>
+        <item>Quad9 UDP</item>
+        <item>Quad9 TCP</item>
+        <item>Google UDP</item>
+        <item>AdGuard DNS UDP</item>
+        <item>CleanBrowsing Family UDP</item>
+    </string-array>
+
+    <string-array name="dns_hijack_upstream_provider_values">
+        <item>cloudflare-udp</item>
+        <item>cloudflare-tcp</item>
+        <item>quad9-udp</item>
+        <item>quad9-tcp</item>
+        <item>google-udp</item>
+        <item>adguard-udp</item>
+        <item>cleanbrowsing-family-udp</item>
     </string-array>
 
     <string-array name="dns_hijack_profile_preset_names">

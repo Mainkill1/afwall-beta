@@ -91,6 +91,12 @@
             android:summary="@string/dns_hijack_upstreams_summary"
             android:title="@string/dns_hijack_upstreams_title" />
 
+        <Preference
+            android:dependency="enableDnsHijack"
+            android:key="dnsHijackUpstreamProviders"
+            android:summary="@string/dns_hijack_upstream_providers_summary"
+            android:title="@string/dns_hijack_upstream_providers_title" />
+
         <EditTextPreference
             android:defaultValue="1.1.1.1:53&#10;8.8.8.8:53"
             android:dependency="enableDnsHijack"

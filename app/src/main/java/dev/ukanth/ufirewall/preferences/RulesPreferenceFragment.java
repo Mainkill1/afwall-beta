@@ -126,6 +126,14 @@ public class RulesPreferenceFragment extends PreferenceFragment implements
             });
         }
 
+        Preference upstreamProviders = findPreference("dnsHijackUpstreamProviders");
+        if (upstreamProviders != null) {
+            upstreamProviders.setOnPreferenceClickListener(preference -> {
+                showDnsUpstreamProviderDialog();
+                return true;
+            });
+        }
+
         Preference rollbackBlocklist = findPreference("dnsHijackRollbackBlocklist");
         if (rollbackBlocklist != null) {
             rollbackBlocklist.setOnPreferenceClickListener(preference -> {
@@ -432,6 +440,48 @@ public class RulesPreferenceFragment extends PreferenceFragment implements
             String result = DnsHijackManager.benchmarkUpstreams(ctx);
             new Handler(Looper.getMainLooper()).post(() -> showDnsBenchmarkResult(result));
         }).start();
+    }
+
+    private void showDnsUpstreamProviderDialog() {
+        if (getActivity() == null) {
+            return;
+        }
+        String[] names = getResources().getStringArray(R.array.dns_hijack_upstream_provider_names);
+        String[] values = getResources().getStringArray(R.array.dns_hijack_upstream_provider_values);
+        new MaterialDialog.Builder(getActivity())
+                .title(R.string.dns_hijack_upstream_providers_title)
+                .items(names)
+                .itemsCallback((dialog, view, which, text) -> {
+                    if (which >= 0 && which < values.length) {
+                        applyDnsUpstreamProvider(values[which], text == null ? "" : text.toString());
+                    }
+                })
+                .negativeText(R.string.Cancel)
+                .show();
+    }
+
+    private void applyDnsUpstreamProvider(String providerId, String providerName) {
+        if (ctx == null) {
+            return;
+        }
+        boolean savedNewProfilePolicy = true;
+        boolean applied = G.applyDnsHijackUpstreamProvider(providerId);
+        if (applied && G.dnsHijackUseProfilePolicy()
+                && !G.activeDnsHijackProfilePolicySaved()) {
+            savedNewProfilePolicy = G.saveActiveDnsHijackProfilePolicy();
+        }
+        if (!applied || !savedNewProfilePolicy) {
+            ApplicationErrorLog.add(ctx, "DNS upstream provider preset failed: " + providerId);
+            Api.toast(ctx, getString(R.string.dns_hijack_upstream_provider_failed));
+            return;
+        }
+        Api.setRulesUpToDate(false);
+        if (G.enableDnsHijack()) {
+            DnsHijackManager.requestReload(ctx);
+        }
+        ApplicationErrorLog.add(ctx, "DNS upstream provider preset applied: " + providerId
+                + (G.dnsHijackUseProfilePolicy() ? " with active profile policy" : " globally"));
+        Api.toast(ctx, getString(R.string.dns_hijack_upstream_provider_applied, providerName));
     }
 
     private void showDnsBenchmarkResult(String result) {

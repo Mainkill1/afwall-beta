@@ -358,6 +358,43 @@ public class G extends Application implements Application.ActivityLifecycleCallb
         return dnsPolicyPrefs().getString(DNS_HIJACK_SPLIT_UPSTREAMS, "");
     }
 
+    public static boolean applyDnsHijackUpstreamProvider(String providerId) {
+        if (providerId == null) {
+            return false;
+        }
+        String provider = providerId.trim().toLowerCase(java.util.Locale.US);
+        String upstreams;
+        String bootstrapUpstreams;
+        if ("cloudflare-udp".equals(provider)) {
+            upstreams = "udp://1.1.1.1:53\nudp://1.0.0.1:53";
+            bootstrapUpstreams = upstreams;
+        } else if ("cloudflare-tcp".equals(provider)) {
+            upstreams = "tcp://1.1.1.1:53\ntcp://1.0.0.1:53";
+            bootstrapUpstreams = "udp://1.1.1.1:53\nudp://1.0.0.1:53";
+        } else if ("quad9-udp".equals(provider)) {
+            upstreams = "udp://9.9.9.9:53\nudp://149.112.112.112:53";
+            bootstrapUpstreams = upstreams;
+        } else if ("quad9-tcp".equals(provider)) {
+            upstreams = "tcp://9.9.9.9:53\ntcp://149.112.112.112:53";
+            bootstrapUpstreams = "udp://9.9.9.9:53\nudp://149.112.112.112:53";
+        } else if ("google-udp".equals(provider)) {
+            upstreams = "udp://8.8.8.8:53\nudp://8.8.4.4:53";
+            bootstrapUpstreams = upstreams;
+        } else if ("adguard-udp".equals(provider)) {
+            upstreams = "udp://94.140.14.14:53\nudp://94.140.15.15:53";
+            bootstrapUpstreams = "udp://1.1.1.1:53\nudp://8.8.8.8:53";
+        } else if ("cleanbrowsing-family-udp".equals(provider)) {
+            upstreams = "udp://185.228.168.168:53\nudp://185.228.169.168:53";
+            bootstrapUpstreams = "udp://1.1.1.1:53\nudp://8.8.8.8:53";
+        } else {
+            return false;
+        }
+        return dnsWritablePolicyPrefs().edit()
+                .putString(DNS_HIJACK_UPSTREAMS, upstreams)
+                .putString(DNS_HIJACK_BOOTSTRAP_UPSTREAMS, bootstrapUpstreams)
+                .commit();
+    }
+
     public static String dnsHijackCaptureUids() {
         return dnsPolicyPrefs().getString(DNS_HIJACK_CAPTURE_UIDS, "");
     }
