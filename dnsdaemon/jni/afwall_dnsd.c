@@ -173,6 +173,7 @@ typedef struct {
     temp_rule_t temp_block[MAX_TEMP_RULES];
     int temp_allow_count;
     int temp_block_count;
+    uint64_t resolver_scope_hash;
     uint64_t generation;
 } config_t;
 
@@ -193,6 +194,7 @@ typedef struct {
     uint64_t cache_lru_evictions;
     uint64_t cache_reload_preserved;
     uint64_t cache_reload_dropped;
+    uint64_t cache_reload_scope_changes;
     uint64_t udp_queries;
     uint64_t tcp_queries;
     uint64_t invalid_queries;
@@ -1816,6 +1818,52 @@ static void migrate_cache_entries(cache_entry_t *old_cache, int old_capacity,
     }
 }
 
+static uint64_t hash_scope_u64(uint64_t hash, uint64_t value) {
+    int i;
+    for (i = 0; i < 8; i++) {
+        hash ^= (uint8_t) ((value >> (i * 8)) & 0xffu);
+        hash *= 1099511628211ULL;
+    }
+    return hash;
+}
+
+static uint64_t hash_scope_string(uint64_t hash, const char *value) {
+    const unsigned char *p = (const unsigned char *) (value == NULL ? "" : value);
+    while (*p) {
+        hash ^= *p++;
+        hash *= 1099511628211ULL;
+    }
+    return hash_scope_u64(hash, 0xffu);
+}
+
+static uint64_t hash_scope_upstream(uint64_t hash, const upstream_t *upstream) {
+    if (upstream == NULL) {
+        return hash_scope_u64(hash, 0);
+    }
+    hash = hash_scope_string(hash, upstream->host);
+    hash = hash_scope_u64(hash, (uint64_t) upstream->port);
+    hash = hash_scope_u64(hash, (uint64_t) upstream->protocol);
+    return hash;
+}
+
+static uint64_t compute_resolver_scope_hash(const config_t *cfg) {
+    int i;
+    uint64_t hash = 1469598103934665603ULL;
+    if (cfg == NULL) {
+        return hash;
+    }
+    hash = hash_scope_u64(hash, (uint64_t) cfg->upstream_count);
+    for (i = 0; i < cfg->upstream_count; i++) {
+        hash = hash_scope_upstream(hash, &cfg->upstreams[i]);
+    }
+    hash = hash_scope_u64(hash, (uint64_t) cfg->split_upstream_count);
+    for (i = 0; i < cfg->split_upstream_count; i++) {
+        hash = hash_scope_string(hash, cfg->split_upstreams[i].suffix);
+        hash = hash_scope_upstream(hash, &cfg->split_upstreams[i].upstream);
+    }
+    return hash;
+}
+
 static void compile_upstream_address(upstream_t *upstream) {
     struct sockaddr_in *addr4;
     struct sockaddr_in6 *addr6;
@@ -2573,6 +2621,7 @@ static bool load_config(const char *path, config_t *new_cfg) {
         return false;
     }
     prepare_udp_upstream_sockets(new_cfg);
+    new_cfg->resolver_scope_hash = compute_resolver_scope_hash(new_cfg);
     new_cfg->generation = g_cfg.generation + 1;
     return true;
 }
@@ -2644,7 +2693,15 @@ static bool reload_config(void) {
             return false;
         }
     }
-    migrate_cache_entries(g_cache, g_cache_capacity, next_cache, next->cache_size);
+    if (g_cache != NULL && g_cache_capacity > 0) {
+        if (g_cfg.resolver_scope_hash == next->resolver_scope_hash) {
+            migrate_cache_entries(g_cache, g_cache_capacity, next_cache, next->cache_size);
+        } else {
+            g_stats.cache_reload_scope_changes++;
+            g_stats.cache_reload_dropped += (uint64_t) cache_count_entries_in(g_cache,
+                    g_cache_capacity, time(NULL));
+        }
+    }
     free_config_dynamic(&g_cfg);
     g_cfg = *next;
     free(next);
@@ -3014,6 +3071,7 @@ static void write_health_response(int client) {
             "health=1\nrunning=1\npid=%ld\nuptime=%llu\nlisten_port=%d\n"
             "generation=%llu\nupstreams=%d\nsplit_upstreams=%d\nupstream_probe=%s\n"
             "compiled_upstream_addresses=%d\nreusable_udp_upstream_sockets=%d\n"
+            "resolver_scope_hash=%llu\n"
             "upstream_probe_ms=%d\nupstream_probe_index=%d\nupstream_probe_rcode=%d\n"
             "queries=%llu\nblocked=%llu\nallowed=%llu\ncache_size=%d\ncache_entries=%d\n"
             "socket_buffer_bytes=%d\nudp_drain_limit=%d\n"
@@ -3023,6 +3081,7 @@ static void write_health_response(int client) {
             "cache_positive_stores=%llu\ncache_negative_stores=%llu\n"
             "cache_ttl_rewrites=%llu\ncache_lru_evictions=%llu\n"
             "cache_reload_preserved=%llu\ncache_reload_dropped=%llu\n"
+            "cache_reload_scope_changes=%llu\n"
             "upstream_tcp_fallbacks=%llu\nupstream_truncated_responses=%llu\n"
             "upstream_udp_socket_reuses=%llu\nupstream_udp_stale_replies=%llu\n"
             "tcp_client_timeouts=%llu\ncontrol_client_timeouts=%llu\n"
@@ -3043,6 +3102,7 @@ static void write_health_response(int client) {
             response_len > 0 ? "ok" : "fail",
             compiled_upstream_address_count(&g_cfg),
             reusable_udp_upstream_socket_count(&g_cfg),
+            (unsigned long long) g_cfg.resolver_scope_hash,
             latency_ms,
             upstream_index,
             rcode,
@@ -3065,6 +3125,7 @@ static void write_health_response(int client) {
             (unsigned long long) g_stats.cache_lru_evictions,
             (unsigned long long) g_stats.cache_reload_preserved,
             (unsigned long long) g_stats.cache_reload_dropped,
+            (unsigned long long) g_stats.cache_reload_scope_changes,
             (unsigned long long) g_stats.upstream_tcp_fallbacks,
             (unsigned long long) g_stats.upstream_truncated_responses,
             (unsigned long long) g_stats.upstream_udp_socket_reuses,
@@ -3236,10 +3297,12 @@ static void handle_control(int fd) {
                 "cache_expired=%llu\ncache_evictions=%llu\ncache_ttl_rewrites=%llu\n"
                 "cache_lru_evictions=%llu\n"
                 "cache_reload_preserved=%llu\ncache_reload_dropped=%llu\n"
+                "cache_reload_scope_changes=%llu\n"
                 "upstream_requests=%llu\nupstream_successes=%llu\nupstream_failures=%llu\n"
                 "upstream_tcp_fallbacks=%llu\nupstream_truncated_responses=%llu\n"
                 "upstream_udp_socket_reuses=%llu\nupstream_udp_stale_replies=%llu\n"
                 "compiled_upstream_addresses=%d\nreusable_udp_upstream_sockets=%d\n"
+                "resolver_scope_hash=%llu\n"
                 "avg_latency_ms=%llu\nmax_latency_ms=%llu\nupstream_avg_latency_ms=%llu\n"
                 "reloads=%llu\nexact_allow_index_size=%d\nexact_block_index_size=%d\n"
                 "suffix_allow_trie_nodes=%d\n"
@@ -3294,6 +3357,7 @@ static void handle_control(int fd) {
                 (unsigned long long) g_stats.cache_lru_evictions,
                 (unsigned long long) g_stats.cache_reload_preserved,
                 (unsigned long long) g_stats.cache_reload_dropped,
+                (unsigned long long) g_stats.cache_reload_scope_changes,
                 (unsigned long long) g_stats.upstream_requests,
                 (unsigned long long) g_stats.upstream_successes,
                 (unsigned long long) g_stats.upstream_failures,
@@ -3303,6 +3367,7 @@ static void handle_control(int fd) {
                 (unsigned long long) g_stats.upstream_udp_stale_replies,
                 compiled_upstream_address_count(&g_cfg),
                 reusable_udp_upstream_socket_count(&g_cfg),
+                (unsigned long long) g_cfg.resolver_scope_hash,
                 (unsigned long long) div_u64(g_stats.total_latency_ms, g_stats.queries),
                 (unsigned long long) g_stats.max_latency_ms,
                 (unsigned long long) div_u64(g_stats.upstream_latency_ms, g_stats.upstream_requests),
