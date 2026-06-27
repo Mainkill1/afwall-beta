@@ -48,6 +48,7 @@
 #define LOG_LINE_MAX 512
 #define DEFAULT_PORT 5354
 #define DEFAULT_TIMEOUT_MS 2500
+#define CLIENT_TIMEOUT_MS 5000
 #define DEFAULT_POSITIVE_TTL 60
 #define DEFAULT_NEGATIVE_TTL 30
 #define MAX_CACHE_TTL 86400
@@ -170,6 +171,8 @@ typedef struct {
     uint64_t udp_queries;
     uint64_t tcp_queries;
     uint64_t invalid_queries;
+    uint64_t tcp_client_timeouts;
+    uint64_t control_client_timeouts;
     uint64_t fail_open_drops;
     uint64_t fail_closed_blocks;
     uint64_t upstream_requests;
@@ -1611,6 +1614,10 @@ static void set_socket_timeout(int fd, int timeout_ms) {
     setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
 }
 
+static bool socket_timed_out(void) {
+    return errno == EAGAIN || errno == EWOULDBLOCK || errno == ETIMEDOUT;
+}
+
 static int connect_upstream(const upstream_t *upstream, int socktype, int timeout_ms) {
     struct addrinfo hints;
     struct addrinfo *res = NULL;
@@ -2571,12 +2578,11 @@ static void handle_tcp_client(int client) {
     uint16_t qlen;
     size_t response_len = 0;
     const char *action = "none";
-    struct timeval timeout;
-    timeout.tv_sec = 5;
-    timeout.tv_usec = 0;
-    setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
-    setsockopt(client, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
+    set_socket_timeout(client, CLIENT_TIMEOUT_MS);
     if (read_full(client, lenbuf, 2) != 2) {
+        if (socket_timed_out()) {
+            g_stats.tcp_client_timeouts++;
+        }
         return;
     }
     qlen = (uint16_t) ((lenbuf[0] << 8) | lenbuf[1]);
@@ -2584,6 +2590,9 @@ static void handle_tcp_client(int client) {
         return;
     }
     if (read_full(client, query, qlen) != qlen) {
+        if (socket_timed_out()) {
+            g_stats.tcp_client_timeouts++;
+        }
         return;
     }
     handle_dns_query(&g_cfg, query, qlen, response + 2, &response_len, &action, 1);
@@ -2693,6 +2702,7 @@ static void write_health_response(int client) {
             "cache_ttl_rewrites=%llu\ncache_lru_evictions=%llu\n"
             "upstream_tcp_fallbacks=%llu\nupstream_truncated_responses=%llu\n"
             "upstream_udp_socket_reuses=%llu\nupstream_udp_stale_replies=%llu\n"
+            "tcp_client_timeouts=%llu\ncontrol_client_timeouts=%llu\n"
             "memory_rss_kb=%ld\nmemory_hwm_kb=%ld\ncpu_user_ms=%llu\n"
             "cpu_system_ms=%llu\ncpu_total_ms=%llu\n"
             "query_logging=%d\npersist_query_logs=%d\n"
@@ -2729,6 +2739,8 @@ static void write_health_response(int client) {
             (unsigned long long) g_stats.upstream_truncated_responses,
             (unsigned long long) g_stats.upstream_udp_socket_reuses,
             (unsigned long long) g_stats.upstream_udp_stale_replies,
+            (unsigned long long) g_stats.tcp_client_timeouts,
+            (unsigned long long) g_stats.control_client_timeouts,
             memory_rss_kb,
             memory_hwm_kb,
             (unsigned long long) cpu_user_ms,
@@ -2845,8 +2857,12 @@ static void handle_control(int fd) {
     if (client < 0) {
         return;
     }
+    set_socket_timeout(client, CLIENT_TIMEOUT_MS);
     n = recv(client, cmd, sizeof(cmd) - 1, 0);
     if (n <= 0) {
+        if (socket_timed_out()) {
+            g_stats.control_client_timeouts++;
+        }
         close(client);
         return;
     }
@@ -2871,6 +2887,7 @@ static void handle_control(int fd) {
         write_control_response(client,
                 "running=1\npid=%ld\nuptime=%llu\ngeneration=%llu\n"
                 "queries=%llu\nudp_queries=%llu\ntcp_queries=%llu\ninvalid_queries=%llu\n"
+                "tcp_client_timeouts=%llu\ncontrol_client_timeouts=%llu\n"
                 "allowed=%llu\nblocked=%llu\nfail_open_drops=%llu\nfail_closed_blocks=%llu\n"
                 "memory_rss_kb=%ld\nmemory_hwm_kb=%ld\ncpu_user_ms=%llu\n"
                 "cpu_system_ms=%llu\ncpu_total_ms=%llu\n"
@@ -2900,6 +2917,8 @@ static void handle_control(int fd) {
                 (unsigned long long) g_stats.udp_queries,
                 (unsigned long long) g_stats.tcp_queries,
                 (unsigned long long) g_stats.invalid_queries,
+                (unsigned long long) g_stats.tcp_client_timeouts,
+                (unsigned long long) g_stats.control_client_timeouts,
                 (unsigned long long) g_stats.allowed,
                 (unsigned long long) g_stats.blocked,
                 (unsigned long long) g_stats.fail_open_drops,
