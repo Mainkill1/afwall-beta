@@ -4,6 +4,7 @@ import android.content.Context;
 import android.os.Bundle;
 
 import dev.ukanth.ufirewall.R;
+import dev.ukanth.ufirewall.dns.DnsHijackManager;
 import dev.ukanth.ufirewall.log.Log;
 
 public class ApplicationLogActivity extends RulesActivity {
@@ -19,6 +20,7 @@ public class ApplicationLogActivity extends RulesActivity {
     protected void populateData(final Context ctx) {
         result = new StringBuilder();
         updateLoadingState(getString(R.string.loading));
+        DnsHijackManager.syncServiceLogsToAppLog(ctx);
         writeHeading(result, false, "Logcat");
         result.append(Log.getApplicationLog());
         updateLoadingState(getString(R.string.ready));

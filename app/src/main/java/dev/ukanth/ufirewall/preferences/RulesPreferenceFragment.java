@@ -1,28 +1,51 @@
 package dev.ukanth.ufirewall.preferences;
 
 import android.app.Activity;
+import android.content.ClipData;
+import android.content.ClipboardManager;
+import android.content.ActivityNotFoundException;
 import android.content.Context;
+import android.content.Intent;
 import android.content.SharedPreferences;
+import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.preference.CheckBoxPreference;
 import android.preference.Preference;
 import android.preference.PreferenceFragment;
 import android.preference.SwitchPreference;
+import android.provider.Settings;
+import android.widget.Toast;
+
+import com.afollestad.materialdialogs.MaterialDialog;
 
 import java.io.File;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Locale;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 import dev.ukanth.ufirewall.Api;
 import dev.ukanth.ufirewall.R;
+import dev.ukanth.ufirewall.broadcast.DnsBlocklistUpdateReceiver;
+import dev.ukanth.ufirewall.dns.DnsBlocklistManager;
+import dev.ukanth.ufirewall.dns.DnsHijackManager;
 import dev.ukanth.ufirewall.service.RootCommand;
+import dev.ukanth.ufirewall.util.ApplicationErrorLog;
 import dev.ukanth.ufirewall.util.G;
 
 public class RulesPreferenceFragment extends PreferenceFragment implements
         SharedPreferences.OnSharedPreferenceChangeListener {
 
+    private static final int REQUEST_DNS_BLOCKLIST_FILE = 5301;
+    private static final String ACTION_PRIVATE_DNS_SETTINGS = "android.settings.PRIVATE_DNS_SETTINGS";
+    private static final String ACTION_INTERNET_CONNECTIVITY_PANEL =
+            "android.settings.panel.action.INTERNET_CONNECTIVITY";
     private Context ctx;
+    private boolean suppressDnsLifecycle;
 
 
     @Override
@@ -44,6 +67,151 @@ public class RulesPreferenceFragment extends PreferenceFragment implements
         } else {
             CheckBoxPreference roamPreference = (CheckBoxPreference) findPreference("enableRoam");
             roamPreference.setEnabled(true);
+        }
+
+        wireDnsBlocklistActions();
+        wireDnsServiceActions();
+    }
+
+    private void wireDnsServiceActions() {
+        Preference repairService = findPreference("dnsHijackRepairService");
+        if (repairService != null) {
+            repairService.setOnPreferenceClickListener(preference -> {
+                repairDnsService();
+                return true;
+            });
+        }
+
+        Preference validateConfig = findPreference("dnsHijackValidateConfig");
+        if (validateConfig != null) {
+            validateConfig.setOnPreferenceClickListener(preference -> {
+                runDnsConfigValidation();
+                return true;
+            });
+        }
+
+        Preference moduleStatus = findPreference("dnsHijackModuleStatus");
+        if (moduleStatus != null) {
+            moduleStatus.setOnPreferenceClickListener(preference -> {
+                showDnsModuleStatus();
+                return true;
+            });
+        }
+
+        Preference removeService = findPreference("dnsHijackRemoveService");
+        if (removeService != null) {
+            removeService.setOnPreferenceClickListener(preference -> {
+                confirmRemoveDnsService();
+                return true;
+            });
+        }
+
+        Preference emergencyCleanup = findPreference("dnsHijackEmergencyCleanup");
+        if (emergencyCleanup != null) {
+            emergencyCleanup.setOnPreferenceClickListener(preference -> {
+                confirmEmergencyDnsCleanup();
+                return true;
+            });
+        }
+
+        Preference powerSettings = findPreference("dnsHijackPowerSettings");
+        if (powerSettings != null) {
+            powerSettings.setOnPreferenceClickListener(preference -> {
+                openDnsPowerSettings();
+                return true;
+            });
+        }
+
+        Preference privateDnsSettings = findPreference("dnsHijackPrivateDnsSettings");
+        if (privateDnsSettings != null) {
+            privateDnsSettings.setOnPreferenceClickListener(preference -> {
+                openDnsPrivateDnsSettings();
+                return true;
+            });
+        }
+        updateDnsPowerSettingsSummary();
+        updateDnsPrivateDnsSettingsSummary();
+    }
+
+    private void wireDnsBlocklistActions() {
+        Preference importBlocklist = findPreference("dnsHijackImportBlocklist");
+        if (importBlocklist != null) {
+            importBlocklist.setOnPreferenceClickListener(preference -> {
+                openDnsBlocklistPicker();
+                return true;
+            });
+        }
+
+        Preference pasteBlocklist = findPreference("dnsHijackPasteBlocklist");
+        if (pasteBlocklist != null) {
+            pasteBlocklist.setOnPreferenceClickListener(preference -> {
+                showDnsBlocklistPasteDialog();
+                return true;
+            });
+        }
+
+        Preference blocklistPresets = findPreference("dnsHijackBlocklistPresets");
+        if (blocklistPresets != null) {
+            blocklistPresets.setOnPreferenceClickListener(preference -> {
+                showDnsBlocklistPresetDialog();
+                return true;
+            });
+        }
+
+        Preference updateBlocklists = findPreference("dnsHijackUpdateBlocklists");
+        if (updateBlocklists != null) {
+            updateBlocklists.setOnPreferenceClickListener(preference -> {
+                runDnsBlocklistUpdate();
+                return true;
+            });
+        }
+
+        Preference benchmarkUpstreams = findPreference("dnsHijackBenchmarkUpstreams");
+        if (benchmarkUpstreams != null) {
+            benchmarkUpstreams.setOnPreferenceClickListener(preference -> {
+                runDnsUpstreamBenchmark();
+                return true;
+            });
+        }
+
+        Preference upstreamProviders = findPreference("dnsHijackUpstreamProviders");
+        if (upstreamProviders != null) {
+            upstreamProviders.setOnPreferenceClickListener(preference -> {
+                showDnsUpstreamProviderDialog();
+                return true;
+            });
+        }
+
+        Preference rollbackBlocklist = findPreference("dnsHijackRollbackBlocklist");
+        if (rollbackBlocklist != null) {
+            rollbackBlocklist.setOnPreferenceClickListener(preference -> {
+                runDnsBlocklistRollback();
+                return true;
+            });
+        }
+
+        Preference saveProfilePolicy = findPreference("dnsHijackSaveProfilePolicy");
+        if (saveProfilePolicy != null) {
+            saveProfilePolicy.setOnPreferenceClickListener(preference -> {
+                saveDnsProfilePolicy();
+                return true;
+            });
+        }
+
+        Preference clearProfilePolicy = findPreference("dnsHijackClearProfilePolicy");
+        if (clearProfilePolicy != null) {
+            clearProfilePolicy.setOnPreferenceClickListener(preference -> {
+                clearDnsProfilePolicy();
+                return true;
+            });
+        }
+
+        Preference profilePresets = findPreference("dnsHijackProfilePresets");
+        if (profilePresets != null) {
+            profilePresets.setOnPreferenceClickListener(preference -> {
+                showDnsProfilePresetDialog();
+                return true;
+            });
         }
     }
 
@@ -120,6 +288,8 @@ public class RulesPreferenceFragment extends PreferenceFragment implements
                             }
                             getPreferenceScreen().removeAll();
                             addPreferencesFromResource(R.xml.rules_preferences);
+                            wireDnsBlocklistActions();
+                            wireDnsServiceActions();
                         }
                     }
                 }));
@@ -139,11 +309,326 @@ public class RulesPreferenceFragment extends PreferenceFragment implements
         }
     }
 
+    private void openDnsBlocklistPicker() {
+        Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+        intent.addCategory(Intent.CATEGORY_OPENABLE);
+        intent.setType("text/*");
+        try {
+            startActivityForResult(intent, REQUEST_DNS_BLOCKLIST_FILE);
+        } catch (ActivityNotFoundException e) {
+            Intent fallback = new Intent(Intent.ACTION_GET_CONTENT);
+            fallback.addCategory(Intent.CATEGORY_OPENABLE);
+            fallback.setType("*/*");
+            startActivityForResult(fallback, REQUEST_DNS_BLOCKLIST_FILE);
+        }
+    }
+
+    private void runDnsBlocklistUpdate() {
+        runBlocklistTask(() -> DnsBlocklistManager.updateFromConfiguredUrls(ctx));
+    }
+
+    private void showDnsBlocklistPasteDialog() {
+        if (getActivity() == null) {
+            return;
+        }
+        new MaterialDialog.Builder(getActivity())
+                .title(R.string.dns_hijack_paste_blocklist_title)
+                .input(getString(R.string.dns_hijack_paste_blocklist_hint),
+                        getClipboardText(), (dialog, input) -> {
+                            String text = input == null ? "" : input.toString();
+                            runBlocklistTask(() -> DnsBlocklistManager.importFromText(ctx, text));
+                        })
+                .positiveText(R.string.imports)
+                .negativeText(R.string.Cancel)
+                .show();
+    }
+
+    private String getClipboardText() {
+        if (ctx == null) {
+            return "";
+        }
+        ClipboardManager clipboard = (ClipboardManager) ctx.getSystemService(Context.CLIPBOARD_SERVICE);
+        if (clipboard == null || !clipboard.hasPrimaryClip() || clipboard.getPrimaryClip() == null
+                || clipboard.getPrimaryClip().getItemCount() == 0) {
+            return "";
+        }
+        ClipData.Item item = clipboard.getPrimaryClip().getItemAt(0);
+        CharSequence text = item == null ? null : item.coerceToText(ctx);
+        return text == null ? "" : text.toString();
+    }
+
+    private void showDnsBlocklistPresetDialog() {
+        if (getActivity() == null) {
+            return;
+        }
+        String[] names = getResources().getStringArray(R.array.dns_hijack_blocklist_preset_names);
+        String[] urls = getResources().getStringArray(R.array.dns_hijack_blocklist_preset_urls);
+        new MaterialDialog.Builder(getActivity())
+                .title(R.string.dns_hijack_blocklist_presets_title)
+                .content(R.string.dns_hijack_blocklist_presets_dialog_summary)
+                .items(names)
+                .itemsCallbackMultiChoice(selectedPresetIndices(urls), (dialog, which, text) -> {
+                    int added = 0;
+                    int existing = 0;
+                    for (int index : which) {
+                        if (index < 0 || index >= urls.length) {
+                            continue;
+                        }
+                        if (G.appendDnsHijackBlocklistUrl(urls[index])) {
+                            added++;
+                        } else {
+                            existing++;
+                        }
+                    }
+                    DnsBlocklistUpdateReceiver.scheduleOrCancel(ctx);
+                    showDnsBlocklistPresetResult(added, existing);
+                    return true;
+                })
+                .positiveText(R.string.add)
+                .negativeText(R.string.Cancel)
+                .show();
+    }
+
+    private Integer[] selectedPresetIndices(String[] urls) {
+        ArrayList<Integer> selected = new ArrayList<>();
+        String configured = G.dnsHijackBlocklistUrls();
+        if (configured == null || configured.trim().isEmpty()) {
+            return null;
+        }
+        for (int i = 0; i < urls.length; i++) {
+            if (containsConfiguredBlocklistUrl(configured, urls[i])) {
+                selected.add(i);
+            }
+        }
+        return selected.isEmpty() ? null : selected.toArray(new Integer[0]);
+    }
+
+    private boolean containsConfiguredBlocklistUrl(String configured, String url) {
+        String normalizedUrl = url == null ? "" : url.trim().toLowerCase(Locale.US);
+        if (normalizedUrl.isEmpty()) {
+            return false;
+        }
+        String[] entries = configured.split("[\\r\\n,]+");
+        for (String entry : entries) {
+            String normalizedEntry = entry == null ? "" : entry.trim().toLowerCase(Locale.US);
+            if (normalizedUrl.equals(normalizedEntry)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private void showDnsBlocklistPresetResult(int added, int existing) {
+        if (getActivity() == null) {
+            return;
+        }
+        new MaterialDialog.Builder(getActivity())
+                .title(R.string.dns_hijack_blocklist_presets_title)
+                .content(getString(R.string.dns_hijack_blocklist_presets_result,
+                        added, existing))
+                .positiveText(R.string.OK)
+                .show();
+    }
+
+    private void showDnsProfilePresetDialog() {
+        if (getActivity() == null) {
+            return;
+        }
+        String[] names = getResources().getStringArray(R.array.dns_hijack_profile_preset_names);
+        String[] values = getResources().getStringArray(R.array.dns_hijack_profile_preset_values);
+        new MaterialDialog.Builder(getActivity())
+                .title(R.string.dns_hijack_profile_presets_title)
+                .items(names)
+                .itemsCallback((dialog, view, which, text) -> {
+                    if (which >= 0 && which < values.length) {
+                        applyDnsProfilePreset(values[which], text == null ? "" : text.toString());
+                    }
+                })
+                .negativeText(R.string.Cancel)
+                .show();
+    }
+
+    private void applyDnsProfilePreset(String presetId, String presetName) {
+        if (ctx == null) {
+            return;
+        }
+        boolean success;
+        boolean profileCopy = true;
+        suppressDnsLifecycle = true;
+        try {
+            success = G.applyDnsHijackProfilePreset(presetId);
+            if (success && G.dnsHijackUseProfilePolicy()) {
+                profileCopy = G.saveActiveDnsHijackProfilePolicy()
+                        && DnsBlocklistManager.copyGlobalBlocklistToActiveProfile(ctx);
+            }
+        } finally {
+            suppressDnsLifecycle = false;
+        }
+        if (!success || !profileCopy) {
+            ApplicationErrorLog.add(ctx, "DNS profile preset failed: " + presetId);
+            Api.toast(ctx, getString(R.string.dns_hijack_profile_preset_failed));
+            return;
+        }
+        Api.setRulesUpToDate(false);
+        DnsBlocklistUpdateReceiver.scheduleOrCancel(ctx);
+        ApplicationErrorLog.add(ctx, "DNS profile preset applied: " + presetId
+                + (G.dnsHijackUseProfilePolicy() ? " with active profile policy" : " globally"));
+        if (G.enableDnsHijack()) {
+            reinstallDnsRedirectsAfterSettingsChange("dnsProfilePreset:" + presetId,
+                    getString(R.string.dns_hijack_profile_preset_applied, presetName),
+                    getString(R.string.dns_hijack_redirect_settings_failed));
+        } else {
+            Api.toast(ctx, getString(R.string.dns_hijack_profile_preset_applied, presetName));
+        }
+    }
+
+    private void runDnsBlocklistRollback() {
+        runBlocklistTask(() -> DnsBlocklistManager.restorePrevious(ctx));
+    }
+
+    private void runDnsUpstreamBenchmark() {
+        new Thread(() -> {
+            String result = DnsHijackManager.benchmarkUpstreams(ctx);
+            new Handler(Looper.getMainLooper()).post(() -> showDnsBenchmarkResult(result));
+        }).start();
+    }
+
+    private void showDnsUpstreamProviderDialog() {
+        if (getActivity() == null) {
+            return;
+        }
+        String[] names = getResources().getStringArray(R.array.dns_hijack_upstream_provider_names);
+        String[] values = getResources().getStringArray(R.array.dns_hijack_upstream_provider_values);
+        new MaterialDialog.Builder(getActivity())
+                .title(R.string.dns_hijack_upstream_providers_title)
+                .items(names)
+                .itemsCallback((dialog, view, which, text) -> {
+                    if (which >= 0 && which < values.length) {
+                        applyDnsUpstreamProvider(values[which], text == null ? "" : text.toString());
+                    }
+                })
+                .negativeText(R.string.Cancel)
+                .show();
+    }
+
+    private void applyDnsUpstreamProvider(String providerId, String providerName) {
+        if (ctx == null) {
+            return;
+        }
+        boolean savedNewProfilePolicy = true;
+        boolean applied = G.applyDnsHijackUpstreamProvider(providerId);
+        if (applied && G.dnsHijackUseProfilePolicy()
+                && !G.activeDnsHijackProfilePolicySaved()) {
+            savedNewProfilePolicy = G.saveActiveDnsHijackProfilePolicy();
+        }
+        if (!applied || !savedNewProfilePolicy) {
+            ApplicationErrorLog.add(ctx, "DNS upstream provider preset failed: " + providerId);
+            Api.toast(ctx, getString(R.string.dns_hijack_upstream_provider_failed));
+            return;
+        }
+        Api.setRulesUpToDate(false);
+        if (G.enableDnsHijack()) {
+            DnsHijackManager.requestReload(ctx);
+        }
+        ApplicationErrorLog.add(ctx, "DNS upstream provider preset applied: " + providerId
+                + (G.dnsHijackUseProfilePolicy() ? " with active profile policy" : " globally"));
+        Api.toast(ctx, getString(R.string.dns_hijack_upstream_provider_applied, providerName));
+    }
+
+    private void showDnsBenchmarkResult(String result) {
+        if (getActivity() == null) {
+            return;
+        }
+        new MaterialDialog.Builder(getActivity())
+                .title(R.string.dns_hijack_benchmark_upstreams_title)
+                .content(result == null || result.trim().isEmpty()
+                        ? getString(R.string.dns_hijack_benchmark_empty)
+                        : result)
+                .positiveText(R.string.OK)
+                .show();
+    }
+
+    private void saveDnsProfilePolicy() {
+        boolean saved = G.saveActiveDnsHijackProfilePolicy()
+                && DnsBlocklistManager.copyGlobalBlocklistToActiveProfile(ctx);
+        handleDnsProfilePolicyResult(saved,
+                R.string.dns_hijack_profile_policy_saved);
+    }
+
+    private void clearDnsProfilePolicy() {
+        handleDnsProfilePolicyResult(G.clearActiveDnsHijackProfilePolicy(),
+                R.string.dns_hijack_profile_policy_cleared);
+    }
+
+    private void handleDnsProfilePolicyResult(boolean success, int successMessage) {
+        if (ctx == null) {
+            return;
+        }
+        if (success) {
+            Api.setRulesUpToDate(false);
+            DnsBlocklistUpdateReceiver.scheduleOrCancel(ctx);
+            if (G.enableDnsHijack()) {
+                reinstallDnsRedirectsAfterSettingsChange("dnsProfilePolicy",
+                        getString(successMessage),
+                        getString(R.string.dns_hijack_redirect_settings_failed));
+            } else {
+                Api.toast(ctx, getString(successMessage));
+            }
+        } else {
+            Api.toast(ctx, getString(R.string.dns_hijack_profile_policy_failed));
+        }
+    }
+
+    private void runBlocklistTask(BlocklistTask task) {
+        new Thread(() -> {
+            DnsBlocklistManager.Result result = task.run();
+            new Handler(Looper.getMainLooper()).post(() -> handleBlocklistResult(result));
+        }).start();
+    }
+
+    private void handleBlocklistResult(DnsBlocklistManager.Result result) {
+        if (getActivity() == null || result == null) {
+            return;
+        }
+        if (!result.failed) {
+            Api.setRulesUpToDate(false);
+            if (G.enableDnsHijack()) {
+                DnsHijackManager.requestReload(ctx);
+            }
+            DnsBlocklistUpdateReceiver.scheduleOrCancel(ctx);
+            Api.toast(ctx, getString(R.string.dns_hijack_blocklist_active));
+        } else {
+            Api.toast(ctx, getString(R.string.dns_hijack_blocklist_failed));
+        }
+        new MaterialDialog.Builder(getActivity())
+                .title(result.failed ? R.string.dns_hijack_blocklist_failed : R.string.dns_hijack_blocklist_active)
+                .content(result.summary())
+                .positiveText(R.string.OK)
+                .show();
+    }
+
+    @Override
+    public void onActivityResult(int requestCode, int resultCode, Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode == REQUEST_DNS_BLOCKLIST_FILE && resultCode == Activity.RESULT_OK && data != null) {
+            Uri uri = data.getData();
+            if (uri != null) {
+                runBlocklistTask(() -> DnsBlocklistManager.importFromUri(ctx, uri));
+            }
+        }
+    }
+
+    private interface BlocklistTask {
+        DnsBlocklistManager.Result run();
+    }
+
     @Override
     public void onResume() {
         super.onResume();
         getPreferenceManager().getSharedPreferences()
                 .registerOnSharedPreferenceChangeListener(this);
+        updateDnsPowerSettingsSummary();
+        updateDnsPrivateDnsSettingsSummary();
 
     }
 
@@ -174,6 +659,14 @@ public class RulesPreferenceFragment extends PreferenceFragment implements
                 enableTor.setChecked(false);
                 CheckBoxPreference enableCustomRules = (CheckBoxPreference) findPreference("enableCustomRules");
                 enableCustomRules.setChecked(false);
+                CheckBoxPreference enableDnsHijack = (CheckBoxPreference) findPreference("enableDnsHijack");
+                if (enableDnsHijack != null) {
+                    enableDnsHijack.setChecked(false);
+                }
+                CheckBoxPreference dnsBootPersistence = (CheckBoxPreference) findPreference("dnsHijackBootPersistence");
+                if (dnsBootPersistence != null) {
+                    dnsBootPersistence.setChecked(false);
+                }
 
                 G.enableRoam(false);
                 G.enableLAN(false);
@@ -181,6 +674,8 @@ public class RulesPreferenceFragment extends PreferenceFragment implements
                 G.enableTether(false);
                 G.enableTor(false);
                 G.enableCustomRules(false);
+                G.enableDnsHijack(false);
+                G.dnsHijackBootPersistence(false);
 
             }
         }
@@ -306,5 +801,524 @@ public class RulesPreferenceFragment extends PreferenceFragment implements
             allow.setChecked(false);
         }
 
+        if (key.equals("enableIPv6") && G.enableDnsHijack() && !suppressDnsLifecycle) {
+            reinstallDnsRedirectsAfterSettingsChange(key);
+        }
+
+        if (isDnsHijackPreference(key)) {
+            Api.setRulesUpToDate(false);
+            if (isDnsHijackBlocklistSchedulePreference(key)) {
+                DnsBlocklistUpdateReceiver.scheduleOrCancel(ctx);
+            }
+            if (suppressDnsLifecycle) {
+                return;
+            }
+            if (key.equals("enableDnsHijack")) {
+                handleDnsHijackEnableChanged();
+                return;
+            }
+            if (key.equals("dnsHijackBootPersistence")) {
+                handleDnsBootPersistenceChanged();
+                return;
+            }
+            if (isDnsHijackRedirectPreference(key) && G.enableDnsHijack()) {
+                reinstallDnsRedirectsAfterSettingsChange(key);
+                return;
+            }
+            if (shouldReloadDnsHijackPreference(key) && G.enableDnsHijack()) {
+                DnsHijackManager.requestReload(ctx);
+            }
+        }
+
+    }
+
+    private void handleDnsHijackEnableChanged() {
+        if (ctx == null) {
+            return;
+        }
+        final boolean enabled = G.enableDnsHijack();
+        DnsHijackManager.applyDnsProtectionPreference(ctx, enabled, new RootCommand.Callback() {
+            @Override
+            public void cbFunc(RootCommand state) {
+                new Handler(Looper.getMainLooper()).post(() -> {
+                    if (state.exitCode == 0) {
+                        if (!enabled) {
+                            setDnsBootPersistenceChecked(false);
+                        }
+                        Api.toast(ctx, ctx.getString(enabled
+                                ? R.string.dns_hijack_enable_complete
+                                : R.string.dns_hijack_disable_complete));
+                        if (enabled) {
+                            warnIfPrivateDnsMayBypass();
+                        }
+                    } else {
+                        if (enabled) {
+                            setDnsHijackChecked(false);
+                        } else {
+                            setDnsBootPersistenceChecked(false);
+                            ApplicationErrorLog.add(ctx,
+                                    "DNS disable root cleanup failed; leaving DNS disabled for fail-open recovery");
+                        }
+                        Api.toast(ctx, ctx.getString(enabled
+                                ? R.string.dns_hijack_enable_failed
+                                : R.string.dns_hijack_disable_failed));
+                    }
+                });
+            }
+        });
+    }
+
+    private void handleDnsBootPersistenceChanged() {
+        if (ctx == null) {
+            return;
+        }
+        final boolean enabled = G.dnsHijackBootPersistence();
+        DnsHijackManager.updateBootPersistence(ctx, new RootCommand.Callback() {
+            @Override
+            public void cbFunc(RootCommand state) {
+                new Handler(Looper.getMainLooper()).post(() -> {
+                    if (state.exitCode == 0) {
+                        Api.toast(ctx, ctx.getString(enabled
+                                ? R.string.dns_hijack_boot_persistence_installed
+                                : R.string.dns_hijack_boot_persistence_removed));
+                    } else {
+                        setDnsBootPersistenceChecked(!enabled);
+                        Api.toast(ctx, ctx.getString(R.string.dns_hijack_boot_persistence_failed));
+                    }
+                });
+            }
+        });
+    }
+
+    private void repairDnsService() {
+        if (ctx == null) {
+            return;
+        }
+        Api.setRulesUpToDate(false);
+        DnsHijackManager.applyDnsProtectionPreference(ctx, true, new RootCommand.Callback() {
+            @Override
+            public void cbFunc(RootCommand state) {
+                new Handler(Looper.getMainLooper()).post(() -> {
+                    if (state.exitCode == 0) {
+                        setDnsHijackChecked(true);
+                        Api.toast(ctx, ctx.getString(R.string.dns_hijack_enable_complete));
+                        warnIfPrivateDnsMayBypass();
+                    } else {
+                        Api.toast(ctx, ctx.getString(R.string.dns_hijack_enable_failed));
+                    }
+                });
+            }
+        });
+    }
+
+    private void runDnsConfigValidation() {
+        if (ctx == null || !canShowPreferenceDialogs()) {
+            return;
+        }
+        new Thread(() -> {
+            String result = DnsHijackManager.validateDnsConfiguration(ctx);
+            new Handler(Looper.getMainLooper()).post(() -> {
+                if (!canShowPreferenceDialogs()) {
+                    return;
+                }
+                new MaterialDialog.Builder(getActivity())
+                        .title(R.string.dns_hijack_validate_config_title)
+                        .content(result == null || result.trim().isEmpty()
+                                ? getString(R.string.no_data_available)
+                                : result)
+                        .positiveText(R.string.OK)
+                        .show();
+            });
+        }).start();
+    }
+
+    private void showDnsModuleStatus() {
+        if (ctx == null || !canShowPreferenceDialogs()) {
+            return;
+        }
+        final Context appContext = ctx.getApplicationContext();
+        final List<String> commands = DnsHijackManager.buildMagiskModuleStatusCommands(appContext);
+        ApplicationErrorLog.add(appContext, "DNS Magisk module status requested from rules settings");
+        Api.toast(appContext, appContext.getString(R.string.dns_hijack_module_status_queued));
+        new RootCommand()
+                .setLogging(true)
+                .setReopenShell(true)
+                .setFailureToast(R.string.error_su)
+                .setCallback(new RootCommand.Callback() {
+                    @Override
+                    public void cbFunc(RootCommand state) {
+                        new Handler(Looper.getMainLooper()).post(() -> {
+                            if (!canShowPreferenceDialogs()) {
+                                return;
+                            }
+                            String output = state.res == null ? "" : state.res.toString().trim();
+                            if (state.exitCode == 0) {
+                                ApplicationErrorLog.add(appContext, "DNS Magisk module status completed");
+                            } else {
+                                ApplicationErrorLog.add(appContext,
+                                        "DNS Magisk module status failed with exit " + state.exitCode);
+                            }
+                            new MaterialDialog.Builder(getActivity())
+                                    .title(R.string.dns_hijack_module_status_title)
+                                    .content(output.isEmpty()
+                                            ? getString(R.string.no_data_available)
+                                            : output)
+                                    .positiveText(R.string.OK)
+                                    .show();
+                        });
+                    }
+                })
+                .run(appContext, commands);
+    }
+
+    private boolean canShowPreferenceDialogs() {
+        Activity activity = getActivity();
+        return isAdded()
+                && activity != null
+                && !activity.isFinishing()
+                && (Build.VERSION.SDK_INT < Build.VERSION_CODES.JELLY_BEAN_MR1
+                || !activity.isDestroyed());
+    }
+
+    private void reinstallDnsRedirectsAfterSettingsChange(String key) {
+        if (ctx == null) {
+            return;
+        }
+        reinstallDnsRedirectsAfterSettingsChange(key,
+                ctx.getString(R.string.dns_hijack_redirect_settings_applied),
+                ctx.getString(R.string.dns_hijack_redirect_settings_failed));
+    }
+
+    private void reinstallDnsRedirectsAfterSettingsChange(String key, String successToast,
+                                                          String failureToast) {
+        if (ctx == null) {
+            return;
+        }
+        Api.setRulesUpToDate(false);
+        ApplicationErrorLog.add(ctx, "DNS redirect setting changed; reinstalling service path: " + key);
+        DnsHijackManager.repairDnsProtection(ctx, new RootCommand.Callback() {
+            @Override
+            public void cbFunc(RootCommand state) {
+                new Handler(Looper.getMainLooper()).post(() -> {
+                    if (state.exitCode == 0) {
+                        Api.toast(ctx, successToast);
+                        warnIfPrivateDnsMayBypass();
+                    } else {
+                        Api.toast(ctx, failureToast);
+                    }
+                });
+            }
+        });
+    }
+
+    private void warnIfPrivateDnsMayBypass() {
+        if (ctx == null) {
+            return;
+        }
+        String warning = DnsHijackManager.androidPrivateDnsWarning(ctx);
+        if (warning == null) {
+            return;
+        }
+        ApplicationErrorLog.add(ctx, warning);
+        Api.toast(ctx, getString(R.string.dns_hijack_private_dns_warning), Toast.LENGTH_LONG);
+    }
+
+    private void confirmRemoveDnsService() {
+        if (ctx == null || getActivity() == null) {
+            return;
+        }
+        new MaterialDialog.Builder(getActivity())
+                .title(R.string.dns_hijack_remove_service_title)
+                .content(R.string.dns_hijack_remove_service_confirm)
+                .positiveText(R.string.OK)
+                .negativeText(android.R.string.cancel)
+                .onPositive((dialog, which) -> removeDnsService())
+                .show();
+    }
+
+    private void removeDnsService() {
+        if (ctx == null) {
+            return;
+        }
+        setDnsHijackChecked(false);
+        setDnsBootPersistenceChecked(false);
+        Api.setRulesUpToDate(false);
+        DnsBlocklistUpdateReceiver.scheduleOrCancel(ctx);
+        DnsHijackManager.applyDnsProtectionPreference(ctx, false, new RootCommand.Callback() {
+            @Override
+            public void cbFunc(RootCommand state) {
+                new Handler(Looper.getMainLooper()).post(() -> {
+                    if (state.exitCode == 0) {
+                        Api.toast(ctx, ctx.getString(R.string.dns_hijack_disable_complete));
+                    } else {
+                        ApplicationErrorLog.add(ctx,
+                                "DNS service removal root cleanup failed; leaving DNS disabled for fail-open recovery");
+                        Api.toast(ctx, ctx.getString(R.string.dns_hijack_disable_failed));
+                    }
+                });
+            }
+        });
+    }
+
+    private void confirmEmergencyDnsCleanup() {
+        if (ctx == null || getActivity() == null) {
+            return;
+        }
+        new MaterialDialog.Builder(getActivity())
+                .title(R.string.dns_hijack_emergency_cleanup_title)
+                .content(R.string.dns_hijack_emergency_cleanup_confirm)
+                .positiveText(R.string.OK)
+                .negativeText(android.R.string.cancel)
+                .onPositive((dialog, which) -> emergencyDnsCleanup())
+                .show();
+    }
+
+    private void emergencyDnsCleanup() {
+        if (ctx == null) {
+            return;
+        }
+        ApplicationErrorLog.add(ctx, "DNS emergency cleanup requested from Rules preferences");
+        DnsHijackManager.emergencyCleanupDnsProtection(ctx, new RootCommand.Callback() {
+            @Override
+            public void cbFunc(RootCommand state) {
+                new Handler(Looper.getMainLooper()).post(() -> {
+                    if (state.exitCode == 0) {
+                        setDnsHijackChecked(false);
+                        setDnsBootPersistenceChecked(false);
+                        Api.setRulesUpToDate(false);
+                        DnsBlocklistUpdateReceiver.scheduleOrCancel(ctx);
+                        Api.toast(ctx, ctx.getString(R.string.dns_hijack_emergency_cleanup_complete));
+                    } else {
+                        Api.toast(ctx, ctx.getString(R.string.dns_hijack_emergency_cleanup_failed));
+                    }
+                });
+            }
+        });
+    }
+
+    private void openDnsPowerSettings() {
+        if (ctx == null) {
+            return;
+        }
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
+            ApplicationErrorLog.add(ctx,
+                    "DNS power settings requested but Android battery optimization controls are unavailable");
+            Api.toast(ctx, getString(R.string.dns_hijack_power_settings_summary_unsupported));
+            return;
+        }
+
+        String powerState = dnsPowerStateForLog();
+        Intent intent = new Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS);
+        if (intent.resolveActivity(ctx.getPackageManager()) != null) {
+            ApplicationErrorLog.add(ctx, "DNS power settings opened; app_battery_optimized=" + powerState);
+            Api.toast(ctx, getString(R.string.dns_hijack_power_settings_opening));
+            startActivity(intent);
+            return;
+        }
+
+        Intent fallback = new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS);
+        fallback.setData(Uri.parse("package:" + ctx.getPackageName()));
+        if (fallback.resolveActivity(ctx.getPackageManager()) != null) {
+            ApplicationErrorLog.add(ctx, "DNS app power details opened; app_battery_optimized=" + powerState);
+            Api.toast(ctx, getString(R.string.dns_hijack_power_settings_opening));
+            startActivity(fallback);
+            return;
+        }
+
+        ApplicationErrorLog.add(ctx, "DNS power settings unavailable; app_battery_optimized=" + powerState);
+        Api.toast(ctx, getString(R.string.dns_hijack_power_settings_unavailable));
+    }
+
+    private void openDnsPrivateDnsSettings() {
+        if (ctx == null) {
+            return;
+        }
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P) {
+            ApplicationErrorLog.add(ctx,
+                    "DNS Private DNS settings requested but Android Private DNS controls are unavailable");
+            Api.toast(ctx, getString(R.string.dns_hijack_private_dns_settings_summary_unsupported));
+            return;
+        }
+
+        String privateDnsState = dnsPrivateDnsStateForLog();
+        if (startDnsSettingsActivity(new Intent(ACTION_PRIVATE_DNS_SETTINGS))) {
+            ApplicationErrorLog.add(ctx, "DNS Private DNS settings opened; " + privateDnsState);
+            Api.toast(ctx, getString(R.string.dns_hijack_private_dns_settings_opening));
+            return;
+        }
+        if (startDnsSettingsActivity(new Intent(ACTION_INTERNET_CONNECTIVITY_PANEL))) {
+            ApplicationErrorLog.add(ctx, "DNS Internet connectivity panel opened; " + privateDnsState);
+            Api.toast(ctx, getString(R.string.dns_hijack_private_dns_settings_opening));
+            return;
+        }
+        if (startDnsSettingsActivity(new Intent(Settings.ACTION_WIRELESS_SETTINGS))) {
+            ApplicationErrorLog.add(ctx, "DNS wireless settings opened for Private DNS review; "
+                    + privateDnsState);
+            Api.toast(ctx, getString(R.string.dns_hijack_private_dns_settings_opening));
+            return;
+        }
+
+        ApplicationErrorLog.add(ctx, "DNS Private DNS settings unavailable; " + privateDnsState);
+        Api.toast(ctx, getString(R.string.dns_hijack_private_dns_settings_unavailable));
+    }
+
+    private boolean startDnsSettingsActivity(Intent intent) {
+        if (intent == null || ctx == null || intent.resolveActivity(ctx.getPackageManager()) == null) {
+            return false;
+        }
+        startActivity(intent);
+        return true;
+    }
+
+    private void updateDnsPowerSettingsSummary() {
+        Preference powerSettings = findPreference("dnsHijackPowerSettings");
+        if (powerSettings == null) {
+            return;
+        }
+        if (ctx == null || Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
+            powerSettings.setSummary(R.string.dns_hijack_power_settings_summary_unsupported);
+            return;
+        }
+        try {
+            powerSettings.setSummary(Api.batteryOptimized(ctx)
+                    ? R.string.dns_hijack_power_settings_summary_optimized
+                    : R.string.dns_hijack_power_settings_summary_unrestricted);
+        } catch (RuntimeException e) {
+            powerSettings.setSummary(R.string.dns_hijack_power_settings_summary_unknown);
+        }
+    }
+
+    private void updateDnsPrivateDnsSettingsSummary() {
+        Preference privateDnsSettings = findPreference("dnsHijackPrivateDnsSettings");
+        if (privateDnsSettings == null) {
+            return;
+        }
+        if (ctx == null || Build.VERSION.SDK_INT < Build.VERSION_CODES.P) {
+            privateDnsSettings.setSummary(R.string.dns_hijack_private_dns_settings_summary_unsupported);
+            return;
+        }
+        String mode = DnsHijackManager.androidPrivateDnsMode(ctx);
+        if ("unknown".equals(mode)) {
+            privateDnsSettings.setSummary(R.string.dns_hijack_private_dns_settings_summary_unknown);
+        } else if (DnsHijackManager.androidPrivateDnsMayBypass(ctx)) {
+            privateDnsSettings.setSummary(R.string.dns_hijack_private_dns_settings_summary_bypass);
+        } else {
+            privateDnsSettings.setSummary(R.string.dns_hijack_private_dns_settings_summary_clear);
+        }
+    }
+
+    private String dnsPowerStateForLog() {
+        if (ctx == null || Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
+            return "unsupported";
+        }
+        try {
+            return String.valueOf(Api.batteryOptimized(ctx));
+        } catch (RuntimeException e) {
+            return "unknown";
+        }
+    }
+
+    private String dnsPrivateDnsStateForLog() {
+        if (ctx == null || Build.VERSION.SDK_INT < Build.VERSION_CODES.P) {
+            return "private_dns_mode=unsupported";
+        }
+        String mode = DnsHijackManager.androidPrivateDnsMode(ctx);
+        String specifier = DnsHijackManager.androidPrivateDnsSpecifier(ctx);
+        boolean bypass = DnsHijackManager.androidPrivateDnsMayBypass(ctx);
+        return "private_dns_mode=" + mode
+                + " specifier=" + (specifier.isEmpty() ? "none" : specifier)
+                + " bypass=" + bypass;
+    }
+
+    private void setDnsHijackChecked(boolean enabled) {
+        suppressDnsLifecycle = true;
+        G.enableDnsHijack(enabled);
+        CheckBoxPreference enableDnsHijack = (CheckBoxPreference) findPreference("enableDnsHijack");
+        if (enableDnsHijack != null) {
+            enableDnsHijack.setChecked(enabled);
+        }
+        suppressDnsLifecycle = false;
+    }
+
+    private void setDnsBootPersistenceChecked(boolean enabled) {
+        suppressDnsLifecycle = true;
+        G.dnsHijackBootPersistence(enabled);
+        CheckBoxPreference dnsBootPersistence = (CheckBoxPreference) findPreference("dnsHijackBootPersistence");
+        if (dnsBootPersistence != null) {
+            dnsBootPersistence.setChecked(enabled);
+        }
+        suppressDnsLifecycle = false;
+    }
+
+    private boolean isDnsHijackPreference(String key) {
+        return key != null && (key.equals("enableDnsHijack")
+                || key.equals("dnsHijackPort")
+                || key.equals("dnsHijackUpstreams")
+                || key.equals("dnsHijackBootstrapUpstreams")
+                || key.equals("dnsHijackSplitUpstreams")
+                || key.equals("dnsHijackCaptureUids")
+                || key.equals("dnsHijackBypassUids")
+                || key.equals("dnsHijackCaptureInterfaces")
+                || key.equals("dnsHijackBypassInterfaces")
+                || key.equals("dnsHijackFailOpen")
+                || key.equals("dnsHijackStrictMode")
+                || key.equals("dnsHijackSafeSearch")
+                || key.equals("dnsHijackDnssecRequest")
+                || key.equals("dnsHijackDnssecAuthRequired")
+                || key.equals("dnsHijackBootPersistence")
+                || key.equals("dnsHijackAdbDebugControl")
+                || key.equals("dnsHijackTimeoutMs")
+                || key.equals("dnsHijackCacheSize")
+                || key.equals("dnsHijackStaleCacheSeconds")
+                || key.equals("dnsHijackPersistCache")
+                || key.equals("dnsHijackQueryLogging")
+                || key.equals("dnsHijackPersistQueryLogs")
+                || key.equals("dnsHijackAllowExact")
+                || key.equals("dnsHijackAllowSuffix")
+                || key.equals("dnsHijackBlockExact")
+                || key.equals("dnsHijackBlockSuffix")
+                || key.equals("dnsHijackAppAllowExact")
+                || key.equals("dnsHijackAppBlockExact")
+                || key.equals("dnsHijackAppAllowSuffix")
+                || key.equals("dnsHijackAppBlockSuffix")
+                || key.equals("dnsHijackNetworkAllow")
+                || key.equals("dnsHijackNetworkBlock")
+                || key.equals("dnsHijackAllowRegex")
+                || key.equals("dnsHijackBlockRegex")
+                || key.equals("dnsHijackBlocklistUrls")
+                || key.equals("dnsHijackScheduledBlocklistUpdates")
+                || key.equals("dnsHijackBlocklistUpdateIntervalHours")
+                || key.equals("dnsHijackUseProfilePolicy"));
+    }
+
+    private boolean isDnsHijackBlocklistSchedulePreference(String key) {
+        return key != null && (key.equals("enableDnsHijack")
+                || key.equals("dnsHijackBlocklistUrls")
+                || key.equals("dnsHijackScheduledBlocklistUpdates")
+                || key.equals("dnsHijackBlocklistUpdateIntervalHours")
+                || key.equals("dnsHijackUseProfilePolicy"));
+    }
+
+    private boolean isDnsHijackRedirectPreference(String key) {
+        return key != null && (key.equals("dnsHijackPort")
+                || key.equals("dnsHijackCaptureUids")
+                || key.equals("dnsHijackBypassUids")
+                || key.equals("dnsHijackCaptureInterfaces")
+                || key.equals("dnsHijackBypassInterfaces")
+                || key.equals("dnsHijackUseProfilePolicy"));
+    }
+
+    private boolean shouldReloadDnsHijackPreference(String key) {
+        return key != null
+                && !key.equals("enableDnsHijack")
+                && !key.equals("dnsHijackPort")
+                && !key.equals("dnsHijackBootPersistence")
+                && !key.equals("dnsHijackCaptureUids")
+                && !key.equals("dnsHijackBypassUids")
+                && !key.equals("dnsHijackCaptureInterfaces")
+                && !key.equals("dnsHijackBypassInterfaces")
+                && !key.equals("dnsHijackBlocklistUrls")
+                && !key.equals("dnsHijackScheduledBlocklistUpdates")
+                && !key.equals("dnsHijackBlocklistUpdateIntervalHours");
     }
 }

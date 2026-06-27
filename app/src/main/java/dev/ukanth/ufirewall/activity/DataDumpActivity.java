@@ -222,6 +222,8 @@ public abstract class DataDumpActivity extends AppCompatActivity {
             return "ifconfig";
         } else if (trimmed.contains("System info")) {
             return "system";
+        } else if (trimmed.equals(getString(R.string.dns_diagnostics_title))) {
+            return "dns";
         } else if (trimmed.contains("Preferences")) {
             return "preferences";
         } else if (trimmed.equals(getString(R.string.application_errors_title))) {
@@ -265,6 +267,17 @@ public abstract class DataDumpActivity extends AppCompatActivity {
             case "system":
                 systemCard.setVisibility(View.VISIBLE);
                 systemContent.setText(trimmedContent);
+                break;
+
+            case "dns":
+                systemCard.setVisibility(View.VISIBLE);
+                String existingSystem = systemContent.getText().toString();
+                String dnsContent = getString(R.string.dns_diagnostics_title) + "\n" + trimmedContent;
+                if (!existingSystem.isEmpty()) {
+                    systemContent.setText(existingSystem + "\n\n" + dnsContent);
+                } else {
+                    systemContent.setText(dnsContent);
+                }
                 break;
                 
             case "preferences":

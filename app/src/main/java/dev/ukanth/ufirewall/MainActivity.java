@@ -102,6 +102,7 @@ import dev.ukanth.ufirewall.Api.PackageInfoData;
 import dev.ukanth.ufirewall.activity.CustomScriptActivity;
 import dev.ukanth.ufirewall.activity.HelpActivity;
 import dev.ukanth.ufirewall.activity.LogHubActivity;
+import dev.ukanth.ufirewall.dns.DnsHijackManager;
 import dev.ukanth.ufirewall.log.Log;
 import dev.ukanth.ufirewall.preferences.PreferencesActivity;
 import dev.ukanth.ufirewall.profiles.ProfileData;
@@ -1080,8 +1081,34 @@ public class MainActivity extends AppCompatActivity implements AdapterView.OnIte
             showOrLoadApplications();
             if (G.applyOnSwitchProfiles()) {
                 applyOrSaveRules();
+            } else {
+                refreshDnsProfilePolicyAfterSwitch();
             }
         }
+    }
+
+    private void refreshDnsProfilePolicyAfterSwitch() {
+        if (!G.enableDnsHijack() || !G.dnsHijackUseProfilePolicy()) {
+            return;
+        }
+        Api.setRulesUpToDate(false);
+        ApplicationErrorLog.add(this, "DNS profile policy changed; refreshing DNS service for active profile: "
+                + G.activeDnsHijackPolicyProfile());
+        DnsHijackManager.repairDnsProtection(this, new RootCommand.Callback() {
+            @Override
+            public void cbFunc(RootCommand state) {
+                if (state.exitCode == 0) {
+                    ApplicationErrorLog.add(MainActivity.this,
+                            "DNS profile policy refresh completed for active profile: "
+                                    + G.activeDnsHijackPolicyProfile());
+                } else {
+                    ApplicationErrorLog.add(MainActivity.this,
+                            "DNS profile policy refresh failed after profile switch");
+                    runOnUiThread(() -> Api.toast(MainActivity.this,
+                            getString(R.string.dns_hijack_redirect_settings_failed)));
+                }
+            }
+        });
     }
 
     @Override

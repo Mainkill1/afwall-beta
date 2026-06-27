@@ -48,6 +48,8 @@ proguard/
 # native binaries
 libs/
 obj/
+dnsdaemon/libs/
+dnsdaemon/obj/
 
 # IDE related 
 .idea/

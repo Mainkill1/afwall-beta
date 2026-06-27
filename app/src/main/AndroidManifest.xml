@@ -163,6 +163,9 @@
             android:name=".activity.LogHubActivity"
             android:configChanges="orientation|keyboardHidden|screenSize|keyboard|locale|screenLayout"></activity>
         <activity
+            android:name=".activity.DnsQueriesActivity"
+            android:configChanges="orientation|keyboardHidden|screenSize|keyboard|locale|screenLayout"></activity>
+        <activity
             android:name=".activity.ApplicationErrorsActivity"
             android:configChanges="orientation|keyboardHidden|screenSize|keyboard|locale|screenLayout"></activity>
         <activity
@@ -224,6 +227,9 @@
                 <category android:name="android.intent.category.DEFAULT" />
             </intent-filter>
         </receiver>
+        <receiver
+            android:name=".broadcast.DnsBlocklistUpdateReceiver"
+            android:exported="false" />
         <receiver
             android:name=".broadcast.PackageBroadcast"
             android:exported="true">

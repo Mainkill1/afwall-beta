@@ -51,6 +51,7 @@ import dev.ukanth.ufirewall.MainActivity;
 import java.io.File;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
 import java.util.regex.Matcher;
@@ -170,6 +171,84 @@ public class G extends Application implements Application.ActivityLifecycleCallb
     private static final String COPIED_OLD_EXPORTS = "copyOldExports";
     private static final String SYSTEM_FILE_PICKER = "useSystemFilePicker";
     private static final String ZIP_LOG_REPORTS = "zipLogReports";
+    private static final String ENABLE_DNS_HIJACK = "enableDnsHijack";
+    private static final String DNS_HIJACK_PORT = "dnsHijackPort";
+    private static final String DNS_HIJACK_UPSTREAMS = "dnsHijackUpstreams";
+    private static final String DNS_HIJACK_BOOTSTRAP_UPSTREAMS = "dnsHijackBootstrapUpstreams";
+    private static final String DNS_HIJACK_SPLIT_UPSTREAMS = "dnsHijackSplitUpstreams";
+    private static final String DNS_HIJACK_CAPTURE_UIDS = "dnsHijackCaptureUids";
+    private static final String DNS_HIJACK_BYPASS_UIDS = "dnsHijackBypassUids";
+    private static final String DNS_HIJACK_CAPTURE_INTERFACES = "dnsHijackCaptureInterfaces";
+    private static final String DNS_HIJACK_BYPASS_INTERFACES = "dnsHijackBypassInterfaces";
+    private static final String DNS_HIJACK_FAIL_OPEN = "dnsHijackFailOpen";
+    private static final String DNS_HIJACK_STRICT_MODE = "dnsHijackStrictMode";
+    private static final String DNS_HIJACK_SAFE_SEARCH = "dnsHijackSafeSearch";
+    private static final String DNS_HIJACK_DNSSEC_REQUEST = "dnsHijackDnssecRequest";
+    private static final String DNS_HIJACK_DNSSEC_AUTH_REQUIRED = "dnsHijackDnssecAuthRequired";
+    private static final String DNS_HIJACK_BOOT_PERSISTENCE = "dnsHijackBootPersistence";
+    private static final String DNS_HIJACK_ADB_DEBUG_CONTROL = "dnsHijackAdbDebugControl";
+    private static final String DNS_HIJACK_TIMEOUT_MS = "dnsHijackTimeoutMs";
+    private static final String DNS_HIJACK_CACHE_SIZE = "dnsHijackCacheSize";
+    private static final String DNS_HIJACK_STALE_CACHE_SECONDS = "dnsHijackStaleCacheSeconds";
+    private static final String DNS_HIJACK_PERSIST_CACHE = "dnsHijackPersistCache";
+    private static final String DNS_HIJACK_QUERY_LOGGING = "dnsHijackQueryLogging";
+    private static final String DNS_HIJACK_PERSIST_QUERY_LOGS = "dnsHijackPersistQueryLogs";
+    private static final String DNS_HIJACK_ALLOW_EXACT = "dnsHijackAllowExact";
+    private static final String DNS_HIJACK_ALLOW_SUFFIX = "dnsHijackAllowSuffix";
+    private static final String DNS_HIJACK_BLOCK_EXACT = "dnsHijackBlockExact";
+    private static final String DNS_HIJACK_BLOCK_SUFFIX = "dnsHijackBlockSuffix";
+    private static final String DNS_HIJACK_APP_ALLOW_EXACT = "dnsHijackAppAllowExact";
+    private static final String DNS_HIJACK_APP_BLOCK_EXACT = "dnsHijackAppBlockExact";
+    private static final String DNS_HIJACK_APP_ALLOW_SUFFIX = "dnsHijackAppAllowSuffix";
+    private static final String DNS_HIJACK_APP_BLOCK_SUFFIX = "dnsHijackAppBlockSuffix";
+    private static final String DNS_HIJACK_NETWORK_ALLOW = "dnsHijackNetworkAllow";
+    private static final String DNS_HIJACK_NETWORK_BLOCK = "dnsHijackNetworkBlock";
+    private static final String DNS_HIJACK_ALLOW_REGEX = "dnsHijackAllowRegex";
+    private static final String DNS_HIJACK_BLOCK_REGEX = "dnsHijackBlockRegex";
+    private static final String DNS_HIJACK_TEMP_ALLOW = "dnsHijackTempAllow";
+    private static final String DNS_HIJACK_TEMP_BLOCK = "dnsHijackTempBlock";
+    private static final String DNS_HIJACK_BLOCKLIST_URLS = "dnsHijackBlocklistUrls";
+    private static final String DNS_HIJACK_SCHEDULED_BLOCKLIST_UPDATES = "dnsHijackScheduledBlocklistUpdates";
+    private static final String DNS_HIJACK_BLOCKLIST_UPDATE_INTERVAL_HOURS = "dnsHijackBlocklistUpdateIntervalHours";
+    private static final String DNS_HIJACK_USE_PROFILE_POLICY = "dnsHijackUseProfilePolicy";
+    private static final String DNS_HIJACK_PROFILE_POLICY_SAVED = "dnsHijackProfilePolicySaved";
+    private static final String[] DNS_HIJACK_PROFILE_POLICY_KEYS = new String[] {
+            DNS_HIJACK_UPSTREAMS,
+            DNS_HIJACK_BOOTSTRAP_UPSTREAMS,
+            DNS_HIJACK_SPLIT_UPSTREAMS,
+            DNS_HIJACK_CAPTURE_UIDS,
+            DNS_HIJACK_BYPASS_UIDS,
+            DNS_HIJACK_CAPTURE_INTERFACES,
+            DNS_HIJACK_BYPASS_INTERFACES,
+            DNS_HIJACK_FAIL_OPEN,
+            DNS_HIJACK_STRICT_MODE,
+            DNS_HIJACK_SAFE_SEARCH,
+            DNS_HIJACK_DNSSEC_REQUEST,
+            DNS_HIJACK_DNSSEC_AUTH_REQUIRED,
+            DNS_HIJACK_TIMEOUT_MS,
+            DNS_HIJACK_CACHE_SIZE,
+            DNS_HIJACK_STALE_CACHE_SECONDS,
+            DNS_HIJACK_PERSIST_CACHE,
+            DNS_HIJACK_QUERY_LOGGING,
+            DNS_HIJACK_PERSIST_QUERY_LOGS,
+            DNS_HIJACK_ALLOW_EXACT,
+            DNS_HIJACK_ALLOW_SUFFIX,
+            DNS_HIJACK_BLOCK_EXACT,
+            DNS_HIJACK_BLOCK_SUFFIX,
+            DNS_HIJACK_APP_ALLOW_EXACT,
+            DNS_HIJACK_APP_BLOCK_EXACT,
+            DNS_HIJACK_APP_ALLOW_SUFFIX,
+            DNS_HIJACK_APP_BLOCK_SUFFIX,
+            DNS_HIJACK_NETWORK_ALLOW,
+            DNS_HIJACK_NETWORK_BLOCK,
+            DNS_HIJACK_ALLOW_REGEX,
+            DNS_HIJACK_BLOCK_REGEX,
+            DNS_HIJACK_TEMP_ALLOW,
+            DNS_HIJACK_TEMP_BLOCK,
+            DNS_HIJACK_BLOCKLIST_URLS,
+            DNS_HIJACK_SCHEDULED_BLOCKLIST_UPDATES,
+            DNS_HIJACK_BLOCKLIST_UPDATE_INTERVAL_HOURS
+    };
 
     private static final String SHOW_ALL_APPS = "showAllApps";
 
@@ -253,6 +332,675 @@ public class G extends Application implements Application.ActivityLifecycleCallb
 
     public static boolean zipLogReports() {
         return gPrefs.getBoolean(ZIP_LOG_REPORTS, false);
+    }
+
+    public static boolean enableDnsHijack() {
+        return gPrefs.getBoolean(ENABLE_DNS_HIJACK, false);
+    }
+
+    public static boolean enableDnsHijack(boolean val) {
+        gPrefs.edit().putBoolean(ENABLE_DNS_HIJACK, val).commit();
+        return val;
+    }
+
+    public static int dnsHijackPort(int fallback) {
+        return readIntPreference(DNS_HIJACK_PORT, fallback, 1024, 65535);
+    }
+
+    public static String dnsHijackUpstreams() {
+        return dnsPolicyPrefs().getString(DNS_HIJACK_UPSTREAMS, "1.1.1.1:53\n8.8.8.8:53");
+    }
+
+    public static String dnsHijackBootstrapUpstreams() {
+        return dnsPolicyPrefs().getString(DNS_HIJACK_BOOTSTRAP_UPSTREAMS, "1.1.1.1:53\n8.8.8.8:53");
+    }
+
+    public static String dnsHijackSplitUpstreams() {
+        return dnsPolicyPrefs().getString(DNS_HIJACK_SPLIT_UPSTREAMS, "");
+    }
+
+    public static boolean applyDnsHijackUpstreamProvider(String providerId) {
+        if (providerId == null) {
+            return false;
+        }
+        String provider = providerId.trim().toLowerCase(java.util.Locale.US);
+        String upstreams;
+        String bootstrapUpstreams;
+        if ("cloudflare-udp".equals(provider)) {
+            upstreams = "udp://1.1.1.1:53\nudp://1.0.0.1:53";
+            bootstrapUpstreams = upstreams;
+        } else if ("cloudflare-tcp".equals(provider)) {
+            upstreams = "tcp://1.1.1.1:53\ntcp://1.0.0.1:53";
+            bootstrapUpstreams = "udp://1.1.1.1:53\nudp://1.0.0.1:53";
+        } else if ("quad9-udp".equals(provider)) {
+            upstreams = "udp://9.9.9.9:53\nudp://149.112.112.112:53";
+            bootstrapUpstreams = upstreams;
+        } else if ("quad9-tcp".equals(provider)) {
+            upstreams = "tcp://9.9.9.9:53\ntcp://149.112.112.112:53";
+            bootstrapUpstreams = "udp://9.9.9.9:53\nudp://149.112.112.112:53";
+        } else if ("google-udp".equals(provider)) {
+            upstreams = "udp://8.8.8.8:53\nudp://8.8.4.4:53";
+            bootstrapUpstreams = upstreams;
+        } else if ("adguard-udp".equals(provider)) {
+            upstreams = "udp://94.140.14.14:53\nudp://94.140.15.15:53";
+            bootstrapUpstreams = "udp://1.1.1.1:53\nudp://8.8.8.8:53";
+        } else if ("cleanbrowsing-family-udp".equals(provider)) {
+            upstreams = "udp://185.228.168.168:53\nudp://185.228.169.168:53";
+            bootstrapUpstreams = "udp://1.1.1.1:53\nudp://8.8.8.8:53";
+        } else {
+            return false;
+        }
+        return dnsWritablePolicyPrefs().edit()
+                .putString(DNS_HIJACK_UPSTREAMS, upstreams)
+                .putString(DNS_HIJACK_BOOTSTRAP_UPSTREAMS, bootstrapUpstreams)
+                .commit();
+    }
+
+    public static String dnsHijackCaptureUids() {
+        return dnsPolicyPrefs().getString(DNS_HIJACK_CAPTURE_UIDS, "");
+    }
+
+    public static String dnsHijackBypassUids() {
+        return dnsPolicyPrefs().getString(DNS_HIJACK_BYPASS_UIDS, "");
+    }
+
+    public static boolean dnsHijackUidCaptured(int uid) {
+        if (uid < 0) {
+            return false;
+        }
+        LinkedHashSet<Integer> bypassUids = readUidSet(dnsPolicyPrefs(), DNS_HIJACK_BYPASS_UIDS);
+        if (bypassUids.contains(uid)) {
+            return false;
+        }
+        LinkedHashSet<Integer> captureUids = readUidSet(dnsPolicyPrefs(), DNS_HIJACK_CAPTURE_UIDS);
+        return captureUids.isEmpty() || captureUids.contains(uid);
+    }
+
+    public static boolean dnsHijackUidCaptured(int uid, boolean captured) {
+        if (uid < 0) {
+            return false;
+        }
+        SharedPreferences prefs = dnsWritablePolicyPrefs();
+        LinkedHashSet<Integer> captureUids = readUidSet(prefs, DNS_HIJACK_CAPTURE_UIDS);
+        LinkedHashSet<Integer> bypassUids = readUidSet(prefs, DNS_HIJACK_BYPASS_UIDS);
+        boolean changed = false;
+        if (captured) {
+            changed |= bypassUids.remove(uid);
+            if (!captureUids.isEmpty()) {
+                changed |= captureUids.add(uid);
+            }
+        } else {
+            changed |= captureUids.remove(uid);
+            changed |= bypassUids.add(uid);
+        }
+        if (changed) {
+            prefs.edit()
+                    .putString(DNS_HIJACK_CAPTURE_UIDS, joinUidSet(captureUids))
+                    .putString(DNS_HIJACK_BYPASS_UIDS, joinUidSet(bypassUids))
+                    .commit();
+        }
+        return changed;
+    }
+
+    public static String dnsHijackCaptureInterfaces() {
+        return dnsPolicyPrefs().getString(DNS_HIJACK_CAPTURE_INTERFACES, "");
+    }
+
+    public static String dnsHijackBypassInterfaces() {
+        return dnsPolicyPrefs().getString(DNS_HIJACK_BYPASS_INTERFACES, "");
+    }
+
+    public static boolean dnsHijackFailOpen() {
+        return dnsPolicyPrefs().getBoolean(DNS_HIJACK_FAIL_OPEN, true);
+    }
+
+    public static boolean dnsHijackStrictMode() {
+        return dnsPolicyPrefs().getBoolean(DNS_HIJACK_STRICT_MODE, false);
+    }
+
+    public static boolean dnsHijackSafeSearch() {
+        return dnsPolicyPrefs().getBoolean(DNS_HIJACK_SAFE_SEARCH, false);
+    }
+
+    public static boolean dnsHijackDnssecRequest() {
+        return dnsPolicyPrefs().getBoolean(DNS_HIJACK_DNSSEC_REQUEST, false);
+    }
+
+    public static boolean dnsHijackDnssecAuthRequired() {
+        return dnsPolicyPrefs().getBoolean(DNS_HIJACK_DNSSEC_AUTH_REQUIRED, false);
+    }
+
+    public static boolean dnsHijackBootPersistence() {
+        return gPrefs.getBoolean(DNS_HIJACK_BOOT_PERSISTENCE, false);
+    }
+
+    public static boolean dnsHijackBootPersistence(boolean val) {
+        gPrefs.edit().putBoolean(DNS_HIJACK_BOOT_PERSISTENCE, val).commit();
+        return val;
+    }
+
+    public static boolean dnsHijackAdbDebugControl() {
+        return gPrefs.getBoolean(DNS_HIJACK_ADB_DEBUG_CONTROL, false);
+    }
+
+    public static int dnsHijackTimeoutMs() {
+        return readIntPreference(dnsPolicyPrefs(), DNS_HIJACK_TIMEOUT_MS, 2500, 250, 10000);
+    }
+
+    public static int dnsHijackCacheSize() {
+        return readIntPreference(dnsPolicyPrefs(), DNS_HIJACK_CACHE_SIZE, 1024, 0, 4096);
+    }
+
+    public static int dnsHijackStaleCacheSeconds() {
+        return readIntPreference(dnsPolicyPrefs(), DNS_HIJACK_STALE_CACHE_SECONDS, 300, 0, 86400);
+    }
+
+    public static boolean dnsHijackPersistCache() {
+        return dnsPolicyPrefs().getBoolean(DNS_HIJACK_PERSIST_CACHE, false);
+    }
+
+    public static boolean dnsHijackQueryLogging() {
+        return dnsPolicyPrefs().getBoolean(DNS_HIJACK_QUERY_LOGGING, true);
+    }
+
+    public static boolean dnsHijackPersistQueryLogs() {
+        return dnsPolicyPrefs().getBoolean(DNS_HIJACK_PERSIST_QUERY_LOGS, true);
+    }
+
+    public static String dnsHijackAllowExact() {
+        return dnsPolicyPrefs().getString(DNS_HIJACK_ALLOW_EXACT, "");
+    }
+
+    public static String dnsHijackAllowSuffix() {
+        return dnsPolicyPrefs().getString(DNS_HIJACK_ALLOW_SUFFIX, "");
+    }
+
+    public static String dnsHijackBlockExact() {
+        return dnsPolicyPrefs().getString(DNS_HIJACK_BLOCK_EXACT, "");
+    }
+
+    public static String dnsHijackBlockSuffix() {
+        return dnsPolicyPrefs().getString(DNS_HIJACK_BLOCK_SUFFIX, "");
+    }
+
+    public static String dnsHijackAppAllowExact() {
+        return dnsPolicyPrefs().getString(DNS_HIJACK_APP_ALLOW_EXACT, "");
+    }
+
+    public static String dnsHijackAppBlockExact() {
+        return dnsPolicyPrefs().getString(DNS_HIJACK_APP_BLOCK_EXACT, "");
+    }
+
+    public static String dnsHijackAppAllowSuffix() {
+        return dnsPolicyPrefs().getString(DNS_HIJACK_APP_ALLOW_SUFFIX, "");
+    }
+
+    public static String dnsHijackAppBlockSuffix() {
+        return dnsPolicyPrefs().getString(DNS_HIJACK_APP_BLOCK_SUFFIX, "");
+    }
+
+    public static String dnsHijackNetworkAllow() {
+        return dnsPolicyPrefs().getString(DNS_HIJACK_NETWORK_ALLOW, "");
+    }
+
+    public static String dnsHijackNetworkBlock() {
+        return dnsPolicyPrefs().getString(DNS_HIJACK_NETWORK_BLOCK, "");
+    }
+
+    public static String dnsHijackAllowRegex() {
+        return dnsPolicyPrefs().getString(DNS_HIJACK_ALLOW_REGEX, "");
+    }
+
+    public static String dnsHijackBlockRegex() {
+        return dnsPolicyPrefs().getString(DNS_HIJACK_BLOCK_REGEX, "");
+    }
+
+    public static String dnsHijackTempAllow() {
+        return dnsPolicyPrefs().getString(DNS_HIJACK_TEMP_ALLOW, "");
+    }
+
+    public static String dnsHijackTempBlock() {
+        return dnsPolicyPrefs().getString(DNS_HIJACK_TEMP_BLOCK, "");
+    }
+
+    public static String dnsHijackBlocklistUrls() {
+        return dnsPolicyPrefs().getString(DNS_HIJACK_BLOCKLIST_URLS, "");
+    }
+
+    public static boolean appendDnsHijackBlocklistUrl(String url) {
+        return appendLinePreference(dnsPolicyPrefs(), DNS_HIJACK_BLOCKLIST_URLS, url);
+    }
+
+    public static boolean dnsHijackScheduledBlocklistUpdates() {
+        return dnsPolicyPrefs().getBoolean(DNS_HIJACK_SCHEDULED_BLOCKLIST_UPDATES, false);
+    }
+
+    public static int dnsHijackBlocklistUpdateIntervalHours() {
+        return readIntPreference(dnsPolicyPrefs(), DNS_HIJACK_BLOCKLIST_UPDATE_INTERVAL_HOURS, 24, 1, 720);
+    }
+
+    public static boolean dnsHijackUseProfilePolicy() {
+        return gPrefs.getBoolean(DNS_HIJACK_USE_PROFILE_POLICY, false);
+    }
+
+    public static boolean activeDnsHijackProfilePolicySaved() {
+        SharedPreferences profilePrefs = activeDnsProfilePrefs();
+        return profilePrefs != null
+                && profilePrefs.getBoolean(DNS_HIJACK_PROFILE_POLICY_SAVED, false);
+    }
+
+    public static String activeDnsHijackPolicyProfile() {
+        if (!enableMultiProfile()) {
+            return Api.DEFAULT_PREFS_NAME;
+        }
+        return storedProfile();
+    }
+
+    public static boolean saveActiveDnsHijackProfilePolicy() {
+        SharedPreferences profilePrefs = activeDnsProfilePrefs();
+        if (profilePrefs == null) {
+            return false;
+        }
+        SharedPreferences.Editor editor = profilePrefs.edit();
+        for (String key : DNS_HIJACK_PROFILE_POLICY_KEYS) {
+            copyPreferenceValue(gPrefs, editor, key);
+        }
+        editor.putBoolean(DNS_HIJACK_PROFILE_POLICY_SAVED, true);
+        return editor.commit();
+    }
+
+    public static boolean clearActiveDnsHijackProfilePolicy() {
+        SharedPreferences profilePrefs = activeDnsProfilePrefs();
+        if (profilePrefs == null) {
+            return false;
+        }
+        SharedPreferences.Editor editor = profilePrefs.edit();
+        for (String key : DNS_HIJACK_PROFILE_POLICY_KEYS) {
+            editor.remove(key);
+        }
+        editor.remove(DNS_HIJACK_PROFILE_POLICY_SAVED);
+        return editor.commit();
+    }
+
+    public static boolean applyDnsHijackProfilePreset(String presetId) {
+        if (gPrefs == null || presetId == null) {
+            return false;
+        }
+        String preset = presetId.trim().toLowerCase(java.util.Locale.US);
+        SharedPreferences.Editor editor = gPrefs.edit();
+        if ("default".equals(preset)) {
+            putDnsHijackPreset(editor,
+                    "1.1.1.1:53\n8.8.8.8:53",
+                    "1.1.1.1:53\n8.8.8.8:53",
+                    true, false, false, false, false,
+                    "2500", "1024", "300",
+                    false, true, true,
+                    "", false, "24");
+        } else if ("strict".equals(preset)) {
+            putDnsHijackPreset(editor,
+                    "9.9.9.9:53\n1.1.1.1:53",
+                    "9.9.9.9:53\n1.1.1.1:53",
+                    false, true, true, true, false,
+                    "2500", "2048", "0",
+                    true, true, true,
+                    "https://raw.githubusercontent.com/stevenblack/hosts/master/hosts\n"
+                            + "https://small.oisd.nl/\n"
+                            + "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/domains/light.txt",
+                    true, "12");
+        } else if ("kids".equals(preset)) {
+            putDnsHijackPreset(editor,
+                    "1.1.1.3:53\n1.0.0.3:53",
+                    "1.1.1.1:53\n8.8.8.8:53",
+                    false, true, true, false, false,
+                    "2500", "2048", "0",
+                    true, true, true,
+                    "https://raw.githubusercontent.com/stevenblack/hosts/master/hosts\n"
+                            + "https://small.oisd.nl/\n"
+                            + "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/domains/light.txt",
+                    true, "12");
+        } else if ("work".equals(preset)) {
+            putDnsHijackPreset(editor,
+                    "9.9.9.9:53\n1.1.1.1:53",
+                    "9.9.9.9:53\n1.1.1.1:53",
+                    true, false, false, true, false,
+                    "2500", "1024", "300",
+                    false, true, true,
+                    "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/domains/light.txt",
+                    true, "24");
+        } else if ("gaming".equals(preset)) {
+            putDnsHijackPreset(editor,
+                    "1.1.1.1:53\n8.8.8.8:53",
+                    "1.1.1.1:53\n8.8.8.8:53",
+                    true, false, false, false, false,
+                    "1500", "2048", "600",
+                    true, false, false,
+                    "", false, "24");
+        } else {
+            return false;
+        }
+        return editor.commit();
+    }
+
+    public static String dnsHijackBlocklistDirectoryName(String defaultName) {
+        if (!usingActiveDnsProfilePolicy()) {
+            return defaultName;
+        }
+        String profile = activeDnsHijackPolicyProfile();
+        String safeProfile = profile == null ? Api.DEFAULT_PREFS_NAME : profile;
+        safeProfile = safeProfile.replaceAll("[^A-Za-z0-9_.-]", "_");
+        if (safeProfile.length() == 0) {
+            safeProfile = Api.DEFAULT_PREFS_NAME;
+        }
+        return defaultName + "_" + safeProfile;
+    }
+
+    private static void putDnsHijackPreset(SharedPreferences.Editor editor,
+                                           String upstreams,
+                                           String bootstrapUpstreams,
+                                           boolean failOpen,
+                                           boolean strictMode,
+                                           boolean safeSearch,
+                                           boolean dnssecRequest,
+                                           boolean dnssecAuthRequired,
+                                           String timeoutMs,
+                                           String cacheSize,
+                                           String staleCacheSeconds,
+                                           boolean persistCache,
+                                           boolean queryLogging,
+                                           boolean persistQueryLogs,
+                                           String blocklistUrls,
+                                           boolean scheduledBlocklistUpdates,
+                                           String updateIntervalHours) {
+        // Presets seed the exact policy keys consumed by config generation, avoiding a second
+        // profile implementation that could drift from daemon behavior.
+        editor.putString(DNS_HIJACK_UPSTREAMS, upstreams);
+        editor.putString(DNS_HIJACK_BOOTSTRAP_UPSTREAMS, bootstrapUpstreams);
+        editor.putString(DNS_HIJACK_SPLIT_UPSTREAMS, "");
+        editor.putString(DNS_HIJACK_CAPTURE_UIDS, "");
+        editor.putString(DNS_HIJACK_BYPASS_UIDS, "");
+        editor.putString(DNS_HIJACK_CAPTURE_INTERFACES, "");
+        editor.putString(DNS_HIJACK_BYPASS_INTERFACES, "");
+        editor.putBoolean(DNS_HIJACK_FAIL_OPEN, failOpen);
+        editor.putBoolean(DNS_HIJACK_STRICT_MODE, strictMode);
+        editor.putBoolean(DNS_HIJACK_SAFE_SEARCH, safeSearch);
+        editor.putBoolean(DNS_HIJACK_DNSSEC_REQUEST, dnssecRequest);
+        editor.putBoolean(DNS_HIJACK_DNSSEC_AUTH_REQUIRED, dnssecAuthRequired);
+        editor.putString(DNS_HIJACK_TIMEOUT_MS, timeoutMs);
+        editor.putString(DNS_HIJACK_CACHE_SIZE, cacheSize);
+        editor.putString(DNS_HIJACK_STALE_CACHE_SECONDS, staleCacheSeconds);
+        editor.putBoolean(DNS_HIJACK_PERSIST_CACHE, persistCache);
+        editor.putBoolean(DNS_HIJACK_QUERY_LOGGING, queryLogging);
+        editor.putBoolean(DNS_HIJACK_PERSIST_QUERY_LOGS, persistQueryLogs);
+        editor.putString(DNS_HIJACK_ALLOW_EXACT, "");
+        editor.putString(DNS_HIJACK_ALLOW_SUFFIX, "");
+        editor.putString(DNS_HIJACK_BLOCK_EXACT, "");
+        editor.putString(DNS_HIJACK_BLOCK_SUFFIX, "");
+        editor.putString(DNS_HIJACK_APP_ALLOW_EXACT, "");
+        editor.putString(DNS_HIJACK_APP_BLOCK_EXACT, "");
+        editor.putString(DNS_HIJACK_APP_ALLOW_SUFFIX, "");
+        editor.putString(DNS_HIJACK_APP_BLOCK_SUFFIX, "");
+        editor.putString(DNS_HIJACK_NETWORK_ALLOW, "");
+        editor.putString(DNS_HIJACK_NETWORK_BLOCK, "");
+        editor.putString(DNS_HIJACK_ALLOW_REGEX, "");
+        editor.putString(DNS_HIJACK_BLOCK_REGEX, "");
+        editor.putString(DNS_HIJACK_TEMP_ALLOW, "");
+        editor.putString(DNS_HIJACK_TEMP_BLOCK, "");
+        editor.putString(DNS_HIJACK_BLOCKLIST_URLS, blocklistUrls);
+        editor.putBoolean(DNS_HIJACK_SCHEDULED_BLOCKLIST_UPDATES, scheduledBlocklistUpdates);
+        editor.putString(DNS_HIJACK_BLOCKLIST_UPDATE_INTERVAL_HOURS, updateIntervalHours);
+    }
+
+    public static boolean appendDnsHijackAllowExact(String domain) {
+        return appendLinePreference(dnsWritablePolicyPrefs(), DNS_HIJACK_ALLOW_EXACT, domain);
+    }
+
+    public static boolean appendDnsHijackAllowSuffix(String domain) {
+        return appendLinePreference(dnsWritablePolicyPrefs(), DNS_HIJACK_ALLOW_SUFFIX, domain);
+    }
+
+    public static boolean appendDnsHijackBlockExact(String domain) {
+        return appendLinePreference(dnsWritablePolicyPrefs(), DNS_HIJACK_BLOCK_EXACT, domain);
+    }
+
+    public static boolean appendDnsHijackBlockSuffix(String domain) {
+        return appendLinePreference(dnsWritablePolicyPrefs(), DNS_HIJACK_BLOCK_SUFFIX, domain);
+    }
+
+    public static boolean appendDnsHijackAppAllowExact(int uid, String domain) {
+        return appendUidDomainPreference(dnsWritablePolicyPrefs(), DNS_HIJACK_APP_ALLOW_EXACT, uid, domain);
+    }
+
+    public static boolean appendDnsHijackAppBlockExact(int uid, String domain) {
+        return appendUidDomainPreference(dnsWritablePolicyPrefs(), DNS_HIJACK_APP_BLOCK_EXACT, uid, domain);
+    }
+
+    public static boolean appendDnsHijackAppAllowSuffix(int uid, String domain) {
+        return appendUidDomainPreference(dnsWritablePolicyPrefs(), DNS_HIJACK_APP_ALLOW_SUFFIX, uid, domain);
+    }
+
+    public static boolean appendDnsHijackAppBlockSuffix(int uid, String domain) {
+        return appendUidDomainPreference(dnsWritablePolicyPrefs(), DNS_HIJACK_APP_BLOCK_SUFFIX, uid, domain);
+    }
+
+    public static boolean appendDnsHijackTempAllow(String domain, long expiresAtSeconds) {
+        return appendTemporaryLinePreference(dnsWritablePolicyPrefs(), DNS_HIJACK_TEMP_ALLOW, domain, expiresAtSeconds);
+    }
+
+    public static boolean appendDnsHijackTempBlock(String domain, long expiresAtSeconds) {
+        return appendTemporaryLinePreference(dnsWritablePolicyPrefs(), DNS_HIJACK_TEMP_BLOCK, domain, expiresAtSeconds);
+    }
+
+    public static void pruneExpiredDnsHijackTemporaryRules() {
+        SharedPreferences prefs = dnsWritablePolicyPrefs();
+        pruneExpiredTemporaryPreference(prefs, DNS_HIJACK_TEMP_ALLOW);
+        pruneExpiredTemporaryPreference(prefs, DNS_HIJACK_TEMP_BLOCK);
+    }
+
+    private static SharedPreferences dnsPolicyPrefs() {
+        return usingActiveDnsProfilePolicy() ? activeDnsProfilePrefs() : gPrefs;
+    }
+
+    private static SharedPreferences dnsWritablePolicyPrefs() {
+        return usingActiveDnsProfilePolicy() ? activeDnsProfilePrefs() : gPrefs;
+    }
+
+    private static boolean usingActiveDnsProfilePolicy() {
+        return dnsHijackUseProfilePolicy() && activeDnsHijackProfilePolicySaved();
+    }
+
+    private static SharedPreferences activeDnsProfilePrefs() {
+        if (ctx == null) {
+            return pPrefs;
+        }
+        if (pPrefs == null) {
+            reloadPrefs();
+        }
+        return pPrefs;
+    }
+
+    @SuppressWarnings("unchecked")
+    private static void copyPreferenceValue(SharedPreferences source, SharedPreferences.Editor target,
+                                            String key) {
+        if (source == null || !source.contains(key)) {
+            target.remove(key);
+            return;
+        }
+        Object value = source.getAll().get(key);
+        if (value instanceof Boolean) {
+            target.putBoolean(key, (Boolean) value);
+        } else if (value instanceof Integer) {
+            target.putInt(key, (Integer) value);
+        } else if (value instanceof Long) {
+            target.putLong(key, (Long) value);
+        } else if (value instanceof Float) {
+            target.putFloat(key, (Float) value);
+        } else if (value instanceof Set) {
+            target.putStringSet(key, (Set<String>) value);
+        } else if (value != null) {
+            target.putString(key, String.valueOf(value));
+        }
+    }
+
+    private static boolean appendLinePreference(SharedPreferences prefs, String key, String rawValue) {
+        if (rawValue == null) {
+            return false;
+        }
+        String value = rawValue.trim().toLowerCase(java.util.Locale.US);
+        if (value.isEmpty()) {
+            return false;
+        }
+        LinkedHashSet<String> values = new LinkedHashSet<>();
+        String existing = prefs.getString(key, "");
+        if (existing != null) {
+            String[] lines = existing.split("[\\r\\n,]+");
+            for (String line : lines) {
+                String existingValue = line == null ? "" : line.trim().toLowerCase(java.util.Locale.US);
+                if (!existingValue.isEmpty()) {
+                    values.add(existingValue);
+                }
+            }
+        }
+        boolean added = values.add(value);
+        if (added) {
+            prefs.edit().putString(key, android.text.TextUtils.join("\n", values)).commit();
+        }
+        return added;
+    }
+
+    private static boolean appendTemporaryLinePreference(SharedPreferences prefs, String key,
+                                                         String rawValue, long expiresAtSeconds) {
+        if (rawValue == null || expiresAtSeconds <= (System.currentTimeMillis() / 1000L)) {
+            return false;
+        }
+        String value = rawValue.trim().toLowerCase(java.util.Locale.US);
+        if (value.isEmpty()) {
+            return false;
+        }
+        LinkedHashSet<String> values = new LinkedHashSet<>();
+        String prefix = value + "|";
+        String existing = prefs.getString(key, "");
+        boolean changed = false;
+        if (existing != null) {
+            String[] lines = existing.split("[\\r\\n]+");
+            long now = System.currentTimeMillis() / 1000L;
+            for (String line : lines) {
+                String existingValue = line == null ? "" : line.trim().toLowerCase(java.util.Locale.US);
+                if (existingValue.isEmpty() || isExpiredTemporaryLine(existingValue, now)) {
+                    changed = true;
+                    continue;
+                }
+                if (existingValue.startsWith(prefix)) {
+                    changed = true;
+                    continue;
+                }
+                values.add(existingValue);
+            }
+        }
+        String entry = value + "|" + expiresAtSeconds;
+        boolean added = values.add(entry);
+        if (added || changed) {
+            prefs.edit().putString(key, android.text.TextUtils.join("\n", values)).commit();
+        }
+        return added || changed;
+    }
+
+    private static boolean appendUidDomainPreference(SharedPreferences prefs, String key,
+                                                     int uid, String rawDomain) {
+        if (uid < 0 || rawDomain == null) {
+            return false;
+        }
+        String domain = rawDomain.trim().toLowerCase(java.util.Locale.US);
+        if (domain.isEmpty()) {
+            return false;
+        }
+        return appendLinePreference(prefs, key, uid + "|" + domain);
+    }
+
+    private static LinkedHashSet<Integer> readUidSet(SharedPreferences prefs, String key) {
+        LinkedHashSet<Integer> values = new LinkedHashSet<>();
+        String existing = prefs.getString(key, "");
+        if (existing == null || existing.trim().isEmpty()) {
+            return values;
+        }
+        String[] tokens = existing.split("[\\r\\n,]+");
+        for (String token : tokens) {
+            if (token == null) {
+                continue;
+            }
+            String value = token.trim();
+            if (value.isEmpty()) {
+                continue;
+            }
+            try {
+                int uid = Integer.parseInt(value);
+                if (uid >= 0) {
+                    values.add(uid);
+                }
+            } catch (NumberFormatException ignored) {
+            }
+        }
+        return values;
+    }
+
+    private static String joinUidSet(LinkedHashSet<Integer> values) {
+        List<String> out = new ArrayList<>();
+        for (Integer value : values) {
+            if (value != null && value >= 0) {
+                out.add(String.valueOf(value));
+            }
+        }
+        return android.text.TextUtils.join("\n", out);
+    }
+
+    private static void pruneExpiredTemporaryPreference(SharedPreferences prefs, String key) {
+        String existing = prefs.getString(key, "");
+        if (existing == null || existing.trim().isEmpty()) {
+            return;
+        }
+        LinkedHashSet<String> values = new LinkedHashSet<>();
+        boolean changed = false;
+        long now = System.currentTimeMillis() / 1000L;
+        String[] lines = existing.split("[\\r\\n]+");
+        for (String line : lines) {
+            String value = line == null ? "" : line.trim().toLowerCase(java.util.Locale.US);
+            if (value.isEmpty() || isExpiredTemporaryLine(value, now)) {
+                changed = true;
+                continue;
+            }
+            values.add(value);
+        }
+        if (changed) {
+            prefs.edit().putString(key, android.text.TextUtils.join("\n", values)).commit();
+        }
+    }
+
+    private static boolean isExpiredTemporaryLine(String value, long nowSeconds) {
+        int separator = value.lastIndexOf('|');
+        if (separator <= 0 || separator + 1 >= value.length()) {
+            return true;
+        }
+        try {
+            return Long.parseLong(value.substring(separator + 1)) <= nowSeconds;
+        } catch (NumberFormatException e) {
+            return true;
+        }
+    }
+
+    private static int readIntPreference(String key, int fallback, int min, int max) {
+        return readIntPreference(gPrefs, key, fallback, min, max);
+    }
+
+    private static int readIntPreference(SharedPreferences prefs, String key, int fallback, int min, int max) {
+        String value = prefs.getString(key, String.valueOf(fallback));
+        try {
+            int parsed = Integer.parseInt(value);
+            if (parsed < min || parsed > max) {
+                return fallback;
+            }
+            return parsed;
+        } catch (NumberFormatException e) {
+            return fallback;
+        }
     }
 
 

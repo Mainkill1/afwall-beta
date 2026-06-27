@@ -298,6 +298,282 @@
     <string name="ui_chains_title">IPv4 Chains</string>
     <string name="ui_chains6_title">IPv6 Chains</string>
     <string name="rules_prefs_title">Rules/Connectivity</string>
+    <string name="dns_hijack_category">Experimental Root DNS Filtering</string>
+    <string name="dns_hijack_title">Capture DNS with root redirect</string>
+    <string name="dns_hijack_summary">Run the native DNS daemon and redirect UDP/TCP DNS traffic through it when firewall rules are applied.</string>
+    <string name="dns_hijack_port_title">Local DNS daemon port</string>
+    <string name="dns_hijack_port_summary">Port used by the local root DNS daemon. Reapply firewall rules after changing this.</string>
+    <string name="dns_hijack_upstreams_title">Upstream DNS servers</string>
+    <string name="dns_hijack_upstreams_summary">One upstream per line. Use host:port, udp://host:port, tcp://host:port, or bracketed IPv6.</string>
+    <string name="dns_hijack_upstream_providers_title">Upstream DNS provider presets</string>
+    <string name="dns_hijack_upstream_providers_summary">Choose a known resolver pair using supported UDP or TCP DNS transports.</string>
+    <string name="dns_hijack_upstream_provider_applied">DNS upstream provider applied: %1$s.</string>
+    <string name="dns_hijack_upstream_provider_failed">Unable to apply DNS upstream provider.</string>
+    <string name="dns_hijack_bootstrap_upstreams_title">Bootstrap DNS servers</string>
+    <string name="dns_hijack_bootstrap_upstreams_summary">Resolvers used to resolve hostname-based upstreams before writing daemon config.</string>
+    <string name="dns_hijack_benchmark_upstreams_title">Benchmark upstream DNS</string>
+    <string name="dns_hijack_benchmark_upstreams_summary">Probe configured upstream resolvers and report per-server latency.</string>
+    <string name="dns_hijack_benchmark_empty">No benchmark result was returned.</string>
+    <string name="dns_hijack_split_upstreams_title">Split DNS routes</string>
+    <string name="dns_hijack_split_upstreams_summary">Route matching domains to dedicated upstreams, one per line, such as corp.example=tcp://10.0.0.53:53.</string>
+    <string name="dns_hijack_capture_uids_title">Limit DNS capture to UIDs</string>
+    <string name="dns_hijack_capture_uids_summary">Optional app UID list for apps that open their own port-53 DNS sockets. Android system resolver traffic may use a system UID, so leave this empty for full DNS capture.</string>
+    <string name="dns_hijack_bypass_uids_title">Bypass DNS capture for UIDs</string>
+    <string name="dns_hijack_bypass_uids_summary">Optional app UID list that keeps matching apps on the normal resolver path.</string>
+    <string name="dns_hijack_capture_interfaces_title">Limit DNS capture to interfaces</string>
+    <string name="dns_hijack_capture_interfaces_summary">Optional network interface patterns to capture, such as wlan+, rmnet+, or tun+. When set, other interfaces bypass DNS filtering.</string>
+    <string name="dns_hijack_bypass_interfaces_title">Bypass DNS capture on interfaces</string>
+    <string name="dns_hijack_bypass_interfaces_summary">Optional network interface patterns that should use the normal resolver path.</string>
+    <string name="dns_hijack_fail_open_title">Fail open</string>
+    <string name="dns_hijack_fail_open_summary">Allow upstream DNS when filtering cannot complete instead of blocking the query.</string>
+    <string name="dns_hijack_strict_title">Strict allow/block priority</string>
+    <string name="dns_hijack_strict_summary">When enabled, exact and wildcard block rules can override allow rules.</string>
+    <string name="dns_hijack_safe_search_title">Force SafeSearch</string>
+    <string name="dns_hijack_safe_search_summary">Return daemon-local safe search DNS answers for supported search and video providers.</string>
+    <string name="dns_hijack_dnssec_request_title">Request DNSSEC records</string>
+    <string name="dns_hijack_dnssec_request_summary">Ask upstream resolvers for DNSSEC material with EDNS(0). This forwards DNSSEC data but does not perform local validation.</string>
+    <string name="dns_hijack_dnssec_auth_required_title">Require DNSSEC authentication</string>
+    <string name="dns_hijack_dnssec_auth_required_summary">Only accept upstream answers with the DNSSEC authenticated-data bit. Requires a validating upstream and is not local validation.</string>
+    <string name="dns_hijack_boot_persistence_title">Use Magisk DNS module at boot</string>
+    <string name="dns_hijack_boot_persistence_summary">Install or remove the AFWall DNS Magisk module wrapper for boot restore and fail-open cleanup.</string>
+    <string name="dns_hijack_adb_debug_control_title">Allow ADB DNS diagnostics</string>
+    <string name="dns_hijack_adb_debug_control_summary">Temporarily allow token-authenticated root access to the DNS daemon control socket and loopback debug port over ADB for testing.</string>
+    <string name="dns_hijack_power_settings_title">Review Android power settings</string>
+    <string name="dns_hijack_power_settings_summary_optimized">AFWall+ is battery optimized. The root DNS daemon can keep running, but scheduled DNS updates and app log sync may be delayed.</string>
+    <string name="dns_hijack_power_settings_summary_unrestricted">AFWall+ is not battery optimized. Scheduled DNS updates and app log sync are less likely to be delayed.</string>
+    <string name="dns_hijack_power_settings_summary_unsupported">Battery optimization controls are not available on this Android version.</string>
+    <string name="dns_hijack_power_settings_summary_unknown">Android power state could not be read. Open settings to review battery restrictions.</string>
+    <string name="dns_hijack_power_settings_opening">Opening Android power settings.</string>
+    <string name="dns_hijack_power_settings_unavailable">Unable to open Android power settings.</string>
+    <string name="dns_hijack_private_dns_settings_title">Review Android Private DNS</string>
+    <string name="dns_hijack_private_dns_settings_summary_bypass">Private DNS is active and can bypass root DNS capture. Open Android network settings if full DNS capture is required.</string>
+    <string name="dns_hijack_private_dns_settings_summary_clear">Private DNS is not currently bypassing UDP/TCP port 53 DNS capture.</string>
+    <string name="dns_hijack_private_dns_settings_summary_unsupported">Private DNS controls are not available on this Android version.</string>
+    <string name="dns_hijack_private_dns_settings_summary_unknown">Android Private DNS state could not be read. Open network settings to review it.</string>
+    <string name="dns_hijack_private_dns_settings_opening">Opening Android Private DNS settings.</string>
+    <string name="dns_hijack_private_dns_settings_unavailable">Unable to open Android Private DNS settings.</string>
+    <string name="dns_hijack_repair_service_title">Install or repair DNS service</string>
+    <string name="dns_hijack_repair_service_summary">Reinstall daemon files, restart the watchdog, restore DNS redirects, and refresh the Magisk module wrapper.</string>
+    <string name="dns_hijack_validate_config_title">Validate DNS configuration</string>
+    <string name="dns_hijack_validate_config_summary">Check whether the running DNS service accepts the current DNS settings and rule lists.</string>
+    <string name="dns_hijack_module_status_title">DNS module status</string>
+    <string name="dns_hijack_module_status_summary">Check the Magisk module, control socket permissions, module log, and old startup hooks.</string>
+    <string name="dns_hijack_module_status_queued">DNS module status requested.</string>
+    <string name="dns_hijack_remove_service_title">Remove DNS service</string>
+    <string name="dns_hijack_remove_service_summary">Stop the daemon, remove DNS redirect rules, and remove the Magisk module wrapper.</string>
+    <string name="dns_hijack_remove_service_confirm">Remove the DNS daemon, redirect rules, and Magisk module wrapper?</string>
+    <string name="dns_hijack_emergency_cleanup_title">Emergency DNS cleanup</string>
+    <string name="dns_hijack_emergency_cleanup_summary">Directly remove DNS redirect rules, stop the daemon, and disable the Magisk module wrapper.</string>
+    <string name="dns_hijack_emergency_cleanup_confirm">Run direct DNS recovery cleanup now? This removes DNS redirect rules, stops the daemon, and disables the Magisk module wrapper.</string>
+    <string name="dns_hijack_emergency_cleanup_queued">Emergency DNS cleanup requested.</string>
+    <string name="dns_hijack_emergency_cleanup_complete">Emergency DNS cleanup completed.</string>
+    <string name="dns_hijack_emergency_cleanup_failed">Emergency DNS cleanup failed. Check root access and diagnostics.</string>
+    <string name="dns_hijack_enable_complete">DNS protection installed and enabled.</string>
+    <string name="dns_hijack_disable_complete">DNS protection removed and disabled.</string>
+    <string name="dns_hijack_enable_failed">Unable to enable DNS protection. Check root access and diagnostics.</string>
+    <string name="dns_hijack_disable_failed">Unable to remove DNS protection. Check root access and diagnostics.</string>
+    <string name="dns_hijack_redirect_settings_applied">DNS redirect settings applied.</string>
+    <string name="dns_hijack_redirect_settings_failed">Unable to apply DNS redirect settings. Check diagnostics.</string>
+    <string name="dns_hijack_private_dns_warning">Android Private DNS may bypass DNS capture. Check DNS diagnostics.</string>
+    <string name="dns_hijack_boot_persistence_installed">DNS Magisk module installed.</string>
+    <string name="dns_hijack_boot_persistence_removed">DNS Magisk module removed.</string>
+    <string name="dns_hijack_boot_persistence_failed">Unable to update DNS Magisk module.</string>
+    <string name="dns_hijack_timeout_title">Upstream timeout</string>
+    <string name="dns_hijack_timeout_summary">DNS upstream timeout in milliseconds.</string>
+    <string name="dns_hijack_cache_size_title">DNS cache size</string>
+    <string name="dns_hijack_cache_size_summary">Maximum daemon DNS cache entries. Use 0 to disable caching; maximum is 4096.</string>
+    <string name="dns_hijack_stale_cache_seconds_title">Stale cache window</string>
+    <string name="dns_hijack_stale_cache_seconds_summary">Seconds the daemon may answer from an expired cache entry after all upstream resolvers fail. Use 0 to disable; maximum is 86400.</string>
+    <string name="dns_hijack_persist_cache_title">Restore DNS cache after restart</string>
+    <string name="dns_hijack_persist_cache_summary">Save fresh daemon cache entries to app-private storage during reload or shutdown and restore matching entries on daemon start.</string>
+    <string name="dns_hijack_query_logging_title">DNS query logging</string>
+    <string name="dns_hijack_query_logging_summary">Keep live DNS query rows in the daemon ring buffer for diagnostics and the query viewer.</string>
+    <string name="dns_hijack_persist_query_logs_title">Save DNS query history</string>
+    <string name="dns_hijack_persist_query_logs_summary">Write daemon query logs to app-private storage for historical search and export.</string>
+    <string name="dns_hijack_profile_policy_title">Use active profile DNS policy</string>
+    <string name="dns_hijack_profile_policy_summary">When enabled, saved DNS settings and compiled blocklists follow the active firewall profile.</string>
+    <string name="dns_hijack_profile_presets_title">Apply DNS profile preset</string>
+    <string name="dns_hijack_profile_presets_summary">Seed common Default, Strict, Kids, Work, or Gaming DNS policy values into the current settings.</string>
+    <string name="dns_hijack_save_profile_policy_title">Save DNS policy to active profile</string>
+    <string name="dns_hijack_save_profile_policy_summary">Copy the current DNS upstreams, rules, blocklist URLs, and update schedule into the active profile.</string>
+    <string name="dns_hijack_clear_profile_policy_title">Clear active profile DNS policy</string>
+    <string name="dns_hijack_clear_profile_policy_summary">Remove the active profile DNS override and fall back to the global DNS settings.</string>
+    <string name="dns_hijack_profile_preset_applied">DNS profile preset applied: %1$s.</string>
+    <string name="dns_hijack_profile_preset_failed">Unable to apply DNS profile preset.</string>
+    <string name="dns_hijack_profile_policy_saved">DNS policy saved for active profile.</string>
+    <string name="dns_hijack_profile_policy_cleared">Active profile DNS policy cleared.</string>
+    <string name="dns_hijack_profile_policy_failed">Unable to update active profile DNS policy.</string>
+    <string name="dns_hijack_allow_exact_title">Exact allow domains</string>
+    <string name="dns_hijack_allow_exact_summary">Domains that should always be allowed. One entry per line.</string>
+    <string name="dns_hijack_allow_suffix_title">Wildcard allow suffixes</string>
+    <string name="dns_hijack_allow_suffix_summary">Suffix rules that allow matching domains, such as example.com.</string>
+    <string name="dns_hijack_block_exact_title">Exact block domains</string>
+    <string name="dns_hijack_block_exact_summary">Domains that should be blocked exactly. One entry per line.</string>
+    <string name="dns_hijack_block_suffix_title">Wildcard block suffixes</string>
+    <string name="dns_hijack_block_suffix_summary">Suffix rules that block matching subdomains and domains.</string>
+    <string name="dns_hijack_app_allow_exact_title">Per-app exact allow domains</string>
+    <string name="dns_hijack_app_allow_exact_summary">UID and domain pairs that should be allowed before global block rules. Use one uid|domain entry per line.</string>
+    <string name="dns_hijack_app_block_exact_title">Per-app exact block domains</string>
+    <string name="dns_hijack_app_block_exact_summary">UID and domain pairs that should be blocked for one app. Use one uid|domain entry per line.</string>
+    <string name="dns_hijack_app_allow_suffix_title">Per-app wildcard allow suffixes</string>
+    <string name="dns_hijack_app_allow_suffix_summary">UID and suffix pairs that should allow matching subdomains for one app. Use one uid|domain entry per line.</string>
+    <string name="dns_hijack_app_block_suffix_title">Per-app wildcard block suffixes</string>
+    <string name="dns_hijack_app_block_suffix_summary">UID and suffix pairs that should block matching subdomains for one app. Use one uid|domain entry per line.</string>
+    <string name="dns_hijack_network_allow_title">Per-network allow CIDRs</string>
+    <string name="dns_hijack_network_allow_summary">Source networks allowed before global block rules. Use one IPv4 or IPv6 CIDR per line, such as 192.168.1.0/24 or fd00::/8.</string>
+    <string name="dns_hijack_network_block_title">Per-network block CIDRs</string>
+    <string name="dns_hijack_network_block_summary">Source networks blocked before global exact and wildcard rules. Use one IPv4 or IPv6 CIDR per line.</string>
+    <string name="dns_hijack_allow_regex_title">Regex allow rules</string>
+    <string name="dns_hijack_allow_regex_summary">Regular expressions that allow matching queries.</string>
+    <string name="dns_hijack_block_regex_title">Regex block rules</string>
+    <string name="dns_hijack_block_regex_summary">Regular expressions that block matching queries.</string>
+    <string name="dns_hijack_blocklist_urls_title">Blocklist URLs</string>
+    <string name="dns_hijack_blocklist_urls_summary">One remote hosts, domain, Pi-hole, or AdBlock-style list URL per line.</string>
+    <string name="dns_hijack_blocklist_presets_title">Blocklist presets</string>
+    <string name="dns_hijack_blocklist_presets_summary">Add maintained DNS blocklist sources to the URL list.</string>
+    <string name="dns_hijack_blocklist_presets_dialog_summary">Selected presets are added to the configured URL list. Run update to download and activate them.</string>
+    <string name="dns_hijack_blocklist_presets_result">Added %1$d preset URL(s). Already configured: %2$d.</string>
+    <string name="dns_hijack_scheduled_blocklist_updates_title">Scheduled blocklist updates</string>
+    <string name="dns_hijack_scheduled_blocklist_updates_summary">Periodically download configured DNS blocklist URLs and reload the daemon after a successful compile.</string>
+    <string name="dns_hijack_blocklist_update_interval_title">Blocklist update interval</string>
+    <string name="dns_hijack_blocklist_update_interval_summary">How often scheduled DNS blocklist updates should run, in hours.</string>
+    <string name="dns_hijack_import_blocklist_title">Import DNS blocklist file</string>
+    <string name="dns_hijack_import_blocklist_summary">Use the system picker to import a hosts, domain, Pi-hole, AdBlock-style, or JSON backup list.</string>
+    <string name="dns_hijack_paste_blocklist_title">Paste DNS blocklist</string>
+    <string name="dns_hijack_paste_blocklist_summary">Paste copied hosts, domain, Pi-hole, AdBlock-style, or JSON backup entries and activate them.</string>
+    <string name="dns_hijack_paste_blocklist_hint">Paste blocklist entries here</string>
+    <string name="dns_hijack_update_blocklists_title">Update DNS blocklists</string>
+    <string name="dns_hijack_update_blocklists_summary">Download configured URLs, compile them, and reload the daemon.</string>
+    <string name="dns_hijack_rollback_blocklist_title">Rollback DNS blocklist</string>
+    <string name="dns_hijack_rollback_blocklist_summary">Restore the previous compiled DNS blocklist files.</string>
+    <string name="dns_hijack_blocklist_active">DNS blocklist activated. Reapply firewall rules if DNS capture is not already running.</string>
+    <string name="dns_hijack_blocklist_failed">DNS blocklist update failed.</string>
+    <string name="dns_diagnostics_title">DNS daemon diagnostics</string>
+    <string name="dns_diagnostics_loading">Loading DNS daemon diagnostics</string>
+    <string name="dns_diagnostics_repair">Repair DNS protection</string>
+    <string name="dns_diagnostics_reload">Reload DNS daemon</string>
+    <string name="dns_diagnostics_restart">Restart DNS daemon</string>
+    <string name="dns_diagnostics_stop">Stop DNS daemon</string>
+    <string name="dns_diagnostics_emergency_cleanup">Emergency DNS cleanup</string>
+    <string name="dns_diagnostics_export">Export DNS diagnostics</string>
+    <string name="dns_diagnostics_repair_queued">DNS protection repair requested.</string>
+    <string name="dns_diagnostics_reload_queued">DNS daemon reload requested.</string>
+    <string name="dns_diagnostics_restart_queued">DNS daemon restart requested.</string>
+    <string name="dns_diagnostics_stop_queued">DNS daemon stop requested.</string>
+    <string name="dns_diagnostics_export_success">DNS diagnostics exported.</string>
+    <string name="dns_diagnostics_export_picker_missing">No file picker found. DNS diagnostics copied instead.</string>
+    <string name="dns_dashboard_title">DNS Protection</string>
+    <string name="dns_dashboard_loading">Loading DNS protection status...</string>
+    <string name="dns_dashboard_pause">Pause protection</string>
+    <string name="dns_dashboard_resume">Resume protection</string>
+    <string name="dns_dashboard_capture_test">Test DNS capture</string>
+    <string name="dns_dashboard_capture_test_title">DNS capture test</string>
+    <string name="dns_dashboard_capture_test_queued">DNS capture test requested.</string>
+    <string name="dns_dashboard_service_events">Service events</string>
+    <string name="dns_dashboard_service_events_title">DNS service events</string>
+    <string name="dns_dashboard_service_events_empty">No DNS service events recorded.</string>
+    <string name="dns_dashboard_validate">Validate config</string>
+    <string name="dns_dashboard_validate_title">DNS config validation</string>
+    <string name="dns_dashboard_validate_queued">DNS config validation requested.</string>
+    <string name="dns_dashboard_auth_test">Test control auth</string>
+    <string name="dns_dashboard_auth_test_title">DNS control auth test</string>
+    <string name="dns_dashboard_auth_test_queued">DNS control auth test requested.</string>
+    <string name="dns_dashboard_benchmark_queued">DNS upstream benchmark requested.</string>
+    <string name="dns_dashboard_flush_cache">Flush DNS cache</string>
+    <string name="dns_dashboard_flush_cache_queued">DNS cache flush requested.</string>
+    <string name="dns_dashboard_flush_cache_title">DNS cache flush</string>
+    <string name="dns_dashboard_flush_logs">Flush query logs</string>
+    <string name="dns_dashboard_flush_logs_queued">DNS query log flush requested.</string>
+    <string name="dns_dashboard_flush_logs_title">DNS query log flush</string>
+    <string name="dns_dashboard_clear_logs">Clear query logs</string>
+    <string name="dns_dashboard_clear_logs_queued">DNS query log clear requested.</string>
+    <string name="dns_dashboard_clear_logs_title">Clear DNS query logs</string>
+    <string name="dns_dashboard_clear_logs_confirm">Clear the daemon query log ring and saved DNS query history?</string>
+    <string name="dns_dashboard_pause_queued">DNS protection pause requested.</string>
+    <string name="dns_dashboard_resume_queued">DNS protection resume requested.</string>
+    <string name="dns_dashboard_remove_queued">DNS service removal requested.</string>
+    <string name="dns_dashboard_disabled">DNS protection is disabled.</string>
+
+    <string-array name="dns_hijack_blocklist_preset_names">
+        <item>StevenBlack Unified hosts</item>
+        <item>AdAway hosts</item>
+        <item>OISD small</item>
+        <item>Hagezi Light</item>
+    </string-array>
+
+    <string-array name="dns_hijack_blocklist_preset_urls">
+        <item>https://raw.githubusercontent.com/stevenblack/hosts/master/hosts</item>
+        <item>https://adaway.org/hosts.txt</item>
+        <item>https://small.oisd.nl/</item>
+        <item>https://raw.githubusercontent.com/hagezi/dns-blocklists/main/domains/light.txt</item>
+    </string-array>
+
+    <string-array name="dns_hijack_upstream_provider_names">
+        <item>Cloudflare UDP</item>
+        <item>Cloudflare TCP</item>
+        <item>Quad9 UDP</item>
+        <item>Quad9 TCP</item>
+        <item>Google UDP</item>
+        <item>AdGuard DNS UDP</item>
+        <item>CleanBrowsing Family UDP</item>
+    </string-array>
+
+    <string-array name="dns_hijack_upstream_provider_values">
+        <item>cloudflare-udp</item>
+        <item>cloudflare-tcp</item>
+        <item>quad9-udp</item>
+        <item>quad9-tcp</item>
+        <item>google-udp</item>
+        <item>adguard-udp</item>
+        <item>cleanbrowsing-family-udp</item>
+    </string-array>
+
+    <string-array name="dns_hijack_profile_preset_names">
+        <item>Default</item>
+        <item>Strict</item>
+        <item>Kids</item>
+        <item>Work</item>
+        <item>Gaming</item>
+    </string-array>
+
+    <string-array name="dns_hijack_profile_preset_values">
+        <item>default</item>
+        <item>strict</item>
+        <item>kids</item>
+        <item>work</item>
+        <item>gaming</item>
+    </string-array>
+    <string name="dns_queries_title">DNS Queries</string>
+    <string name="dns_queries_summary">View recent daemon DNS queries and quickly add allow or block rules.</string>
+    <string name="dns_queries_status">%1$d DNS queries loaded.</string>
+    <string name="dns_queries_history">History</string>
+    <string name="dns_queries_live">Live</string>
+    <string name="dns_queries_history_status">%1$d historical DNS queries loaded.</string>
+    <string name="dns_queries_history_filter_status">%1$d historical DNS queries matched \"%2$s\".</string>
+    <string name="dns_queries_search_hint">Domain, action, or latency</string>
+    <string name="dns_queries_export_success">DNS queries exported.</string>
+    <string name="dns_queries_export_picker_missing">No file picker found. DNS queries copied instead.</string>
+    <string name="dns_query_allow_exact">Allow this domain</string>
+    <string name="dns_query_allow_suffix">Allow this domain and subdomains</string>
+    <string name="dns_query_temp_allow">Temporarily allow this domain</string>
+    <string name="dns_query_enable_dns_capture">Enable DNS capture for this app</string>
+    <string name="dns_query_disable_dns_capture">Disable DNS capture for this app</string>
+    <string name="dns_query_app_allow_exact">Allow for this app</string>
+    <string name="dns_query_app_allow_suffix">Allow this app and subdomains</string>
+    <string name="dns_query_block_exact">Block this domain</string>
+    <string name="dns_query_block_suffix">Block this domain and subdomains</string>
+    <string name="dns_query_temp_block">Temporarily block this domain</string>
+    <string name="dns_query_app_block_exact">Block for this app</string>
+    <string name="dns_query_app_block_suffix">Block this app and subdomains</string>
+    <string name="dns_query_view_rule">View rule</string>
+    <string name="dns_query_rule_details_title">DNS decision</string>
+    <string name="dns_query_view_app">View app</string>
+    <string name="dns_query_app_unknown">Unable to identify the application for this DNS query.</string>
+    <string name="dns_query_rule_added">DNS rule added and daemon reload requested.</string>
+    <string name="dns_query_rule_exists">DNS rule already exists.</string>
+    <string name="dns_query_dns_capture_enabled">DNS capture enabled for this app.</string>
+    <string name="dns_query_dns_capture_disabled">DNS capture disabled for this app.</string>
+    <string name="dns_query_dns_capture_unchanged">DNS capture already matches this app.</string>
     <string name="log_prefs_title">Log</string>
     <string name="hideicons_pref_title">Hide app icons</string>
     <string name="hideicons_pref_summary_on">Improve performance by disabling app icons in the main view</string>
