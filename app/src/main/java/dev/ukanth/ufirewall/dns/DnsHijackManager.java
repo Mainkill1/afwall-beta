@@ -80,6 +80,7 @@ public final class DnsHijackManager {
     private static final int MAX_SERVICE_LOG_LINES = 30;
     private static final int MAX_SERVICE_LOG_LINE_CHARS = 240;
     private static final int MAX_DIAGNOSTIC_LOG_TAIL = 4096;
+    private static final int DNS_QTYPE_A = 1;
     private static final String UNREADABLE_SERVICE_LOG_PREFIX = "unreadable_";
     public static final int RULE_ALLOW_EXACT = 1;
     public static final int RULE_ALLOW_SUFFIX = 2;
@@ -968,6 +969,91 @@ public final class DnsHijackManager {
         ApplicationErrorLog.add(context, "DNS upstream benchmark falling back to app UDP probes: "
                 + daemonResult.trim());
         return benchmarkUpstreamsDirect();
+    }
+
+    public static String runCaptureProbe(Context context) {
+        if (context == null) {
+            return "capture_probe=unavailable\nreason=missing_context\n";
+        }
+        if (!G.enableDnsHijack()) {
+            return logCaptureProbeResult(context,
+                    "capture_probe=disabled\nreason=dns_protection_disabled\n");
+        }
+
+        int appUid = android.os.Process.myUid();
+        List<Integer> captureUids = parseUidList(G.dnsHijackCaptureUids());
+        List<Integer> bypassUids = parseUidList(G.dnsHijackBypassUids());
+        if (bypassUids.contains(appUid)) {
+            return logCaptureProbeResult(context,
+                    "capture_probe=skipped\nreason=app_uid_bypassed\napp_uid=" + appUid + "\n");
+        }
+        if (!captureUids.isEmpty() && !captureUids.contains(appUid)) {
+            return logCaptureProbeResult(context,
+                    "capture_probe=skipped\nreason=app_uid_not_in_capture_scope\napp_uid="
+                            + appUid + "\n");
+        }
+
+        String beforeRaw = queryControl(context, "status");
+        Map<String, String> beforeValues = parseKeyValueLines(beforeRaw);
+        if (!"1".equals(beforeValues.get("running"))) {
+            return logCaptureProbeResult(context,
+                    "capture_probe=unavailable\nreason=daemon_not_running\ncontrol_status="
+                            + safeLogValue(compactControlResponse(beforeRaw)) + "\n");
+        }
+
+        long beforeQueries = parseLong(beforeValues.get("queries"), -1L);
+        String domain = "afwall-capture-" + Long.toHexString(System.currentTimeMillis())
+                + ".example.com";
+        byte[] query = buildDnsLookupQuery(domain, DNS_QTYPE_A);
+        int timeoutMs = Math.min(Math.max(G.dnsHijackTimeoutMs(), 500), 2000);
+        ProbeResult udpResult = query == null
+                ? new ProbeResult("build_error", -1, -1)
+                : probeUdpUpstreamDirect(new UpstreamTarget("1.1.1.1", 53, "udp"),
+                        timeoutMs, query);
+        sleepQuietly(250L);
+
+        String afterRaw = queryControl(context, "status");
+        Map<String, String> afterValues = parseKeyValueLines(afterRaw);
+        long afterQueries = parseLong(afterValues.get("queries"), -1L);
+        boolean observedByDaemon = beforeQueries >= 0L && afterQueries > beforeQueries;
+        String probeStatus = observedByDaemon
+                ? "captured"
+                : udpResult.bytes > 0 ? "bypassed_or_not_counted" : "not_observed";
+
+        StringBuilder out = new StringBuilder();
+        out.append("capture_probe=").append(probeStatus).append('\n');
+        out.append("app_uid=").append(appUid).append('\n');
+        out.append("test_domain=").append(domain).append('\n');
+        out.append("daemon_queries_before=").append(beforeQueries).append('\n');
+        out.append("daemon_queries_after=").append(afterQueries).append('\n');
+        out.append("udp_probe_status=").append(udpResult.status).append('\n');
+        out.append("udp_probe_bytes=").append(udpResult.bytes).append('\n');
+        out.append("udp_probe_rcode=").append(udpResult.rcode).append('\n');
+        out.append("timeout_ms=").append(timeoutMs).append('\n');
+        if (!parseInterfaceList(G.dnsHijackCaptureInterfaces()).isEmpty()
+                || !parseInterfaceList(G.dnsHijackBypassInterfaces()).isEmpty()) {
+            out.append("scope_note=interface capture or bypass rules are configured; ")
+                    .append("this probe validates the app process route only\n");
+        }
+        if (!observedByDaemon) {
+            out.append("action_hint=repair DNS protection, then retry; if scoped capture is enabled, ")
+                    .append("test with an app in the captured scope\n");
+        }
+        return logCaptureProbeResult(context, out.toString());
+    }
+
+    private static String logCaptureProbeResult(Context context, String result) {
+        ApplicationErrorLog.add(context, "DNS capture probe result: "
+                + compactControlResponse(result));
+        return result;
+    }
+
+    private static void sleepQuietly(long millis) {
+        try {
+            Thread.sleep(millis);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
     }
 
     public static boolean addRuleFromQuery(Context context, QueryEntry entry, int action) {

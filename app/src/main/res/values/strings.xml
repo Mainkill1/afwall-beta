@@ -452,6 +452,9 @@
     <string name="dns_dashboard_loading">Loading DNS protection status...</string>
     <string name="dns_dashboard_pause">Pause protection</string>
     <string name="dns_dashboard_resume">Resume protection</string>
+    <string name="dns_dashboard_capture_test">Test DNS capture</string>
+    <string name="dns_dashboard_capture_test_title">DNS capture test</string>
+    <string name="dns_dashboard_capture_test_queued">DNS capture test requested.</string>
     <string name="dns_dashboard_pause_queued">DNS protection pause requested.</string>
     <string name="dns_dashboard_resume_queued">DNS protection resume requested.</string>
     <string name="dns_dashboard_disabled">DNS protection is disabled.</string>

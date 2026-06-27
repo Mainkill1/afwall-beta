@@ -95,6 +95,13 @@
                             android:text="@string/dns_queries_title" />
 
                         <Button
+                            android:id="@+id/log_hub_dns_dashboard_capture_test"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="6dp"
+                            android:text="@string/dns_dashboard_capture_test" />
+
+                        <Button
                             android:id="@+id/log_hub_dns_dashboard_pause_resume"
                             android:layout_width="match_parent"
                             android:layout_height="wrap_content"
