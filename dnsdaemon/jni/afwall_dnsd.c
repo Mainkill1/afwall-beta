@@ -257,6 +257,10 @@ typedef struct {
     uint64_t queries;
     uint64_t allowed;
     uint64_t blocked;
+    uint64_t queries_today;
+    uint64_t allowed_today;
+    uint64_t blocked_today;
+    uint64_t day_start_time;
     uint64_t cache_hits;
     uint64_t cache_misses;
     uint64_t cache_stores;
@@ -386,6 +390,48 @@ static bool config_bool_value(const char *value) {
 
 static uint64_t now_seconds(void) {
     return (uint64_t) time(NULL);
+}
+
+static uint64_t local_day_start_seconds(time_t now) {
+    struct tm local_time;
+    if (localtime_r(&now, &local_time) == NULL) {
+        return (uint64_t) (now - (now % 86400));
+    }
+    local_time.tm_hour = 0;
+    local_time.tm_min = 0;
+    local_time.tm_sec = 0;
+    local_time.tm_isdst = -1;
+    return (uint64_t) mktime(&local_time);
+}
+
+static void ensure_daily_stats_current(void) {
+    time_t now = time(NULL);
+    uint64_t day_start = local_day_start_seconds(now);
+    if (g_stats.day_start_time == day_start) {
+        return;
+    }
+    g_stats.day_start_time = day_start;
+    g_stats.queries_today = 0;
+    g_stats.allowed_today = 0;
+    g_stats.blocked_today = 0;
+}
+
+static void record_query_seen(void) {
+    ensure_daily_stats_current();
+    g_stats.queries++;
+    g_stats.queries_today++;
+}
+
+static void record_query_allowed(void) {
+    ensure_daily_stats_current();
+    g_stats.allowed++;
+    g_stats.allowed_today++;
+}
+
+static void record_query_blocked(void) {
+    ensure_daily_stats_current();
+    g_stats.blocked++;
+    g_stats.blocked_today++;
 }
 
 static int elapsed_ms(const struct timeval *start, const struct timeval *end) {
@@ -4293,7 +4339,7 @@ static void handle_dns_query(config_t *cfg, const uint8_t *query, size_t query_l
     size_t forward_query_len = query_len;
     const char *transport = tcp ? "tcp" : "udp";
     gettimeofday(&start, NULL);
-    g_stats.queries++;
+    record_query_seen();
     if (tcp) {
         g_stats.tcp_queries++;
     } else {
@@ -4303,7 +4349,7 @@ static void handle_dns_query(config_t *cfg, const uint8_t *query, size_t query_l
         *response_len = build_block_response(query, query_len, response, MAX_PACKET);
         *action_out = "invalid";
         g_stats.invalid_queries++;
-        g_stats.blocked++;
+        record_query_blocked();
         finish_dns_query("unknown", "invalid", transport, source, uid, qtype,
                 "block", "parse", "none", &start);
         return;
@@ -4319,7 +4365,7 @@ static void handle_dns_query(config_t *cfg, const uint8_t *query, size_t query_l
     }
     if (evaluate_domain(cfg, domain, uid, peer, &reason) == DECISION_BLOCK) {
         *response_len = build_block_response(query, query_len, response, MAX_PACKET);
-        g_stats.blocked++;
+        record_query_blocked();
         *action_out = reason;
         finish_dns_query(domain, reason, transport, source, uid, qtype,
                 "block", reason, "none", &start);
@@ -4328,7 +4374,7 @@ static void handle_dns_query(config_t *cfg, const uint8_t *query, size_t query_l
     *response_len = build_safe_search_response(cfg, domain, qtype, query, query_len,
             response, MAX_PACKET);
     if (*response_len > 0) {
-        g_stats.allowed++;
+        record_query_allowed();
         g_stats.safe_search_rewrites++;
         *action_out = "safe_search";
         finish_dns_query(domain, *action_out, transport, source, uid, qtype,
@@ -4365,7 +4411,7 @@ static void handle_dns_query(config_t *cfg, const uint8_t *query, size_t query_l
             } else {
                 g_stats.cache_positive_hits++;
             }
-            g_stats.allowed++;
+            record_query_allowed();
             *action_out = cache_negative ? "cache_negative" : "cache";
             finish_dns_query(domain, *action_out, transport, source, uid, qtype,
                     "allow", *action_out, "cache", &start);
@@ -4390,7 +4436,7 @@ static void handle_dns_query(config_t *cfg, const uint8_t *query, size_t query_l
         if (!dns_response_truncated(response, *response_len)) {
             cache_store(domain, qtype, upstream_dnssec, response, *response_len);
         }
-        g_stats.allowed++;
+        record_query_allowed();
         g_stats.upstream_successes++;
         *action_out = route;
         finish_dns_query(domain, route, transport, source, uid, qtype,
@@ -4403,7 +4449,7 @@ static void handle_dns_query(config_t *cfg, const uint8_t *query, size_t query_l
         if (require_dnssec_auth && !dns_response_authenticated(response, *response_len)) {
             g_stats.dnssec_auth_failures++;
         } else {
-            g_stats.allowed++;
+            record_query_allowed();
             g_stats.cache_stale_hits++;
             if (cache_negative) {
                 g_stats.cache_stale_negative_hits++;
@@ -4422,7 +4468,7 @@ static void handle_dns_query(config_t *cfg, const uint8_t *query, size_t query_l
         g_stats.fail_open_drops++;
     } else {
         *response_len = build_block_response(query, query_len, response, MAX_PACKET);
-        g_stats.blocked++;
+        record_query_blocked();
         *action_out = "fail_closed";
         g_stats.fail_closed_blocks++;
         finish_dns_query(domain, *action_out, transport, source, uid, qtype,
@@ -4803,6 +4849,7 @@ static void write_health_response(int client) {
     cpu_user_ms = cpu_ticks_to_ms(cpu_user_ticks);
     cpu_system_ms = cpu_ticks_to_ms(cpu_system_ticks);
     cpu_total_ms = cpu_user_ms + cpu_system_ms;
+    ensure_daily_stats_current();
     read_log_stats(&log_ring_entries, &log_unflushed_entries);
     query_len = build_probe_query(query, sizeof(query), &probe_dnssec);
     gettimeofday(&start, NULL);
@@ -4824,7 +4871,9 @@ static void write_health_response(int client) {
             "reloads=%llu\nreload_failures=%llu\nvalidations=%llu\nvalidation_failures=%llu\n"
             "upstream_probe_ms=%d\nupstream_probe_index=%d\nupstream_probe_rcode=%d\n"
             "upstream_probe_dnssec=%d\nupstream_probe_dnssec_auth_required=%d\n"
-            "queries=%llu\nblocked=%llu\nallowed=%llu\ncache_size=%d\ncache_entries=%d\n"
+            "queries=%llu\nblocked=%llu\nallowed=%llu\n"
+            "queries_today=%llu\nblocked_today=%llu\nallowed_today=%llu\n"
+            "stats_day_start=%llu\ncache_size=%d\ncache_entries=%d\n"
             "socket_buffer_bytes=%d\nudp_drain_limit=%d\n"
             "udp_drain_batches=%llu\nudp_drain_packets=%llu\n"
             "cache_positive_entries=%d\ncache_negative_entries=%d\n"
@@ -4885,6 +4934,10 @@ static void write_health_response(int client) {
             (unsigned long long) g_stats.queries,
             (unsigned long long) g_stats.blocked,
             (unsigned long long) g_stats.allowed,
+            (unsigned long long) g_stats.queries_today,
+            (unsigned long long) g_stats.blocked_today,
+            (unsigned long long) g_stats.allowed_today,
+            (unsigned long long) g_stats.day_start_time,
             g_cfg.cache_size,
             cache_entry_count(),
             DNS_SOCKET_BUFFER_BYTES,
@@ -5091,11 +5144,14 @@ static void handle_control(int fd) {
         cpu_user_ms = cpu_ticks_to_ms(cpu_user_ticks);
         cpu_system_ms = cpu_ticks_to_ms(cpu_system_ticks);
         cpu_total_ms = cpu_user_ms + cpu_system_ms;
+        ensure_daily_stats_current();
         read_log_stats(&log_ring_entries, &log_unflushed_entries);
         write_control_response(client,
                 "running=1\npid=%ld\nuptime=%llu\ngeneration=%llu\nlisten_port=%d\n"
                 "udp_listener=%d\ntcp_listener=%d\ncontrol_listener=%d\n"
                 "queries=%llu\nudp_queries=%llu\ntcp_queries=%llu\ninvalid_queries=%llu\n"
+                "queries_today=%llu\nblocked_today=%llu\nallowed_today=%llu\n"
+                "stats_day_start=%llu\n"
                 "udp_drain_batches=%llu\nudp_drain_packets=%llu\n"
                 "tcp_client_timeouts=%llu\ncontrol_client_timeouts=%llu\n"
                 "allowed=%llu\nblocked=%llu\nfail_open_drops=%llu\nfail_closed_blocks=%llu\n"
@@ -5153,6 +5209,10 @@ static void handle_control(int fd) {
                 (unsigned long long) g_stats.udp_queries,
                 (unsigned long long) g_stats.tcp_queries,
                 (unsigned long long) g_stats.invalid_queries,
+                (unsigned long long) g_stats.queries_today,
+                (unsigned long long) g_stats.blocked_today,
+                (unsigned long long) g_stats.allowed_today,
+                (unsigned long long) g_stats.day_start_time,
                 (unsigned long long) g_stats.udp_drain_batches,
                 (unsigned long long) g_stats.udp_drain_packets,
                 (unsigned long long) g_stats.tcp_client_timeouts,

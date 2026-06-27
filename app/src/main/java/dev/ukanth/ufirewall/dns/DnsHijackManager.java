@@ -399,6 +399,9 @@ public final class DnsHijackManager {
                 || status.contains("running=1") || health.contains("running=1");
         long queries = parseLong(firstValue(statusValues, healthValues, "queries"), 0L);
         long blocked = parseLong(firstValue(statusValues, healthValues, "blocked"), 0L);
+        long queriesToday = parseLong(firstValue(statusValues, healthValues, "queries_today"), queries);
+        long blockedToday = parseLong(firstValue(statusValues, healthValues, "blocked_today"), blocked);
+        long allowedToday = parseLong(firstValue(statusValues, healthValues, "allowed_today"), 0L);
         long reloads = parseLong(firstValue(statusValues, healthValues, "reloads"), 0L);
         long reloadFailures = parseLong(firstValue(statusValues, healthValues, "reload_failures"), 0L);
         boolean udpListener = "1".equals(firstValue(statusValues, healthValues, "udp_listener"));
@@ -411,9 +414,9 @@ public final class DnsHijackManager {
         if (profile == null || profile.trim().isEmpty()) {
             profile = "global";
         }
-        String blockPercent = queries <= 0L
+        String blockPercent = queriesToday <= 0L
                 ? "0%"
-                : String.format(Locale.US, "%.1f%%", (blocked * 100.0d) / queries);
+                : String.format(Locale.US, "%.1f%%", (blockedToday * 100.0d) / queriesToday);
         String protection;
         if (!enabled) {
             protection = "DNS protection disabled";
@@ -423,7 +426,8 @@ public final class DnsHijackManager {
             protection = "DNS protection enabled, daemon unavailable";
         }
 
-        String statusLine = protection + " | " + queries + " queries | " + blockPercent + " blocked";
+        String statusLine = protection + " | " + queriesToday + " queries today | "
+                + blockPercent + " blocked";
         String blocklistUpdated = blocklistValues.containsKey("updated")
                 ? blocklistValues.get("updated")
                 : "never";
@@ -439,7 +443,8 @@ public final class DnsHijackManager {
                 + (G.dnsHijackUseProfilePolicy() ? " override" : " global")
                 + "\nUpstream: " + upstream
                 + " | Blocklist updated: " + blocklistUpdated
-                + "\nRestarts: " + restartCount
+                + "\nToday: " + allowedToday + " allowed | " + blockedToday + " blocked"
+                + "\nTotal: " + queries + " queries | Restarts: " + restartCount
                 + " | Reloads: " + reloads
                 + " | Reload failures: " + reloadFailures
                 + "\nListeners: UDP " + listenerLabel(udpListener)
