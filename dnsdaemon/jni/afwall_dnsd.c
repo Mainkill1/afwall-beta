@@ -4145,6 +4145,11 @@ static bool reload_config(void) {
 
 static void write_validate_response(int client) {
     config_t *candidate = (config_t *) calloc(1, sizeof(config_t));
+    int candidate_compiled_upstreams;
+    int candidate_reusable_udp_sockets;
+    int active_cache_entries;
+    uint64_t log_ring_entries;
+    uint64_t log_unflushed_entries;
     g_stats.validations++;
     if (candidate == NULL) {
         g_stats.validation_failures++;
@@ -4168,10 +4173,17 @@ static void write_validate_response(int client) {
                 (unsigned long long) g_stats.validation_failures);
         return;
     }
+    candidate_compiled_upstreams = compiled_upstream_address_count(candidate);
+    candidate_reusable_udp_sockets = reusable_udp_upstream_socket_count(candidate);
+    active_cache_entries = cache_entry_count();
+    read_log_stats(&log_ring_entries, &log_unflushed_entries);
     write_control_response(client,
             "validate=1\nstatus=ok\nactive_generation=%llu\ncandidate_generation=%llu\n"
             "validations=%llu\nvalidation_failures=%llu\n"
+            "runtime_ready=%d\nudp_listener=%d\ntcp_listener=%d\ncontrol_listener=%d\n"
+            "control_socket_configured=%d\npid_file_configured=%d\nheartbeat_file_configured=%d\n"
             "upstreams=%d\nsplit_upstreams=%d\n"
+            "compiled_upstream_addresses=%d\nreusable_udp_upstream_sockets=%d\n"
             "rules_exact_allow=%d\nrules_suffix_allow=%d\n"
             "rules_exact_block=%d\nrules_suffix_block=%d\n"
             "rules_app_exact_allow=%d\nrules_app_exact_block=%d\n"
@@ -4179,15 +4191,31 @@ static void write_validate_response(int client) {
             "rules_network_allow=%d\nrules_network_block=%d\n"
             "rules_regex_allow=%d\nrules_regex_block=%d\n"
             "rules_temp_allow=%d\nrules_temp_block=%d\n"
+            "exact_allow_index_size=%d\nexact_block_index_size=%d\n"
+            "app_exact_allow_index_size=%d\napp_exact_block_index_size=%d\n"
+            "suffix_allow_trie_nodes=%d\nsuffix_block_trie_nodes=%d\n"
+            "app_suffix_allow_trie_nodes=%d\napp_suffix_block_trie_nodes=%d\n"
             "cache_size=%d\nstale_cache_seconds=%d\npersist_cache=%d\n"
+            "active_cache_capacity=%d\nactive_cache_entries=%d\n"
             "dnssec_request=%d\ndnssec_auth_required=%d\n"
+            "query_logging=%d\npersist_query_logs=%d\n"
+            "log_writer_thread=%d\nlog_ring_entries=%llu\nlog_unflushed_entries=%llu\n"
             "cache_file_configured=%d\nresolver_scope_hash=%llu\n",
             (unsigned long long) g_cfg.generation,
             (unsigned long long) candidate->generation,
             (unsigned long long) g_stats.validations,
             (unsigned long long) g_stats.validation_failures,
+            (g_udp_listener_ready && g_tcp_listener_ready && g_control_listener_ready) ? 1 : 0,
+            g_udp_listener_ready,
+            g_tcp_listener_ready,
+            g_control_listener_ready,
+            candidate->control_socket[0] != '\0' ? 1 : 0,
+            candidate->pid_file[0] != '\0' ? 1 : 0,
+            candidate->heartbeat_file[0] != '\0' ? 1 : 0,
             candidate->upstream_count,
             candidate->split_upstream_count,
+            candidate_compiled_upstreams,
+            candidate_reusable_udp_sockets,
             candidate->exact_allow.count,
             candidate->suffix_allow.count,
             candidate->exact_block.count,
@@ -4202,11 +4230,26 @@ static void write_validate_response(int client) {
             candidate->regex_block.count,
             candidate->temp_allow_count,
             candidate->temp_block_count,
+            candidate->exact_allow_index_size,
+            candidate->exact_block_index_size,
+            candidate->app_exact_allow_index_size,
+            candidate->app_exact_block_index_size,
+            candidate->suffix_allow_trie.count,
+            candidate->suffix_block_trie.count,
+            candidate->app_suffix_allow_trie.count,
+            candidate->app_suffix_block_trie.count,
             candidate->cache_size,
             candidate->stale_cache_seconds,
             candidate->persist_cache,
+            g_cache_capacity,
+            active_cache_entries,
             candidate->dnssec_request,
             candidate->dnssec_auth_required,
+            candidate->query_logging,
+            candidate->persist_query_logs,
+            g_log_thread_started ? 1 : 0,
+            (unsigned long long) log_ring_entries,
+            (unsigned long long) log_unflushed_entries,
             candidate->cache_file[0] != '\0' ? 1 : 0,
             (unsigned long long) candidate->resolver_scope_hash);
     free_config_dynamic(candidate);
