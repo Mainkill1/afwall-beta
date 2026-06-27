@@ -3,6 +3,8 @@ package dev.ukanth.ufirewall.activity;
 import android.app.Activity;
 import android.content.ActivityNotFoundException;
 import android.content.Intent;
+import android.content.pm.ApplicationInfo;
+import android.content.pm.PackageManager;
 import android.net.Uri;
 import android.os.Bundle;
 import android.os.Handler;
@@ -25,8 +27,10 @@ import java.nio.charset.StandardCharsets;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Date;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -45,11 +49,14 @@ public class DnsQueriesActivity extends AppCompatActivity {
     private static final int MENU_SEARCH = 3;
     private static final int MENU_TOGGLE_HISTORY = 4;
     private static final int MENU_EXPORT = 5;
+    private static final int QUERY_ACTION_VIEW_APP = 100;
     private static final long REFRESH_MS = 2500L;
 
     private final Handler handler = new Handler(Looper.getMainLooper());
     private final ExecutorService executor = Executors.newSingleThreadExecutor();
     private final List<DnsHijackManager.QueryEntry> entries = new ArrayList<>();
+    private final Map<Integer, String> uidLabelCache = new HashMap<>();
+    private final Map<Integer, String> uidPackageCache = new HashMap<>();
     private ArrayAdapter<String> adapter;
     private TextView status;
     private boolean showHistory;
@@ -198,7 +205,7 @@ public class DnsQueriesActivity extends AppCompatActivity {
                 : "--:--:--";
         return time + "  " + entry.result + "  " + entry.domain + "  " + entry.latency
                 + "\n" + entry.transport.toUpperCase(Locale.US) + " " + entry.qtype
-                + "  source=" + entry.source + "  uid=" + entry.uid
+                + "  app=" + resolveAppLabel(entry) + "  source=" + entry.source + "  uid=" + entry.uid
                 + "  rule=" + entry.rule + "  upstream=" + entry.upstream;
     }
 
@@ -206,40 +213,61 @@ public class DnsQueriesActivity extends AppCompatActivity {
         if (entry == null || !entry.hasDomain()) {
             return;
         }
+        List<CharSequence> labels = new ArrayList<>();
+        List<Integer> actions = new ArrayList<>();
+        addQueryAction(labels, actions, R.string.dns_query_allow_exact,
+                DnsHijackManager.RULE_ALLOW_EXACT);
+        addQueryAction(labels, actions, R.string.dns_query_allow_suffix,
+                DnsHijackManager.RULE_ALLOW_SUFFIX);
+        addQueryAction(labels, actions, R.string.dns_query_temp_allow,
+                DnsHijackManager.RULE_TEMP_ALLOW);
+        addQueryAction(labels, actions, R.string.dns_query_block_exact,
+                DnsHijackManager.RULE_BLOCK_EXACT);
+        addQueryAction(labels, actions, R.string.dns_query_block_suffix,
+                DnsHijackManager.RULE_BLOCK_SUFFIX);
+        addQueryAction(labels, actions, R.string.dns_query_temp_block,
+                DnsHijackManager.RULE_TEMP_BLOCK);
+        if (resolveAppPackage(entry) != null) {
+            addQueryAction(labels, actions, R.string.dns_query_view_app,
+                    QUERY_ACTION_VIEW_APP);
+        }
         new MaterialDialog.Builder(this)
                 .title(entry.domain)
-                .items(new CharSequence[]{
-                        getString(R.string.dns_query_allow_exact),
-                        getString(R.string.dns_query_allow_suffix),
-                        getString(R.string.dns_query_temp_allow),
-                        getString(R.string.dns_query_block_exact),
-                        getString(R.string.dns_query_block_suffix),
-                        getString(R.string.dns_query_temp_block)
-                })
-                .itemsCallback((dialog, view, which, text) -> applyQueryAction(entry, which))
+                .items(labels)
+                .itemsCallback((dialog, view, which, text) -> applyQueryAction(entry, actions.get(which)))
                 .negativeText(R.string.Cancel)
                 .show();
     }
 
-    private void applyQueryAction(DnsHijackManager.QueryEntry entry, int which) {
+    private void addQueryAction(List<CharSequence> labels, List<Integer> actions,
+                                int labelRes, int action) {
+        labels.add(getString(labelRes));
+        actions.add(action);
+    }
+
+    private void applyQueryAction(DnsHijackManager.QueryEntry entry, int actionId) {
         int action;
-        switch (which) {
-            case 0:
+        if (actionId == QUERY_ACTION_VIEW_APP) {
+            openQueryApp(entry);
+            return;
+        }
+        switch (actionId) {
+            case DnsHijackManager.RULE_ALLOW_EXACT:
                 action = DnsHijackManager.RULE_ALLOW_EXACT;
                 break;
-            case 1:
+            case DnsHijackManager.RULE_ALLOW_SUFFIX:
                 action = DnsHijackManager.RULE_ALLOW_SUFFIX;
                 break;
-            case 2:
+            case DnsHijackManager.RULE_TEMP_ALLOW:
                 action = DnsHijackManager.RULE_TEMP_ALLOW;
                 break;
-            case 3:
+            case DnsHijackManager.RULE_BLOCK_EXACT:
                 action = DnsHijackManager.RULE_BLOCK_EXACT;
                 break;
-            case 4:
+            case DnsHijackManager.RULE_BLOCK_SUFFIX:
                 action = DnsHijackManager.RULE_BLOCK_SUFFIX;
                 break;
-            case 5:
+            case DnsHijackManager.RULE_TEMP_BLOCK:
                 action = DnsHijackManager.RULE_TEMP_BLOCK;
                 break;
             default:
@@ -249,6 +277,81 @@ public class DnsQueriesActivity extends AppCompatActivity {
         Api.setRulesUpToDate(false);
         Api.toast(this, getString(added ? R.string.dns_query_rule_added : R.string.dns_query_rule_exists));
         loadQueries(false);
+    }
+
+    private void openQueryApp(DnsHijackManager.QueryEntry entry) {
+        String packageName = resolveAppPackage(entry);
+        if (packageName == null) {
+            Api.toast(this, getString(R.string.dns_query_app_unknown));
+            return;
+        }
+        try {
+            Api.showInstalledAppDetails(this, packageName);
+        } catch (RuntimeException e) {
+            Log.w(TAG, "Unable to open app details for DNS query UID", e);
+            Api.toast(this, getString(R.string.dns_query_app_unknown));
+        }
+    }
+
+    private String resolveAppLabel(DnsHijackManager.QueryEntry entry) {
+        int uid = parseQueryUid(entry);
+        if (uid < 0) {
+            return "unknown";
+        }
+        String cached = uidLabelCache.get(uid);
+        if (cached != null) {
+            return cached;
+        }
+
+        PackageManager packageManager = getPackageManager();
+        String[] packages = packageManager.getPackagesForUid(uid);
+        if (packages == null || packages.length == 0) {
+            String fallback = "uid " + uid;
+            uidLabelCache.put(uid, fallback);
+            return fallback;
+        }
+
+        String label = packages[0];
+        try {
+            ApplicationInfo info = packageManager.getApplicationInfo(packages[0],
+                    PackageManager.GET_META_DATA);
+            CharSequence resolved = packageManager.getApplicationLabel(info);
+            if (resolved != null && resolved.length() > 0) {
+                label = resolved.toString();
+            }
+        } catch (PackageManager.NameNotFoundException ignored) {
+        }
+        if (packages.length > 1) {
+            label += " +" + (packages.length - 1);
+        }
+        uidLabelCache.put(uid, label);
+        uidPackageCache.put(uid, packages[0]);
+        return label;
+    }
+
+    private String resolveAppPackage(DnsHijackManager.QueryEntry entry) {
+        int uid = parseQueryUid(entry);
+        if (uid < 0) {
+            return null;
+        }
+        if (uidPackageCache.containsKey(uid)) {
+            return uidPackageCache.get(uid);
+        }
+        String[] packages = getPackageManager().getPackagesForUid(uid);
+        String packageName = packages == null || packages.length == 0 ? null : packages[0];
+        uidPackageCache.put(uid, packageName);
+        return packageName;
+    }
+
+    private int parseQueryUid(DnsHijackManager.QueryEntry entry) {
+        if (entry == null || entry.uid == null) {
+            return -1;
+        }
+        try {
+            return Integer.parseInt(entry.uid.trim());
+        } catch (NumberFormatException e) {
+            return -1;
+        }
     }
 
     private void setHistoryMode(boolean enabled) {

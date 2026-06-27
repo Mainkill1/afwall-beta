@@ -425,6 +425,8 @@
     <string name="dns_query_block_exact">Block this domain</string>
     <string name="dns_query_block_suffix">Block this domain and subdomains</string>
     <string name="dns_query_temp_block">Temporarily block this domain</string>
+    <string name="dns_query_view_app">View app</string>
+    <string name="dns_query_app_unknown">Unable to identify the application for this DNS query.</string>
     <string name="dns_query_rule_added">DNS rule added and daemon reload requested.</string>
     <string name="dns_query_rule_exists">DNS rule already exists.</string>
     <string name="log_prefs_title">Log</string>
