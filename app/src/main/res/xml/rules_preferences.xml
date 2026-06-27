@@ -190,6 +190,12 @@
 
         <Preference
             android:dependency="enableDnsHijack"
+            android:key="dnsHijackPrivateDnsSettings"
+            android:summary="@string/dns_hijack_private_dns_settings_summary_unknown"
+            android:title="@string/dns_hijack_private_dns_settings_title" />
+
+        <Preference
+            android:dependency="enableDnsHijack"
             android:key="dnsHijackRepairService"
             android:summary="@string/dns_hijack_repair_service_summary"
             android:title="@string/dns_hijack_repair_service_title" />

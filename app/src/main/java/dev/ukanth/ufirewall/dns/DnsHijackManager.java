@@ -634,6 +634,14 @@ public final class DnsHijackManager {
         return privateDnsModeCanBypass(readAndroidPrivateDnsMode(context));
     }
 
+    public static String androidPrivateDnsMode(Context context) {
+        return readAndroidPrivateDnsMode(context);
+    }
+
+    public static String androidPrivateDnsSpecifier(Context context) {
+        return readAndroidPrivateDnsSpecifier(context);
+    }
+
     public static String androidPrivateDnsWarning(Context context) {
         String mode = readAndroidPrivateDnsMode(context);
         if (!privateDnsModeCanBypass(mode)) {

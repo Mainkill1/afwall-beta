@@ -343,6 +343,13 @@
     <string name="dns_hijack_power_settings_summary_unknown">Android power state could not be read. Open settings to review battery restrictions.</string>
     <string name="dns_hijack_power_settings_opening">Opening Android power settings.</string>
     <string name="dns_hijack_power_settings_unavailable">Unable to open Android power settings.</string>
+    <string name="dns_hijack_private_dns_settings_title">Review Android Private DNS</string>
+    <string name="dns_hijack_private_dns_settings_summary_bypass">Private DNS is active and can bypass root DNS capture. Open Android network settings if full DNS capture is required.</string>
+    <string name="dns_hijack_private_dns_settings_summary_clear">Private DNS is not currently bypassing UDP/TCP port 53 DNS capture.</string>
+    <string name="dns_hijack_private_dns_settings_summary_unsupported">Private DNS controls are not available on this Android version.</string>
+    <string name="dns_hijack_private_dns_settings_summary_unknown">Android Private DNS state could not be read. Open network settings to review it.</string>
+    <string name="dns_hijack_private_dns_settings_opening">Opening Android Private DNS settings.</string>
+    <string name="dns_hijack_private_dns_settings_unavailable">Unable to open Android Private DNS settings.</string>
     <string name="dns_hijack_repair_service_title">Install or repair DNS service</string>
     <string name="dns_hijack_repair_service_summary">Reinstall daemon files, restart the watchdog, restore DNS redirects, and refresh root cleanup hooks.</string>
     <string name="dns_hijack_remove_service_title">Remove DNS service</string>

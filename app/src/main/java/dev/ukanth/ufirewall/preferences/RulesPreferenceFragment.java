@@ -40,6 +40,9 @@ public class RulesPreferenceFragment extends PreferenceFragment implements
         SharedPreferences.OnSharedPreferenceChangeListener {
 
     private static final int REQUEST_DNS_BLOCKLIST_FILE = 5301;
+    private static final String ACTION_PRIVATE_DNS_SETTINGS = "android.settings.PRIVATE_DNS_SETTINGS";
+    private static final String ACTION_INTERNET_CONNECTIVITY_PANEL =
+            "android.settings.panel.action.INTERNET_CONNECTIVITY";
     private Context ctx;
     private boolean suppressDnsLifecycle;
 
@@ -93,7 +96,16 @@ public class RulesPreferenceFragment extends PreferenceFragment implements
                 return true;
             });
         }
+
+        Preference privateDnsSettings = findPreference("dnsHijackPrivateDnsSettings");
+        if (privateDnsSettings != null) {
+            privateDnsSettings.setOnPreferenceClickListener(preference -> {
+                openDnsPrivateDnsSettings();
+                return true;
+            });
+        }
         updateDnsPowerSettingsSummary();
+        updateDnsPrivateDnsSettingsSummary();
     }
 
     private void wireDnsBlocklistActions() {
@@ -585,6 +597,7 @@ public class RulesPreferenceFragment extends PreferenceFragment implements
         getPreferenceManager().getSharedPreferences()
                 .registerOnSharedPreferenceChangeListener(this);
         updateDnsPowerSettingsSummary();
+        updateDnsPrivateDnsSettingsSummary();
 
     }
 
@@ -938,6 +951,47 @@ public class RulesPreferenceFragment extends PreferenceFragment implements
         Api.toast(ctx, getString(R.string.dns_hijack_power_settings_unavailable));
     }
 
+    private void openDnsPrivateDnsSettings() {
+        if (ctx == null) {
+            return;
+        }
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P) {
+            ApplicationErrorLog.add(ctx,
+                    "DNS Private DNS settings requested but Android Private DNS controls are unavailable");
+            Api.toast(ctx, getString(R.string.dns_hijack_private_dns_settings_summary_unsupported));
+            return;
+        }
+
+        String privateDnsState = dnsPrivateDnsStateForLog();
+        if (startDnsSettingsActivity(new Intent(ACTION_PRIVATE_DNS_SETTINGS))) {
+            ApplicationErrorLog.add(ctx, "DNS Private DNS settings opened; " + privateDnsState);
+            Api.toast(ctx, getString(R.string.dns_hijack_private_dns_settings_opening));
+            return;
+        }
+        if (startDnsSettingsActivity(new Intent(ACTION_INTERNET_CONNECTIVITY_PANEL))) {
+            ApplicationErrorLog.add(ctx, "DNS Internet connectivity panel opened; " + privateDnsState);
+            Api.toast(ctx, getString(R.string.dns_hijack_private_dns_settings_opening));
+            return;
+        }
+        if (startDnsSettingsActivity(new Intent(Settings.ACTION_WIRELESS_SETTINGS))) {
+            ApplicationErrorLog.add(ctx, "DNS wireless settings opened for Private DNS review; "
+                    + privateDnsState);
+            Api.toast(ctx, getString(R.string.dns_hijack_private_dns_settings_opening));
+            return;
+        }
+
+        ApplicationErrorLog.add(ctx, "DNS Private DNS settings unavailable; " + privateDnsState);
+        Api.toast(ctx, getString(R.string.dns_hijack_private_dns_settings_unavailable));
+    }
+
+    private boolean startDnsSettingsActivity(Intent intent) {
+        if (intent == null || ctx == null || intent.resolveActivity(ctx.getPackageManager()) == null) {
+            return false;
+        }
+        startActivity(intent);
+        return true;
+    }
+
     private void updateDnsPowerSettingsSummary() {
         Preference powerSettings = findPreference("dnsHijackPowerSettings");
         if (powerSettings == null) {
@@ -956,6 +1010,25 @@ public class RulesPreferenceFragment extends PreferenceFragment implements
         }
     }
 
+    private void updateDnsPrivateDnsSettingsSummary() {
+        Preference privateDnsSettings = findPreference("dnsHijackPrivateDnsSettings");
+        if (privateDnsSettings == null) {
+            return;
+        }
+        if (ctx == null || Build.VERSION.SDK_INT < Build.VERSION_CODES.P) {
+            privateDnsSettings.setSummary(R.string.dns_hijack_private_dns_settings_summary_unsupported);
+            return;
+        }
+        String mode = DnsHijackManager.androidPrivateDnsMode(ctx);
+        if ("unknown".equals(mode)) {
+            privateDnsSettings.setSummary(R.string.dns_hijack_private_dns_settings_summary_unknown);
+        } else if (DnsHijackManager.androidPrivateDnsMayBypass(ctx)) {
+            privateDnsSettings.setSummary(R.string.dns_hijack_private_dns_settings_summary_bypass);
+        } else {
+            privateDnsSettings.setSummary(R.string.dns_hijack_private_dns_settings_summary_clear);
+        }
+    }
+
     private String dnsPowerStateForLog() {
         if (ctx == null || Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
             return "unsupported";
@@ -965,6 +1038,18 @@ public class RulesPreferenceFragment extends PreferenceFragment implements
         } catch (RuntimeException e) {
             return "unknown";
         }
+    }
+
+    private String dnsPrivateDnsStateForLog() {
+        if (ctx == null || Build.VERSION.SDK_INT < Build.VERSION_CODES.P) {
+            return "private_dns_mode=unsupported";
+        }
+        String mode = DnsHijackManager.androidPrivateDnsMode(ctx);
+        String specifier = DnsHijackManager.androidPrivateDnsSpecifier(ctx);
+        boolean bypass = DnsHijackManager.androidPrivateDnsMayBypass(ctx);
+        return "private_dns_mode=" + mode
+                + " specifier=" + (specifier.isEmpty() ? "none" : specifier)
+                + " bypass=" + bypass;
     }
 
     private void setDnsHijackChecked(boolean enabled) {
