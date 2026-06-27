@@ -2260,7 +2260,7 @@ public final class DnsHijackManager {
     }
 
     private static boolean isValidControlToken(String token) {
-        if (token == null || token.length() < 32 || token.length() > 96) {
+        if (token == null || token.length() < 64 || token.length() > 96) {
             return false;
         }
         for (int i = 0; i < token.length(); i++) {
