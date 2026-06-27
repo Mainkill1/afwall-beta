@@ -69,6 +69,7 @@
 #define DNS_QTYPE_OPT 41
 #define DNS_QTYPE_AAAA 28
 #define DNS_CLASS_IN 1
+#define DNS_FLAG_AD 0x0020u
 #define DNSSEC_DO_FLAG 0x8000u
 #define DNSSEC_UDP_PAYLOAD_SIZE 4096
 #define SAFE_SEARCH_TTL 300
@@ -204,6 +205,7 @@ typedef struct {
     int persist_query_logs;
     int safe_search;
     int dnssec_request;
+    int dnssec_auth_required;
     char control_socket[256];
     char log_file[256];
     char cache_file[256];
@@ -291,6 +293,7 @@ typedef struct {
     uint64_t dnssec_opt_added;
     uint64_t dnssec_opt_updated;
     uint64_t dnssec_prepare_failures;
+    uint64_t dnssec_auth_failures;
     uint64_t upstream_requests;
     uint64_t upstream_successes;
     uint64_t upstream_failures;
@@ -2540,6 +2543,15 @@ static bool response_cacheable(const uint8_t *response, size_t response_len) {
     return rcode == 0 || rcode == 3;
 }
 
+static bool dns_response_authenticated(const uint8_t *response, size_t response_len) {
+    uint16_t flags;
+    if (response_len < 12) {
+        return false;
+    }
+    flags = read_u16(response + 2);
+    return (flags & DNS_FLAG_AD) != 0;
+}
+
 static void cache_store(const char *domain, uint16_t qtype, bool dnssec,
                         const uint8_t *response, size_t response_len) {
     uint32_t h;
@@ -2901,6 +2913,7 @@ static uint64_t compute_resolver_scope_hash(const config_t *cfg) {
         hash = hash_scope_upstream(hash, &cfg->upstreams[i]);
     }
     hash = hash_scope_u64(hash, (uint64_t) cfg->dnssec_request);
+    hash = hash_scope_u64(hash, (uint64_t) cfg->dnssec_auth_required);
     hash = hash_scope_u64(hash, (uint64_t) cfg->split_upstream_count);
     for (i = 0; i < cfg->split_upstream_count; i++) {
         hash = hash_scope_string(hash, cfg->split_upstreams[i].suffix);
@@ -3202,6 +3215,27 @@ static void record_upstream_attempt(upstream_t *upstream, ssize_t response_len,
     }
 }
 
+static void record_upstream_auth_failure(upstream_t *upstream, const uint8_t *response,
+                                         size_t response_len) {
+    uint64_t now;
+    uint64_t backoff;
+    if (upstream == NULL) {
+        return;
+    }
+    now = now_seconds();
+    upstream->last_used = now;
+    upstream->last_rcode = response_len > 0 ? response_rcode(response, response_len) : -1;
+    upstream->failures++;
+    if (upstream->consecutive_failures < UINT64_MAX) {
+        upstream->consecutive_failures++;
+    }
+    backoff = upstream_backoff_seconds(upstream->consecutive_failures);
+    if (backoff > 0) {
+        upstream->backoff_until = now + backoff;
+    }
+    g_stats.dnssec_auth_failures++;
+}
+
 static ssize_t attempt_udp_upstream(upstream_t *upstream, int timeout_ms,
                                     const uint8_t *query, size_t query_len,
                                     uint8_t *response, size_t response_len) {
@@ -3232,7 +3266,7 @@ static ssize_t attempt_tcp_upstream(upstream_t *upstream, int timeout_ms,
 
 static ssize_t forward_udp(config_t *cfg, const char *domain, const uint8_t *query,
                            size_t query_len, uint8_t *response, size_t response_len,
-                           const char **route) {
+                           const char **route, bool require_dnssec_auth) {
     int i;
     int pass;
     int count = 0;
@@ -3255,6 +3289,11 @@ static ssize_t forward_udp(config_t *cfg, const char *domain, const uint8_t *que
                 got = attempt_tcp_upstream(&upstreams[i], cfg->timeout_ms,
                         query, query_len, response, response_len);
                 if (got > 0) {
+                    if (require_dnssec_auth
+                            && !dns_response_authenticated(response, (size_t) got)) {
+                        record_upstream_auth_failure(&upstreams[i], response, (size_t) got);
+                        continue;
+                    }
                     if (route != NULL) {
                         *route = split_route ? "split_upstream_tcp" : "upstream_tcp";
                     }
@@ -3281,12 +3320,22 @@ static ssize_t forward_udp(config_t *cfg, const char *domain, const uint8_t *que
                     tcp_got = attempt_tcp_upstream(&upstreams[i], cfg->timeout_ms,
                             query, query_len, response, response_len);
                     if (tcp_got > 0) {
+                        if (require_dnssec_auth
+                                && !dns_response_authenticated(response, (size_t) tcp_got)) {
+                            record_upstream_auth_failure(&upstreams[i], response, (size_t) tcp_got);
+                            continue;
+                        }
                         g_stats.upstream_tcp_fallbacks++;
                         if (route != NULL) {
                             *route = split_route ? "split_upstream_tcp_fallback" : "upstream_tcp_fallback";
                         }
                         return tcp_got;
                     }
+                    continue;
+                }
+                if (require_dnssec_auth
+                        && !dns_response_authenticated(response, (size_t) got)) {
+                    record_upstream_auth_failure(&upstreams[i], response, (size_t) got);
                     continue;
                 }
                 if (udp_only && route != NULL) {
@@ -3350,7 +3399,8 @@ static ssize_t forward_udp_to_upstream(const upstream_t *upstream, int timeout_m
 }
 
 static ssize_t forward_udp_probe(const config_t *cfg, const uint8_t *query, size_t query_len,
-                                 uint8_t *response, size_t response_len, int *upstream_index) {
+                                 uint8_t *response, size_t response_len, int *upstream_index,
+                                 bool require_dnssec_auth) {
     int i;
     int pass;
     int timeout_ms = cfg->timeout_ms < 1000 ? cfg->timeout_ms : 1000;
@@ -3375,6 +3425,11 @@ static ssize_t forward_udp_probe(const config_t *cfg, const uint8_t *query, size
                     : forward_udp_to_upstream(&cfg->upstreams[i], timeout_ms,
                     query, query_len, response, response_len);
             if (got > 0) {
+                if (require_dnssec_auth
+                        && !dns_response_authenticated(response, (size_t) got)) {
+                    g_stats.dnssec_auth_failures++;
+                    continue;
+                }
                 if (upstream_index != NULL) {
                     *upstream_index = i;
                 }
@@ -3390,13 +3445,22 @@ static ssize_t forward_udp_probe(const config_t *cfg, const uint8_t *query, size
 
 static ssize_t forward_udp_probe_one(const upstream_t *upstream, int timeout_ms,
                                      const uint8_t *query, size_t query_len,
-                                     uint8_t *response, size_t response_len) {
+                                     uint8_t *response, size_t response_len,
+                                     bool require_dnssec_auth) {
+    ssize_t got;
     if (upstream->protocol == UPSTREAM_PROTO_TCP) {
-        return forward_tcp_to_upstream(upstream, timeout_ms, query, query_len,
+        got = forward_tcp_to_upstream(upstream, timeout_ms, query, query_len,
+                response, response_len);
+    } else {
+        got = forward_udp_to_upstream(upstream, timeout_ms, query, query_len,
                 response, response_len);
     }
-    return forward_udp_to_upstream(upstream, timeout_ms, query, query_len,
-            response, response_len);
+    if (got > 0 && require_dnssec_auth
+            && !dns_response_authenticated(response, (size_t) got)) {
+        g_stats.dnssec_auth_failures++;
+        return -1;
+    }
+    return got;
 }
 
 static bool dns_response_truncated(const uint8_t *response, size_t response_len) {
@@ -3454,7 +3518,7 @@ static ssize_t forward_tcp_to_upstream(const upstream_t *upstream, int timeout_m
 
 static ssize_t forward_tcp(config_t *cfg, const char *domain, const uint8_t *query,
                            size_t query_len, uint8_t *response, size_t response_len,
-                           const char **route) {
+                           const char **route, bool require_dnssec_auth) {
     int i;
     int pass;
     int count = 0;
@@ -3479,6 +3543,11 @@ static ssize_t forward_tcp(config_t *cfg, const char *domain, const uint8_t *que
                     : attempt_tcp_upstream(&upstreams[i], cfg->timeout_ms,
                     query, query_len, response, response_len);
             if (got > 0) {
+                if (require_dnssec_auth
+                        && !dns_response_authenticated(response, (size_t) got)) {
+                    record_upstream_auth_failure(&upstreams[i], response, (size_t) got);
+                    continue;
+                }
                 if (route != NULL) {
                     if (upstreams[i].protocol == UPSTREAM_PROTO_UDP) {
                         *route = split_route ? "split_upstream_udp" : "upstream_udp";
@@ -3755,6 +3824,8 @@ static bool load_config(const char *path, config_t *new_cfg) {
             new_cfg->safe_search = config_bool_value(value);
         } else if (strcmp(key, "dnssec_request") == 0) {
             new_cfg->dnssec_request = config_bool_value(value);
+        } else if (strcmp(key, "dnssec_auth_required") == 0) {
+            new_cfg->dnssec_auth_required = config_bool_value(value);
         } else if (strcmp(key, "safe_search_address") == 0) {
             parse_safe_search_address(new_cfg, value);
         } else if (strcmp(key, "upstream") == 0) {
@@ -4063,7 +4134,7 @@ static void write_validate_response(int client) {
             "rules_regex_allow=%d\nrules_regex_block=%d\n"
             "rules_temp_allow=%d\nrules_temp_block=%d\n"
             "cache_size=%d\nstale_cache_seconds=%d\npersist_cache=%d\n"
-            "dnssec_request=%d\n"
+            "dnssec_request=%d\ndnssec_auth_required=%d\n"
             "cache_file_configured=%d\nresolver_scope_hash=%llu\n",
             (unsigned long long) g_cfg.generation,
             (unsigned long long) candidate->generation,
@@ -4089,6 +4160,7 @@ static void write_validate_response(int client) {
             candidate->stale_cache_seconds,
             candidate->persist_cache,
             candidate->dnssec_request,
+            candidate->dnssec_auth_required,
             candidate->cache_file[0] != '\0' ? 1 : 0,
             (unsigned long long) candidate->resolver_scope_hash);
     free_config_dynamic(candidate);
@@ -4215,6 +4287,7 @@ static void handle_dns_query(config_t *cfg, const uint8_t *query, size_t query_l
     bool cache_negative = false;
     bool client_dnssec;
     bool upstream_dnssec;
+    bool require_dnssec_auth;
     uint8_t dnssec_query[MAX_PACKET];
     const uint8_t *forward_query = query;
     size_t forward_query_len = query_len;
@@ -4236,7 +4309,8 @@ static void handle_dns_query(config_t *cfg, const uint8_t *query, size_t query_l
         return;
     }
     client_dnssec = dns_query_requests_dnssec(query, query_len);
-    upstream_dnssec = client_dnssec || cfg->dnssec_request;
+    upstream_dnssec = client_dnssec || cfg->dnssec_request || cfg->dnssec_auth_required;
+    require_dnssec_auth = cfg->dnssec_auth_required != 0;
     if (client_dnssec) {
         g_stats.dnssec_client_queries++;
     }
@@ -4261,7 +4335,7 @@ static void handle_dns_query(config_t *cfg, const uint8_t *query, size_t query_l
                 "allow", "safe_search", "local", &start);
         return;
     }
-    if (cfg->dnssec_request && !client_dnssec) {
+    if ((cfg->dnssec_request || cfg->dnssec_auth_required) && !client_dnssec) {
         size_t prepared_len = 0;
         bool added_opt = false;
         bool updated_opt = false;
@@ -4282,24 +4356,30 @@ static void handle_dns_query(config_t *cfg, const uint8_t *query, size_t query_l
     }
     if (cache_lookup(domain, qtype, upstream_dnssec, query, response, response_len,
             &cache_negative)) {
-        g_stats.cache_hits++;
-        if (cache_negative) {
-            g_stats.cache_negative_hits++;
+        if (require_dnssec_auth && !dns_response_authenticated(response, *response_len)) {
+            g_stats.dnssec_auth_failures++;
         } else {
-            g_stats.cache_positive_hits++;
+            g_stats.cache_hits++;
+            if (cache_negative) {
+                g_stats.cache_negative_hits++;
+            } else {
+                g_stats.cache_positive_hits++;
+            }
+            g_stats.allowed++;
+            *action_out = cache_negative ? "cache_negative" : "cache";
+            finish_dns_query(domain, *action_out, transport, source, uid, qtype,
+                    "allow", *action_out, "cache", &start);
+            return;
         }
-        g_stats.allowed++;
-        *action_out = cache_negative ? "cache_negative" : "cache";
-        finish_dns_query(domain, *action_out, transport, source, uid, qtype,
-                "allow", *action_out, "cache", &start);
-        return;
     }
     g_stats.cache_misses++;
     g_stats.upstream_requests++;
     gettimeofday(&upstream_start, NULL);
     forwarded = tcp
-            ? forward_tcp(cfg, domain, forward_query, forward_query_len, response, MAX_PACKET, &route)
-            : forward_udp(cfg, domain, forward_query, forward_query_len, response, MAX_PACKET, &route);
+            ? forward_tcp(cfg, domain, forward_query, forward_query_len,
+            response, MAX_PACKET, &route, require_dnssec_auth)
+            : forward_udp(cfg, domain, forward_query, forward_query_len,
+            response, MAX_PACKET, &route, require_dnssec_auth);
     gettimeofday(&upstream_end, NULL);
     upstream_latency_ms = elapsed_ms(&upstream_start, &upstream_end);
     if (upstream_latency_ms > 0) {
@@ -4320,22 +4400,26 @@ static void handle_dns_query(config_t *cfg, const uint8_t *query, size_t query_l
     g_stats.upstream_failures++;
     if (cache_lookup_stale(domain, qtype, upstream_dnssec, query, response, response_len,
             &cache_negative, cfg->stale_cache_seconds)) {
-        g_stats.allowed++;
-        g_stats.cache_stale_hits++;
-        if (cache_negative) {
-            g_stats.cache_stale_negative_hits++;
+        if (require_dnssec_auth && !dns_response_authenticated(response, *response_len)) {
+            g_stats.dnssec_auth_failures++;
+        } else {
+            g_stats.allowed++;
+            g_stats.cache_stale_hits++;
+            if (cache_negative) {
+                g_stats.cache_stale_negative_hits++;
+            }
+            *action_out = cache_negative ? "cache_stale_negative" : "cache_stale";
+            finish_dns_query(domain, *action_out, transport, source, uid, qtype,
+                    "allow", *action_out, "stale_cache", &start);
+            return;
         }
-        *action_out = cache_negative ? "cache_stale_negative" : "cache_stale";
-        finish_dns_query(domain, *action_out, transport, source, uid, qtype,
-                "allow", *action_out, "stale_cache", &start);
-        return;
     }
     if (cfg->fail_open) {
         *response_len = 0;
         *action_out = "upstream_failed";
-        g_stats.fail_open_drops++;
         finish_dns_query(domain, *action_out, transport, source, uid, qtype,
                 "fail_open", "upstream_failed", route, &start);
+        g_stats.fail_open_drops++;
     } else {
         *response_len = build_block_response(query, query_len, response, MAX_PACKET);
         g_stats.blocked++;
@@ -4605,7 +4689,7 @@ static size_t build_probe_query(uint8_t *out, size_t out_len, bool *dnssec_prepa
     if (dnssec_prepared != NULL) {
         *dnssec_prepared = false;
     }
-    if (query_len == 0 || !g_cfg.dnssec_request) {
+    if (query_len == 0 || (!g_cfg.dnssec_request && !g_cfg.dnssec_auth_required)) {
         return query_len;
     }
     if (!prepare_dnssec_query(out, query_len, out, out_len, &query_len, NULL, NULL)) {
@@ -4724,7 +4808,8 @@ static void write_health_response(int client) {
     gettimeofday(&start, NULL);
     response_len = query_len == 0
             ? -1
-            : forward_udp_probe(&g_cfg, query, query_len, response, sizeof(response), &upstream_index);
+            : forward_udp_probe(&g_cfg, query, query_len, response, sizeof(response),
+                    &upstream_index, g_cfg.dnssec_auth_required != 0);
     gettimeofday(&end, NULL);
     latency_ms = elapsed_ms(&start, &end);
     rcode = response_len > 0 ? response_rcode(response, (size_t) response_len) : -1;
@@ -4738,7 +4823,7 @@ static void write_health_response(int client) {
             "resolver_scope_hash=%llu\n"
             "reloads=%llu\nreload_failures=%llu\nvalidations=%llu\nvalidation_failures=%llu\n"
             "upstream_probe_ms=%d\nupstream_probe_index=%d\nupstream_probe_rcode=%d\n"
-            "upstream_probe_dnssec=%d\n"
+            "upstream_probe_dnssec=%d\nupstream_probe_dnssec_auth_required=%d\n"
             "queries=%llu\nblocked=%llu\nallowed=%llu\ncache_size=%d\ncache_entries=%d\n"
             "socket_buffer_bytes=%d\nudp_drain_limit=%d\n"
             "udp_drain_batches=%llu\nudp_drain_packets=%llu\n"
@@ -4761,9 +4846,10 @@ static void write_health_response(int client) {
             "cpu_system_ms=%llu\ncpu_total_ms=%llu\n"
             "query_logging=%d\npersist_query_logs=%d\n"
             "safe_search=%d\nsafe_search_rewrites=%llu\n"
-            "dnssec_request=%d\ndnssec_queries=%llu\ndnssec_client_queries=%llu\n"
+            "dnssec_request=%d\ndnssec_auth_required=%d\n"
+            "dnssec_queries=%llu\ndnssec_client_queries=%llu\n"
             "dnssec_opt_added=%llu\ndnssec_opt_updated=%llu\n"
-            "dnssec_prepare_failures=%llu\n"
+            "dnssec_prepare_failures=%llu\ndnssec_auth_failures=%llu\n"
             "log_writer_thread=%d\nlog_ring_entries=%llu\nlog_unflushed_entries=%llu\n"
             "exact_allow_index_size=%d\nexact_block_index_size=%d\n"
             "app_exact_allow_index_size=%d\napp_exact_block_index_size=%d\n"
@@ -4795,6 +4881,7 @@ static void write_health_response(int client) {
             upstream_index,
             rcode,
             probe_dnssec ? 1 : 0,
+            g_cfg.dnssec_auth_required,
             (unsigned long long) g_stats.queries,
             (unsigned long long) g_stats.blocked,
             (unsigned long long) g_stats.allowed,
@@ -4844,11 +4931,13 @@ static void write_health_response(int client) {
             g_cfg.safe_search,
             (unsigned long long) g_stats.safe_search_rewrites,
             g_cfg.dnssec_request,
+            g_cfg.dnssec_auth_required,
             (unsigned long long) g_stats.dnssec_queries,
             (unsigned long long) g_stats.dnssec_client_queries,
             (unsigned long long) g_stats.dnssec_opt_added,
             (unsigned long long) g_stats.dnssec_opt_updated,
             (unsigned long long) g_stats.dnssec_prepare_failures,
+            (unsigned long long) g_stats.dnssec_auth_failures,
             g_log_thread_started ? 1 : 0,
             (unsigned long long) log_ring_entries,
             (unsigned long long) log_unflushed_entries,
@@ -4890,8 +4979,10 @@ static void write_benchmark_response(int client) {
     }
 
     write_control_response(client,
-            "benchmark=1\nupstreams=%d\ntimeout_ms=%d\ndnssec_request=%d\nprobe_dnssec=%d\n",
-            g_cfg.upstream_count, timeout_ms, g_cfg.dnssec_request, probe_dnssec ? 1 : 0);
+            "benchmark=1\nupstreams=%d\ntimeout_ms=%d\ndnssec_request=%d\n"
+            "dnssec_auth_required=%d\nprobe_dnssec=%d\n",
+            g_cfg.upstream_count, timeout_ms, g_cfg.dnssec_request,
+            g_cfg.dnssec_auth_required, probe_dnssec ? 1 : 0);
     if (query_len == 0) {
         write_control_response(client, "error=unable_to_build_query\n");
         return;
@@ -4907,7 +4998,7 @@ static void write_benchmark_response(int client) {
 
         gettimeofday(&start, NULL);
         response_len = forward_udp_probe_one(&g_cfg.upstreams[i], timeout_ms, query, query_len,
-                response, sizeof(response));
+                response, sizeof(response), g_cfg.dnssec_auth_required != 0);
         gettimeofday(&end, NULL);
         latency_ms = elapsed_ms(&start, &end);
         rcode = response_len > 0 ? response_rcode(response, (size_t) response_len) : -1;
@@ -5012,9 +5103,10 @@ static void handle_control(int fd) {
                 "cpu_system_ms=%llu\ncpu_total_ms=%llu\n"
                 "query_logging=%d\npersist_query_logs=%d\n"
                 "safe_search=%d\nsafe_search_rewrites=%llu\n"
-                "dnssec_request=%d\ndnssec_queries=%llu\ndnssec_client_queries=%llu\n"
+                "dnssec_request=%d\ndnssec_auth_required=%d\n"
+                "dnssec_queries=%llu\ndnssec_client_queries=%llu\n"
                 "dnssec_opt_added=%llu\ndnssec_opt_updated=%llu\n"
-                "dnssec_prepare_failures=%llu\n"
+                "dnssec_prepare_failures=%llu\ndnssec_auth_failures=%llu\n"
                 "log_writer_thread=%d\nlog_ring_entries=%llu\nlog_unflushed_entries=%llu\n"
                 "socket_buffer_bytes=%d\nudp_drain_limit=%d\n"
                 "cache_size=%d\ncache_entries=%d\ncache_hits=%llu\ncache_misses=%llu\n"
@@ -5079,11 +5171,13 @@ static void handle_control(int fd) {
                 g_cfg.safe_search,
                 (unsigned long long) g_stats.safe_search_rewrites,
                 g_cfg.dnssec_request,
+                g_cfg.dnssec_auth_required,
                 (unsigned long long) g_stats.dnssec_queries,
                 (unsigned long long) g_stats.dnssec_client_queries,
                 (unsigned long long) g_stats.dnssec_opt_added,
                 (unsigned long long) g_stats.dnssec_opt_updated,
                 (unsigned long long) g_stats.dnssec_prepare_failures,
+                (unsigned long long) g_stats.dnssec_auth_failures,
                 g_log_thread_started ? 1 : 0,
                 (unsigned long long) log_ring_entries,
                 (unsigned long long) log_unflushed_entries,

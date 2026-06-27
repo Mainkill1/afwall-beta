@@ -320,6 +320,7 @@ public final class DnsHijackManager {
         out.append("strict_mode=").append(G.dnsHijackStrictMode()).append('\n');
         out.append("safe_search=").append(G.dnsHijackSafeSearch()).append('\n');
         out.append("dnssec_request=").append(G.dnsHijackDnssecRequest()).append('\n');
+        out.append("dnssec_auth_required=").append(G.dnsHijackDnssecAuthRequired()).append('\n');
         out.append("timeout_ms=").append(G.dnsHijackTimeoutMs()).append('\n');
         out.append("cache_size=").append(G.dnsHijackCacheSize()).append('\n');
         out.append("stale_cache_seconds=").append(G.dnsHijackStaleCacheSeconds()).append('\n');
@@ -764,7 +765,9 @@ public final class DnsHijackManager {
         out.append("upstreams=").append(targets.size()).append('\n');
         out.append("timeout_ms=").append(timeoutMs).append('\n');
         out.append("dnssec_request=").append(G.dnsHijackDnssecRequest() ? 1 : 0).append('\n');
-        out.append("probe_dnssec=").append(G.dnsHijackDnssecRequest() ? 1 : 0).append('\n');
+        out.append("dnssec_auth_required=")
+                .append(G.dnsHijackDnssecAuthRequired() ? 1 : 0).append('\n');
+        out.append("probe_dnssec=").append(dnssecProbeRequired() ? 1 : 0).append('\n');
         if (targets.isEmpty()) {
             out.append("error=no_upstreams_configured\n");
             return out.toString();
@@ -800,10 +803,13 @@ public final class DnsHijackManager {
             InetAddress address = InetAddress.getByName(target.host);
             DatagramPacket request = new DatagramPacket(query, query.length, address, target.port);
             socket.send(request);
-            byte[] response = new byte[G.dnsHijackDnssecRequest() ? 4096 : 512];
+            byte[] response = new byte[dnssecProbeRequired() ? 4096 : 512];
             DatagramPacket reply = new DatagramPacket(response, response.length);
             socket.receive(reply);
             int bytes = reply.getLength();
+            if (G.dnsHijackDnssecAuthRequired() && !responseAuthenticated(response, bytes)) {
+                return new ProbeResult("unauthenticated", bytes, bytes >= 4 ? response[3] & 0x0f : -1);
+            }
             return new ProbeResult("ok", bytes, bytes >= 4 ? response[3] & 0x0f : -1);
         } catch (SocketTimeoutException e) {
             return new ProbeResult("timeout", -1, -1);
@@ -833,6 +839,10 @@ public final class DnsHijackManager {
             }
             byte[] response = new byte[expected];
             int read = readFully(input, response, expected);
+            if (read == expected && G.dnsHijackDnssecAuthRequired()
+                    && !responseAuthenticated(response, read)) {
+                return new ProbeResult("unauthenticated", read, read >= 4 ? response[3] & 0x0f : -1);
+            }
             return new ProbeResult(read == expected ? "ok" : "error",
                     read, read >= 4 ? response[3] & 0x0f : -1);
         } catch (SocketTimeoutException e) {
@@ -867,7 +877,7 @@ public final class DnsHijackManager {
         int id = (int) (System.currentTimeMillis() & 0xffff);
         query[0] = (byte) ((id >> 8) & 0xff);
         query[1] = (byte) (id & 0xff);
-        if (!G.dnsHijackDnssecRequest()) {
+        if (!dnssecProbeRequired()) {
             return query;
         }
         byte[] dnssecQuery = new byte[query.length + 11];
@@ -887,6 +897,14 @@ public final class DnsHijackManager {
         dnssecQuery[pos++] = 0x00;
         dnssecQuery[pos] = 0x00;
         return dnssecQuery;
+    }
+
+    private static boolean dnssecProbeRequired() {
+        return G.dnsHijackDnssecRequest() || G.dnsHijackDnssecAuthRequired();
+    }
+
+    private static boolean responseAuthenticated(byte[] response, int length) {
+        return response != null && length >= 4 && (response[3] & 0x20) != 0;
     }
 
     private static List<UpstreamTarget> parseUpstreamTargets(String raw) {
@@ -1833,6 +1851,8 @@ public final class DnsHijackManager {
         config.append("query_logging=").append(G.dnsHijackQueryLogging() ? "1" : "0").append('\n');
         config.append("persist_query_logs=").append(G.dnsHijackPersistQueryLogs() ? "1" : "0").append('\n');
         config.append("dnssec_request=").append(G.dnsHijackDnssecRequest() ? "1" : "0").append('\n');
+        config.append("dnssec_auth_required=")
+                .append(G.dnsHijackDnssecAuthRequired() ? "1" : "0").append('\n');
         appendSafeSearchConfigEntries(context, config);
 
         appendResolvedUpstreamConfigEntries(context, config, "upstream", G.dnsHijackUpstreams());
