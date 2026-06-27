@@ -38,6 +38,7 @@ public class RulesPreferenceFragment extends PreferenceFragment implements
 
     private static final int REQUEST_DNS_BLOCKLIST_FILE = 5301;
     private Context ctx;
+    private boolean suppressDnsLifecycle;
 
 
     @Override
@@ -621,11 +622,91 @@ public class RulesPreferenceFragment extends PreferenceFragment implements
             if (isDnsHijackBlocklistSchedulePreference(key)) {
                 DnsBlocklistUpdateReceiver.scheduleOrCancel(ctx);
             }
+            if (suppressDnsLifecycle) {
+                return;
+            }
+            if (key.equals("enableDnsHijack")) {
+                handleDnsHijackEnableChanged();
+                return;
+            }
+            if (key.equals("dnsHijackBootPersistence")) {
+                handleDnsBootPersistenceChanged();
+                return;
+            }
             if (shouldReloadDnsHijackPreference(key) && G.enableDnsHijack()) {
                 DnsHijackManager.requestReload(ctx);
             }
         }
 
+    }
+
+    private void handleDnsHijackEnableChanged() {
+        if (ctx == null) {
+            return;
+        }
+        final boolean enabled = G.enableDnsHijack();
+        DnsHijackManager.applyDnsProtectionPreference(ctx, enabled, new RootCommand.Callback() {
+            @Override
+            public void cbFunc(RootCommand state) {
+                new Handler(Looper.getMainLooper()).post(() -> {
+                    if (state.exitCode == 0) {
+                        if (!enabled) {
+                            setDnsBootPersistenceChecked(false);
+                        }
+                        Api.toast(ctx, ctx.getString(enabled
+                                ? R.string.dns_hijack_enable_complete
+                                : R.string.dns_hijack_disable_complete));
+                    } else {
+                        setDnsHijackChecked(!enabled);
+                        Api.toast(ctx, ctx.getString(enabled
+                                ? R.string.dns_hijack_enable_failed
+                                : R.string.dns_hijack_disable_failed));
+                    }
+                });
+            }
+        });
+    }
+
+    private void handleDnsBootPersistenceChanged() {
+        if (ctx == null) {
+            return;
+        }
+        final boolean enabled = G.dnsHijackBootPersistence();
+        DnsHijackManager.updateBootPersistence(ctx, new RootCommand.Callback() {
+            @Override
+            public void cbFunc(RootCommand state) {
+                new Handler(Looper.getMainLooper()).post(() -> {
+                    if (state.exitCode == 0) {
+                        Api.toast(ctx, ctx.getString(enabled
+                                ? R.string.dns_hijack_boot_persistence_installed
+                                : R.string.dns_hijack_boot_persistence_removed));
+                    } else {
+                        setDnsBootPersistenceChecked(!enabled);
+                        Api.toast(ctx, ctx.getString(R.string.dns_hijack_boot_persistence_failed));
+                    }
+                });
+            }
+        });
+    }
+
+    private void setDnsHijackChecked(boolean enabled) {
+        suppressDnsLifecycle = true;
+        G.enableDnsHijack(enabled);
+        CheckBoxPreference enableDnsHijack = (CheckBoxPreference) findPreference("enableDnsHijack");
+        if (enableDnsHijack != null) {
+            enableDnsHijack.setChecked(enabled);
+        }
+        suppressDnsLifecycle = false;
+    }
+
+    private void setDnsBootPersistenceChecked(boolean enabled) {
+        suppressDnsLifecycle = true;
+        G.dnsHijackBootPersistence(enabled);
+        CheckBoxPreference dnsBootPersistence = (CheckBoxPreference) findPreference("dnsHijackBootPersistence");
+        if (dnsBootPersistence != null) {
+            dnsBootPersistence.setChecked(enabled);
+        }
+        suppressDnsLifecycle = false;
     }
 
     private boolean isDnsHijackPreference(String key) {

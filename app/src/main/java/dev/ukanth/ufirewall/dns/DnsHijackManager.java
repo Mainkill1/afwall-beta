@@ -112,6 +112,64 @@ public final class DnsHijackManager {
         }
     }
 
+    public static void applyDnsProtectionPreference(Context context, boolean enabled,
+                                                    RootCommand.Callback callback) {
+        if (context == null) {
+            return;
+        }
+        if (enabled) {
+            if (!prepareDaemon(context)) {
+                failSupervisorAction(context, callback,
+                        "DNS protection enable requested but daemon files could not be prepared");
+                return;
+            }
+            runLifecycleCommands(context,
+                    buildRootRepairCommands(context),
+                    "DNS protection enable queued: daemon start, redirect reinstall, boot persistence sync",
+                    "DNS protection enable completed",
+                    "DNS protection enable failed",
+                    callback);
+            return;
+        }
+
+        runLifecycleCommands(context,
+                buildRootRemovalCommands(context),
+                "DNS protection disable queued: redirect teardown, daemon stop, boot persistence removal",
+                "DNS protection disable completed",
+                "DNS protection disable failed",
+                callback);
+    }
+
+    public static void updateBootPersistence(Context context, RootCommand.Callback callback) {
+        if (context == null) {
+            return;
+        }
+        List<String> commands = new ArrayList<>();
+        if (G.dnsHijackBootPersistence() && G.enableDnsHijack()) {
+            if (!prepareDaemon(context)) {
+                failSupervisorAction(context, callback,
+                        "DNS boot persistence enable requested but daemon files could not be prepared");
+                return;
+            }
+            commands.add(buildInstallBootPersistenceCommand(new File(workDir(context), BOOT_SCRIPT)));
+            runLifecycleCommands(context,
+                    commands,
+                    "DNS boot persistence install queued",
+                    "DNS boot persistence install completed",
+                    "DNS boot persistence install failed",
+                    callback);
+            return;
+        }
+
+        commands.add(buildRemoveBootPersistenceCommand());
+        runLifecycleCommands(context,
+                commands,
+                "DNS boot persistence removal queued",
+                "DNS boot persistence removal completed",
+                "DNS boot persistence removal failed",
+                callback);
+    }
+
     public static void requestReload(Context context) {
         runSupervisorAction(context, "reload", null);
     }
@@ -173,13 +231,9 @@ public final class DnsHijackManager {
             return;
         }
         boolean previousEnabled = G.enableDnsHijack();
-        List<String> commands = new ArrayList<>();
         G.enableDnsHijack(false);
         Api.setRulesUpToDate(false);
-        appendPurgeCommands(context, commands, false);
-        if (G.enableIPv6()) {
-            appendPurgeCommands(context, commands, true);
-        }
+        List<String> commands = buildRootRemovalCommands(context);
         ApplicationErrorLog.add(context, "DNS protection pause queued: redirect teardown and daemon stop");
         new RootCommand()
                 .setLogging(true)
@@ -500,6 +554,51 @@ public final class DnsHijackManager {
         state.exitCode = 1;
         state.res = new StringBuilder(message).append('\n');
         callback.cbFunc(state);
+    }
+
+    private static void runLifecycleCommands(Context context, List<String> commands,
+                                             String queuedMessage, String successMessage,
+                                             String failureMessage, RootCommand.Callback callback) {
+        ApplicationErrorLog.add(context, queuedMessage);
+        new RootCommand()
+                .setLogging(true)
+                .setReopenShell(true)
+                .setFailureToast(R.string.error_apply)
+                .setCallback(new RootCommand.Callback() {
+                    @Override
+                    public void cbFunc(RootCommand state) {
+                        if (state.exitCode == 0) {
+                            ApplicationErrorLog.add(context, successMessage);
+                        } else {
+                            ApplicationErrorLog.add(context,
+                                    failureMessage + rootFailureSuffix(state));
+                        }
+                        if (callback != null) {
+                            callback.cbFunc(state);
+                        }
+                    }
+                })
+                .run(context.getApplicationContext(), commands);
+    }
+
+    private static String rootFailureSuffix(RootCommand state) {
+        if (state == null) {
+            return "";
+        }
+        StringBuilder detail = new StringBuilder();
+        if (state.lastCommand != null && !state.lastCommand.trim().isEmpty()) {
+            detail.append(": command=").append(state.lastCommand.trim());
+        }
+        String output = state.lastCommandResult == null
+                ? ""
+                : state.lastCommandResult.toString().trim().replace('\n', ' ');
+        if (!output.isEmpty()) {
+            if (output.length() > 240) {
+                output = output.substring(0, 240);
+            }
+            detail.append(" output=").append(output);
+        }
+        return detail.toString();
     }
 
     private static String queryControl(Context context, String command) {
@@ -1513,6 +1612,51 @@ public final class DnsHijackManager {
         return commands;
     }
 
+    private static List<String> buildRootRemovalCommands(Context context) {
+        List<String> commands = new ArrayList<>();
+        // These commands are executed directly through RootCommand, not through Api.iptablesCommands.
+        // Keep them fully-qualified so preference toggles and dashboard pause actually remove root state.
+        appendDirectPurgeRules(context, commands, false);
+        appendDirectPurgeRules(context, commands, true);
+        commands.add(buildNftPurgeCommand());
+        appendDirectStopCommand(context, commands);
+        commands.add(buildRemoveBootPersistenceCommand());
+        return commands;
+    }
+
+    private static void appendDirectPurgeRules(Context context, List<String> commands, boolean ipv6) {
+        String iptables = shellQuote(Api.getBinaryPath(context, ipv6));
+        String chain = ipv6 ? CHAIN_V6 : CHAIN_V4;
+        String preChain = ipv6 ? CHAIN_V6_PRE : CHAIN_V4_PRE;
+
+        appendDirectIptables(commands, iptables,
+                "-t nat -D OUTPUT -p udp --dport 53 -j " + chain);
+        appendDirectIptables(commands, iptables,
+                "-t nat -D OUTPUT -p tcp --dport 53 -j " + chain);
+        appendDirectIptables(commands, iptables,
+                "-t nat -D PREROUTING -p udp --dport 53 -j " + preChain);
+        appendDirectIptables(commands, iptables,
+                "-t nat -D PREROUTING -p tcp --dport 53 -j " + preChain);
+        appendDirectIptables(commands, iptables, "-t nat -F " + chain);
+        appendDirectIptables(commands, iptables, "-t nat -F " + preChain);
+        appendDirectIptables(commands, iptables, "-t nat -X " + chain);
+        appendDirectIptables(commands, iptables, "-t nat -X " + preChain);
+    }
+
+    private static void appendDirectIptables(List<String> commands, String iptables, String args) {
+        commands.add(iptables + " " + args + " >/dev/null 2>&1 || true");
+    }
+
+    private static void appendDirectStopCommand(Context context, List<String> commands) {
+        if (context == null) {
+            return;
+        }
+        File supervisor = new File(workDir(context), SUPERVISOR);
+        if (supervisor.exists()) {
+            commands.add(shellQuote(supervisor.getAbsolutePath()) + " stop || true");
+        }
+    }
+
     private static void appendRootRedirectRepairCommands(Context context, List<String> commands, boolean ipv6) {
         String iptables = shellQuote(Api.getBinaryPath(context, ipv6));
         int port = G.dnsHijackPort(DEFAULT_PORT);
@@ -1617,7 +1761,7 @@ public final class DnsHijackManager {
 
             writeText(new File(dir, CONF), buildConfig(context));
             File supervisor = new File(dir, SUPERVISOR);
-            writeText(supervisor, buildSupervisorScript(dir, daemon));
+            writeText(supervisor, buildSupervisorScript(context, dir, daemon));
             if (!supervisor.setExecutable(true, false)) {
                 Log.w(TAG, "Unable to mark supervisor executable from app context; root start will chmod it");
             }
@@ -2033,6 +2177,7 @@ public final class DnsHijackManager {
 
         return "#!/system/bin/sh\n"
                 + "PATH=/system/bin:/system/xbin:/vendor/bin:/sbin:/su/bin:/data/adb/magisk:$PATH\n"
+                + "DIR=" + shellQuote(dir.getAbsolutePath()) + "\n"
                 + "SUPERVISOR=" + shellQuote(supervisor) + "\n"
                 + "IPTABLES=" + shellQuote(iptables) + "\n"
                 + "IP6TABLES=" + shellQuote(ip6tables) + "\n"
@@ -2050,6 +2195,38 @@ public final class DnsHijackManager {
                 + "}\n"
                 + "ip6t() {\n"
                 + "  if [ -x \"$IP6TABLES\" ]; then \"$IP6TABLES\" \"$@\"; elif command -v ip6tables >/dev/null 2>&1; then ip6tables \"$@\"; else return 0; fi\n"
+                + "}\n"
+                + "cleanup_redirects() {\n"
+                + "  log_msg 'DNS boot cleanup removing stale redirect rules'\n"
+                + "  ipt -t nat -D OUTPUT -p udp --dport 53 -j \"$CHAIN4\" >/dev/null 2>&1 || true\n"
+                + "  ipt -t nat -D OUTPUT -p tcp --dport 53 -j \"$CHAIN4\" >/dev/null 2>&1 || true\n"
+                + "  ipt -t nat -D PREROUTING -p udp --dport 53 -j \"$PRE4\" >/dev/null 2>&1 || true\n"
+                + "  ipt -t nat -D PREROUTING -p tcp --dport 53 -j \"$PRE4\" >/dev/null 2>&1 || true\n"
+                + "  ipt -t nat -F \"$CHAIN4\" >/dev/null 2>&1 || true\n"
+                + "  ipt -t nat -F \"$PRE4\" >/dev/null 2>&1 || true\n"
+                + "  ipt -t nat -X \"$CHAIN4\" >/dev/null 2>&1 || true\n"
+                + "  ipt -t nat -X \"$PRE4\" >/dev/null 2>&1 || true\n"
+                + "  ip6t -t nat -D OUTPUT -p udp --dport 53 -j \"$CHAIN6\" >/dev/null 2>&1 || true\n"
+                + "  ip6t -t nat -D OUTPUT -p tcp --dport 53 -j \"$CHAIN6\" >/dev/null 2>&1 || true\n"
+                + "  ip6t -t nat -D PREROUTING -p udp --dport 53 -j \"$PRE6\" >/dev/null 2>&1 || true\n"
+                + "  ip6t -t nat -D PREROUTING -p tcp --dport 53 -j \"$PRE6\" >/dev/null 2>&1 || true\n"
+                + "  ip6t -t nat -F \"$CHAIN6\" >/dev/null 2>&1 || true\n"
+                + "  ip6t -t nat -F \"$PRE6\" >/dev/null 2>&1 || true\n"
+                + "  ip6t -t nat -X \"$CHAIN6\" >/dev/null 2>&1 || true\n"
+                + "  ip6t -t nat -X \"$PRE6\" >/dev/null 2>&1 || true\n"
+                + "  if command -v nft >/dev/null 2>&1; then nft delete table ip " + NFT_TABLE_V4 + " >/dev/null 2>&1 || true; nft delete table ip6 " + NFT_TABLE_V6 + " >/dev/null 2>&1 || true; fi\n"
+                + "}\n"
+                + "remove_boot_copy() {\n"
+                + "  for FILE in /data/adb/service.d/" + BOOT_SCRIPT
+                + " /su/su.d/" + BOOT_SCRIPT
+                + " /system/su.d/" + BOOT_SCRIPT
+                + " /system/etc/init.d/" + BOOT_SCRIPT
+                + "; do [ -e \"$FILE\" ] && rm -f \"$FILE\" 2>/dev/null || true; done\n"
+                + "}\n"
+                + "cleanup_stale_install() {\n"
+                + "  log_msg 'DNS boot script found missing app-owned service files; self-cleaning'\n"
+                + "  cleanup_redirects\n"
+                + "  remove_boot_copy\n"
                 + "}\n"
                 + "restore_v4() {\n"
                 + "  ipt -t nat -D OUTPUT -p udp --dport 53 -j \"$CHAIN4\" >/dev/null 2>&1\n"
@@ -2093,14 +2270,14 @@ public final class DnsHijackManager {
                 + "}\n"
                 + "log_msg 'DNS boot restore starting'\n"
                 + "sleep 15\n"
-                + "if [ ! -x \"$SUPERVISOR\" ]; then log_msg 'supervisor missing or not executable'; exit 0; fi\n"
+                + "if [ ! -d \"$DIR\" ] || [ ! -x \"$SUPERVISOR\" ]; then cleanup_stale_install; exit 0; fi\n"
                 + "\"$SUPERVISOR\" start >> \"$LOG\" 2>&1\n"
                 + "restore_v4\n"
                 + "restore_v6\n"
                 + "log_msg 'DNS boot restore complete'\n";
     }
 
-    private static String buildSupervisorScript(File dir, File daemon) {
+    private static String buildSupervisorScript(Context context, File dir, File daemon) {
         String marker = new File(dir, ENABLED_MARKER).getAbsolutePath();
         String config = new File(dir, CONF).getAbsolutePath();
         String pid = new File(dir, PID).getAbsolutePath();
@@ -2110,6 +2287,8 @@ public final class DnsHijackManager {
         String supervisorPid = new File(dir, SUPERVISOR_PID).getAbsolutePath();
         String restartCount = new File(dir, RESTART_COUNT).getAbsolutePath();
         String lastExit = new File(dir, LAST_EXIT).getAbsolutePath();
+        String iptables = Api.getBinaryPath(context, false);
+        String ip6tables = Api.getBinaryPath(context, true);
 
         return "#!/system/bin/sh\n"
                 + "DIR=" + shellQuote(dir.getAbsolutePath()) + "\n"
@@ -2123,8 +2302,40 @@ public final class DnsHijackManager {
                 + "LOG=" + shellQuote(log) + "\n"
                 + "RESTARTS=" + shellQuote(restartCount) + "\n"
                 + "LAST_EXIT=" + shellQuote(lastExit) + "\n"
+                + "IPTABLES=" + shellQuote(iptables) + "\n"
+                + "IP6TABLES=" + shellQuote(ip6tables) + "\n"
+                + "CHAIN4=" + CHAIN_V4 + "\n"
+                + "PRE4=" + CHAIN_V4_PRE + "\n"
+                + "CHAIN6=" + CHAIN_V6 + "\n"
+                + "PRE6=" + CHAIN_V6_PRE + "\n"
                 + "log_msg() {\n"
                 + "  echo \"$(date +%s) $*\" >> \"$LOG\" 2>/dev/null\n"
+                + "}\n"
+                + "ipt() {\n"
+                + "  if [ -x \"$IPTABLES\" ]; then \"$IPTABLES\" \"$@\"; elif command -v iptables >/dev/null 2>&1; then iptables \"$@\"; else return 0; fi\n"
+                + "}\n"
+                + "ip6t() {\n"
+                + "  if [ -x \"$IP6TABLES\" ]; then \"$IP6TABLES\" \"$@\"; elif command -v ip6tables >/dev/null 2>&1; then ip6tables \"$@\"; else return 0; fi\n"
+                + "}\n"
+                + "cleanup_redirects() {\n"
+                + "  log_msg 'removing DNS redirect rules'\n"
+                + "  ipt -t nat -D OUTPUT -p udp --dport 53 -j \"$CHAIN4\" >/dev/null 2>&1 || true\n"
+                + "  ipt -t nat -D OUTPUT -p tcp --dport 53 -j \"$CHAIN4\" >/dev/null 2>&1 || true\n"
+                + "  ipt -t nat -D PREROUTING -p udp --dport 53 -j \"$PRE4\" >/dev/null 2>&1 || true\n"
+                + "  ipt -t nat -D PREROUTING -p tcp --dport 53 -j \"$PRE4\" >/dev/null 2>&1 || true\n"
+                + "  ipt -t nat -F \"$CHAIN4\" >/dev/null 2>&1 || true\n"
+                + "  ipt -t nat -F \"$PRE4\" >/dev/null 2>&1 || true\n"
+                + "  ipt -t nat -X \"$CHAIN4\" >/dev/null 2>&1 || true\n"
+                + "  ipt -t nat -X \"$PRE4\" >/dev/null 2>&1 || true\n"
+                + "  ip6t -t nat -D OUTPUT -p udp --dport 53 -j \"$CHAIN6\" >/dev/null 2>&1 || true\n"
+                + "  ip6t -t nat -D OUTPUT -p tcp --dport 53 -j \"$CHAIN6\" >/dev/null 2>&1 || true\n"
+                + "  ip6t -t nat -D PREROUTING -p udp --dport 53 -j \"$PRE6\" >/dev/null 2>&1 || true\n"
+                + "  ip6t -t nat -D PREROUTING -p tcp --dport 53 -j \"$PRE6\" >/dev/null 2>&1 || true\n"
+                + "  ip6t -t nat -F \"$CHAIN6\" >/dev/null 2>&1 || true\n"
+                + "  ip6t -t nat -F \"$PRE6\" >/dev/null 2>&1 || true\n"
+                + "  ip6t -t nat -X \"$CHAIN6\" >/dev/null 2>&1 || true\n"
+                + "  ip6t -t nat -X \"$PRE6\" >/dev/null 2>&1 || true\n"
+                + "  if command -v nft >/dev/null 2>&1; then nft delete table ip " + NFT_TABLE_V4 + " >/dev/null 2>&1 || true; nft delete table ip6 " + NFT_TABLE_V6 + " >/dev/null 2>&1 || true; fi\n"
                 + "}\n"
                 + "is_running() {\n"
                 + "  [ -f \"$PID\" ] && kill -0 \"$(cat \"$PID\")\" 2>/dev/null\n"
@@ -2212,6 +2423,7 @@ public final class DnsHijackManager {
                 + "      sleep 2\n"
                 + "    fi\n"
                 + "  done\n"
+                + "  cleanup_redirects\n"
                 + "  log_msg 'watchdog stopped'\n"
                 + "  rm -f \"$SUP_PID\"\n"
                 + "}\n"
@@ -2242,7 +2454,7 @@ public final class DnsHijackManager {
                 + "}\n"
                 + "case \"$1\" in\n"
                 + "  start) start_daemon ;;\n"
-                + "  stop) stop_daemon; exit 0 ;;\n"
+                + "  stop) stop_daemon; cleanup_redirects; exit 0 ;;\n"
                 + "  restart) stop_daemon; start_daemon ;;\n"
                 + "  reload) if daemon_ready; then kill -HUP \"$(cat \"$PID\")\" 2>/dev/null; else start_daemon; fi ;;\n"
                 + "  status) \n"

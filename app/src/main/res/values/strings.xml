@@ -330,6 +330,13 @@
     <string name="dns_hijack_dnssec_request_summary">Ask upstream resolvers for DNSSEC material with EDNS(0). This forwards DNSSEC data but does not perform local validation.</string>
     <string name="dns_hijack_boot_persistence_title">Restore DNS filtering at boot</string>
     <string name="dns_hijack_boot_persistence_summary">Install a root boot script that restarts the DNS daemon and restores DNS redirect rules before opening the app.</string>
+    <string name="dns_hijack_enable_complete">DNS protection installed and enabled.</string>
+    <string name="dns_hijack_disable_complete">DNS protection removed and disabled.</string>
+    <string name="dns_hijack_enable_failed">Unable to enable DNS protection. Check root access and diagnostics.</string>
+    <string name="dns_hijack_disable_failed">Unable to remove DNS protection. Check root access and diagnostics.</string>
+    <string name="dns_hijack_boot_persistence_installed">DNS boot restore installed.</string>
+    <string name="dns_hijack_boot_persistence_removed">DNS boot restore removed.</string>
+    <string name="dns_hijack_boot_persistence_failed">Unable to update DNS boot restore.</string>
     <string name="dns_hijack_timeout_title">Upstream timeout</string>
     <string name="dns_hijack_timeout_summary">DNS upstream timeout in milliseconds.</string>
     <string name="dns_hijack_cache_size_title">DNS cache size</string>
