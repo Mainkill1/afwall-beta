@@ -50,6 +50,9 @@
 #define DEFAULT_PORT 5354
 #define DEFAULT_TIMEOUT_MS 2500
 #define CLIENT_TIMEOUT_MS 5000
+#define UPSTREAM_BACKOFF_FAILURE_THRESHOLD 2
+#define UPSTREAM_BACKOFF_MIN_SECONDS 2
+#define UPSTREAM_BACKOFF_MAX_SECONDS 60
 #define DEFAULT_POSITIVE_TTL 60
 #define DEFAULT_NEGATIVE_TTL 30
 #define MAX_CACHE_TTL 86400
@@ -145,6 +148,8 @@ typedef struct {
     uint64_t total_latency_ms;
     uint64_t max_latency_ms;
     uint64_t last_used;
+    uint64_t consecutive_failures;
+    uint64_t backoff_until;
     int last_latency_ms;
     int last_rcode;
 } upstream_t;
@@ -293,6 +298,7 @@ typedef struct {
     uint64_t upstream_truncated_responses;
     uint64_t upstream_udp_socket_reuses;
     uint64_t upstream_udp_stale_replies;
+    uint64_t upstream_backoff_skips;
     uint64_t total_latency_ms;
     uint64_t upstream_latency_ms;
     uint64_t max_latency_ms;
@@ -3092,6 +3098,67 @@ static int reusable_udp_upstream_socket_count(const config_t *cfg) {
     return count;
 }
 
+static int upstream_backoff_active_count(const config_t *cfg) {
+    int i;
+    int count = 0;
+    uint64_t now = now_seconds();
+    if (cfg == NULL) {
+        return 0;
+    }
+    for (i = 0; i < cfg->upstream_count; i++) {
+        if (cfg->upstreams[i].backoff_until > now) {
+            count++;
+        }
+    }
+    for (i = 0; i < cfg->split_upstream_count; i++) {
+        if (cfg->split_upstreams[i].upstream.backoff_until > now) {
+            count++;
+        }
+    }
+    return count;
+}
+
+static uint64_t upstream_backoff_seconds(uint64_t failures) {
+    uint64_t seconds = UPSTREAM_BACKOFF_MIN_SECONDS;
+    uint64_t extra_failures;
+    if (failures < UPSTREAM_BACKOFF_FAILURE_THRESHOLD) {
+        return 0;
+    }
+    extra_failures = failures - UPSTREAM_BACKOFF_FAILURE_THRESHOLD;
+    while (extra_failures > 0 && seconds < UPSTREAM_BACKOFF_MAX_SECONDS) {
+        seconds *= 2;
+        extra_failures--;
+    }
+    return seconds > UPSTREAM_BACKOFF_MAX_SECONDS ? UPSTREAM_BACKOFF_MAX_SECONDS : seconds;
+}
+
+static bool upstream_in_backoff(const upstream_t *upstream, uint64_t now) {
+    return upstream != NULL && upstream->backoff_until > now;
+}
+
+static bool should_try_upstream_on_pass(const upstream_t *upstream, int count, int pass,
+                                        uint64_t now, bool *skipped_backoff) {
+    bool in_backoff;
+    if (upstream == NULL) {
+        return false;
+    }
+    if (count <= 1) {
+        return pass == 0;
+    }
+    in_backoff = upstream_in_backoff(upstream, now);
+    if (pass == 0) {
+        if (in_backoff) {
+            if (skipped_backoff != NULL) {
+                *skipped_backoff = true;
+            }
+            g_stats.upstream_backoff_skips++;
+            return false;
+        }
+        return true;
+    }
+    return in_backoff;
+}
+
 static bool dns_response_truncated(const uint8_t *response, size_t response_len);
 static int response_rcode(const uint8_t *response, size_t response_len);
 static ssize_t forward_tcp_to_upstream(const upstream_t *upstream, int timeout_ms,
@@ -3103,11 +3170,13 @@ static ssize_t forward_udp_to_upstream(const upstream_t *upstream, int timeout_m
 
 static void record_upstream_attempt(upstream_t *upstream, ssize_t response_len,
                                     int latency_ms, const uint8_t *response) {
+    uint64_t now;
     if (upstream == NULL) {
         return;
     }
+    now = now_seconds();
     upstream->requests++;
-    upstream->last_used = now_seconds();
+    upstream->last_used = now;
     upstream->last_latency_ms = latency_ms;
     upstream->last_rcode = response_len > 0 ? response_rcode(response, (size_t) response_len) : -1;
     if (latency_ms > 0) {
@@ -3118,8 +3187,18 @@ static void record_upstream_attempt(upstream_t *upstream, ssize_t response_len,
     }
     if (response_len > 0) {
         upstream->successes++;
+        upstream->consecutive_failures = 0;
+        upstream->backoff_until = 0;
     } else {
+        uint64_t backoff;
         upstream->failures++;
+        if (upstream->consecutive_failures < UINT64_MAX) {
+            upstream->consecutive_failures++;
+        }
+        backoff = upstream_backoff_seconds(upstream->consecutive_failures);
+        if (backoff > 0) {
+            upstream->backoff_until = now + backoff;
+        }
     }
 }
 
@@ -3155,57 +3234,69 @@ static ssize_t forward_udp(config_t *cfg, const char *domain, const uint8_t *que
                            size_t query_len, uint8_t *response, size_t response_len,
                            const char **route) {
     int i;
+    int pass;
     int count = 0;
     uint8_t truncated_response[MAX_PACKET];
     ssize_t truncated_len = -1;
     bool split_route = false;
+    uint64_t now = now_seconds();
     upstream_t *upstreams = select_upstreams(cfg, domain, &count, route);
     split_route = route != NULL && *route != NULL && strcmp(*route, "split_upstream") == 0;
-    for (i = 0; i < count; i++) {
-        bool udp_only = upstreams[i].protocol == UPSTREAM_PROTO_UDP;
-        ssize_t got;
-        if (upstreams[i].protocol == UPSTREAM_PROTO_TCP) {
-            got = attempt_tcp_upstream(&upstreams[i], cfg->timeout_ms,
-                    query, query_len, response, response_len);
-            if (got > 0) {
-                if (route != NULL) {
-                    *route = split_route ? "split_upstream_tcp" : "upstream_tcp";
-                }
-                return got;
+    for (pass = 0; pass < 2; pass++) {
+        bool skipped_backoff = false;
+        for (i = 0; i < count; i++) {
+            bool udp_only;
+            ssize_t got;
+            if (!should_try_upstream_on_pass(&upstreams[i], count, pass, now, &skipped_backoff)) {
+                continue;
             }
-            continue;
-        }
-        got = attempt_udp_upstream(&upstreams[i], cfg->timeout_ms,
-                query, query_len, response, response_len);
-        if (got > 0) {
-            if (dns_response_truncated(response, (size_t) got)) {
-                ssize_t tcp_got;
-                g_stats.upstream_truncated_responses++;
-                if (udp_only) {
+            udp_only = upstreams[i].protocol == UPSTREAM_PROTO_UDP;
+            if (upstreams[i].protocol == UPSTREAM_PROTO_TCP) {
+                got = attempt_tcp_upstream(&upstreams[i], cfg->timeout_ms,
+                        query, query_len, response, response_len);
+                if (got > 0) {
                     if (route != NULL) {
-                        *route = split_route ? "split_upstream_udp" : "upstream_udp";
+                        *route = split_route ? "split_upstream_tcp" : "upstream_tcp";
                     }
                     return got;
                 }
-                if (truncated_len < 0 && (size_t) got <= sizeof(truncated_response)) {
-                    memcpy(truncated_response, response, (size_t) got);
-                    truncated_len = got;
-                }
-                tcp_got = attempt_tcp_upstream(&upstreams[i], cfg->timeout_ms,
-                        query, query_len, response, response_len);
-                if (tcp_got > 0) {
-                    g_stats.upstream_tcp_fallbacks++;
-                    if (route != NULL) {
-                        *route = split_route ? "split_upstream_tcp_fallback" : "upstream_tcp_fallback";
-                    }
-                    return tcp_got;
-                }
                 continue;
             }
-            if (udp_only && route != NULL) {
-                *route = split_route ? "split_upstream_udp" : "upstream_udp";
+            got = attempt_udp_upstream(&upstreams[i], cfg->timeout_ms,
+                    query, query_len, response, response_len);
+            if (got > 0) {
+                if (dns_response_truncated(response, (size_t) got)) {
+                    ssize_t tcp_got;
+                    g_stats.upstream_truncated_responses++;
+                    if (udp_only) {
+                        if (route != NULL) {
+                            *route = split_route ? "split_upstream_udp" : "upstream_udp";
+                        }
+                        return got;
+                    }
+                    if (truncated_len < 0 && (size_t) got <= sizeof(truncated_response)) {
+                        memcpy(truncated_response, response, (size_t) got);
+                        truncated_len = got;
+                    }
+                    tcp_got = attempt_tcp_upstream(&upstreams[i], cfg->timeout_ms,
+                            query, query_len, response, response_len);
+                    if (tcp_got > 0) {
+                        g_stats.upstream_tcp_fallbacks++;
+                        if (route != NULL) {
+                            *route = split_route ? "split_upstream_tcp_fallback" : "upstream_tcp_fallback";
+                        }
+                        return tcp_got;
+                    }
+                    continue;
+                }
+                if (udp_only && route != NULL) {
+                    *route = split_route ? "split_upstream_udp" : "upstream_udp";
+                }
+                return got;
             }
-            return got;
+        }
+        if (!skipped_backoff) {
+            break;
         }
     }
     if (truncated_len > 0) {
@@ -3261,24 +3352,37 @@ static ssize_t forward_udp_to_upstream(const upstream_t *upstream, int timeout_m
 static ssize_t forward_udp_probe(const config_t *cfg, const uint8_t *query, size_t query_len,
                                  uint8_t *response, size_t response_len, int *upstream_index) {
     int i;
+    int pass;
     int timeout_ms = cfg->timeout_ms < 1000 ? cfg->timeout_ms : 1000;
+    uint64_t now = now_seconds();
     if (timeout_ms < 250) {
         timeout_ms = 250;
     }
     if (upstream_index != NULL) {
         *upstream_index = -1;
     }
-    for (i = 0; i < cfg->upstream_count; i++) {
-        ssize_t got = cfg->upstreams[i].protocol == UPSTREAM_PROTO_TCP
-                ? forward_tcp_to_upstream(&cfg->upstreams[i], timeout_ms,
-                query, query_len, response, response_len)
-                : forward_udp_to_upstream(&cfg->upstreams[i], timeout_ms,
-                query, query_len, response, response_len);
-        if (got > 0) {
-            if (upstream_index != NULL) {
-                *upstream_index = i;
+    for (pass = 0; pass < 2; pass++) {
+        bool skipped_backoff = false;
+        for (i = 0; i < cfg->upstream_count; i++) {
+            ssize_t got;
+            if (!should_try_upstream_on_pass(&cfg->upstreams[i], cfg->upstream_count,
+                    pass, now, &skipped_backoff)) {
+                continue;
             }
-            return got;
+            got = cfg->upstreams[i].protocol == UPSTREAM_PROTO_TCP
+                    ? forward_tcp_to_upstream(&cfg->upstreams[i], timeout_ms,
+                    query, query_len, response, response_len)
+                    : forward_udp_to_upstream(&cfg->upstreams[i], timeout_ms,
+                    query, query_len, response, response_len);
+            if (got > 0) {
+                if (upstream_index != NULL) {
+                    *upstream_index = i;
+                }
+                return got;
+            }
+        }
+        if (!skipped_backoff) {
+            break;
         }
     }
     return -1;
@@ -3352,29 +3456,41 @@ static ssize_t forward_tcp(config_t *cfg, const char *domain, const uint8_t *que
                            size_t query_len, uint8_t *response, size_t response_len,
                            const char **route) {
     int i;
+    int pass;
     int count = 0;
     bool split_route = false;
+    uint64_t now = now_seconds();
     upstream_t *upstreams;
     if (query_len > 65535) {
         return -1;
     }
     upstreams = select_upstreams(cfg, domain, &count, route);
     split_route = route != NULL && *route != NULL && strcmp(*route, "split_upstream") == 0;
-    for (i = 0; i < count; i++) {
-        ssize_t got = upstreams[i].protocol == UPSTREAM_PROTO_UDP
-                ? attempt_udp_upstream(&upstreams[i], cfg->timeout_ms,
-                query, query_len, response, response_len)
-                : attempt_tcp_upstream(&upstreams[i], cfg->timeout_ms,
-                query, query_len, response, response_len);
-        if (got > 0) {
-            if (route != NULL) {
-                if (upstreams[i].protocol == UPSTREAM_PROTO_UDP) {
-                    *route = split_route ? "split_upstream_udp" : "upstream_udp";
-                } else if (upstreams[i].protocol == UPSTREAM_PROTO_TCP) {
-                    *route = split_route ? "split_upstream_tcp" : "upstream_tcp";
-                }
+    for (pass = 0; pass < 2; pass++) {
+        bool skipped_backoff = false;
+        for (i = 0; i < count; i++) {
+            ssize_t got;
+            if (!should_try_upstream_on_pass(&upstreams[i], count, pass, now, &skipped_backoff)) {
+                continue;
             }
-            return got;
+            got = upstreams[i].protocol == UPSTREAM_PROTO_UDP
+                    ? attempt_udp_upstream(&upstreams[i], cfg->timeout_ms,
+                    query, query_len, response, response_len)
+                    : attempt_tcp_upstream(&upstreams[i], cfg->timeout_ms,
+                    query, query_len, response, response_len);
+            if (got > 0) {
+                if (route != NULL) {
+                    if (upstreams[i].protocol == UPSTREAM_PROTO_UDP) {
+                        *route = split_route ? "split_upstream_udp" : "upstream_udp";
+                    } else if (upstreams[i].protocol == UPSTREAM_PROTO_TCP) {
+                        *route = split_route ? "split_upstream_tcp" : "upstream_tcp";
+                    }
+                }
+                return got;
+            }
+        }
+        if (!skipped_backoff) {
+            break;
         }
     }
     return -1;
@@ -4510,14 +4626,18 @@ static int response_rcode(const uint8_t *response, size_t response_len) {
 
 static void write_upstream_runtime_line(int client, const char *key, int index,
                                         const char *suffix, const upstream_t *upstream) {
+    uint64_t now = now_seconds();
+    uint64_t backoff_remaining;
     if (upstream == NULL) {
         return;
     }
+    backoff_remaining = upstream->backoff_until > now ? upstream->backoff_until - now : 0;
     if (suffix != NULL && suffix[0] != '\0') {
         write_control_response(client,
                 "%s[%d]=suffix=%s upstream=%s:%d protocol=%s requests=%llu successes=%llu "
                 "failures=%llu avg_latency_ms=%llu max_latency_ms=%llu "
-                "last_latency_ms=%d last_rcode=%d last_used=%llu\n",
+                "last_latency_ms=%d last_rcode=%d last_used=%llu "
+                "consecutive_failures=%llu backoff_until=%llu backoff_remaining=%llu\n",
                 key,
                 index,
                 suffix,
@@ -4531,13 +4651,17 @@ static void write_upstream_runtime_line(int client, const char *key, int index,
                 (unsigned long long) upstream->max_latency_ms,
                 upstream->last_latency_ms,
                 upstream->last_rcode,
-                (unsigned long long) upstream->last_used);
+                (unsigned long long) upstream->last_used,
+                (unsigned long long) upstream->consecutive_failures,
+                (unsigned long long) upstream->backoff_until,
+                (unsigned long long) backoff_remaining);
         return;
     }
     write_control_response(client,
             "%s[%d]=%s:%d protocol=%s requests=%llu successes=%llu failures=%llu "
             "avg_latency_ms=%llu max_latency_ms=%llu last_latency_ms=%d "
-            "last_rcode=%d last_used=%llu\n",
+            "last_rcode=%d last_used=%llu consecutive_failures=%llu "
+            "backoff_until=%llu backoff_remaining=%llu\n",
             key,
             index,
             upstream->host,
@@ -4550,7 +4674,10 @@ static void write_upstream_runtime_line(int client, const char *key, int index,
             (unsigned long long) upstream->max_latency_ms,
             upstream->last_latency_ms,
             upstream->last_rcode,
-            (unsigned long long) upstream->last_used);
+            (unsigned long long) upstream->last_used,
+            (unsigned long long) upstream->consecutive_failures,
+            (unsigned long long) upstream->backoff_until,
+            (unsigned long long) backoff_remaining);
 }
 
 static void write_upstream_runtime_stats(int client, const config_t *cfg) {
@@ -4607,6 +4734,7 @@ static void write_health_response(int client) {
             "udp_listener=%d\ntcp_listener=%d\ncontrol_listener=%d\n"
             "generation=%llu\nupstreams=%d\nsplit_upstreams=%d\nupstream_probe=%s\n"
             "compiled_upstream_addresses=%d\nreusable_udp_upstream_sockets=%d\n"
+            "upstream_backoff_active=%d\n"
             "resolver_scope_hash=%llu\n"
             "reloads=%llu\nreload_failures=%llu\nvalidations=%llu\nvalidation_failures=%llu\n"
             "upstream_probe_ms=%d\nupstream_probe_index=%d\nupstream_probe_rcode=%d\n"
@@ -4626,6 +4754,7 @@ static void write_health_response(int client) {
             "cache_reload_scope_changes=%llu\n"
             "upstream_tcp_fallbacks=%llu\nupstream_truncated_responses=%llu\n"
             "upstream_udp_socket_reuses=%llu\nupstream_udp_stale_replies=%llu\n"
+            "upstream_backoff_skips=%llu\n"
             "tcp_client_timeouts=%llu\ncontrol_client_timeouts=%llu\n"
             "uid_lookup_successes=%llu\nuid_lookup_misses=%llu\nuid_cache_hits=%llu\n"
             "memory_rss_kb=%ld\nmemory_hwm_kb=%ld\ncpu_user_ms=%llu\n"
@@ -4656,6 +4785,7 @@ static void write_health_response(int client) {
             response_len > 0 ? "ok" : "fail",
             compiled_upstream_address_count(&g_cfg),
             reusable_udp_upstream_socket_count(&g_cfg),
+            upstream_backoff_active_count(&g_cfg),
             (unsigned long long) g_cfg.resolver_scope_hash,
             (unsigned long long) g_stats.reloads,
             (unsigned long long) g_stats.reload_failures,
@@ -4698,6 +4828,7 @@ static void write_health_response(int client) {
             (unsigned long long) g_stats.upstream_truncated_responses,
             (unsigned long long) g_stats.upstream_udp_socket_reuses,
             (unsigned long long) g_stats.upstream_udp_stale_replies,
+            (unsigned long long) g_stats.upstream_backoff_skips,
             (unsigned long long) g_stats.tcp_client_timeouts,
             (unsigned long long) g_stats.control_client_timeouts,
             (unsigned long long) g_stats.uid_lookup_successes,
@@ -4902,6 +5033,7 @@ static void handle_control(int fd) {
                 "upstream_requests=%llu\nupstream_successes=%llu\nupstream_failures=%llu\n"
                 "upstream_tcp_fallbacks=%llu\nupstream_truncated_responses=%llu\n"
                 "upstream_udp_socket_reuses=%llu\nupstream_udp_stale_replies=%llu\n"
+                "upstream_backoff_skips=%llu\nupstream_backoff_active=%d\n"
                 "uid_lookup_successes=%llu\nuid_lookup_misses=%llu\nuid_cache_hits=%llu\n"
                 "compiled_upstream_addresses=%d\nreusable_udp_upstream_sockets=%d\n"
                 "resolver_scope_hash=%llu\n"
@@ -4993,6 +5125,8 @@ static void handle_control(int fd) {
                 (unsigned long long) g_stats.upstream_truncated_responses,
                 (unsigned long long) g_stats.upstream_udp_socket_reuses,
                 (unsigned long long) g_stats.upstream_udp_stale_replies,
+                (unsigned long long) g_stats.upstream_backoff_skips,
+                upstream_backoff_active_count(&g_cfg),
                 (unsigned long long) g_stats.uid_lookup_successes,
                 (unsigned long long) g_stats.uid_lookup_misses,
                 (unsigned long long) g_stats.uid_cache_hits,
