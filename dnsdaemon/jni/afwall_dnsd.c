@@ -52,6 +52,15 @@
 #define DEFAULT_POSITIVE_TTL 60
 #define DEFAULT_NEGATIVE_TTL 30
 #define MAX_CACHE_TTL 86400
+#define DNS_SOCKET_BUFFER_BYTES 262144
+#define UDP_DRAIN_LIMIT 32
+
+#ifndef MSG_DONTWAIT
+#define AFWALL_HAS_MSG_DONTWAIT 0
+#define MSG_DONTWAIT 0
+#else
+#define AFWALL_HAS_MSG_DONTWAIT 1
+#endif
 
 typedef enum {
     DECISION_ALLOW = 0,
@@ -171,6 +180,8 @@ typedef struct {
     uint64_t udp_queries;
     uint64_t tcp_queries;
     uint64_t invalid_queries;
+    uint64_t udp_drain_batches;
+    uint64_t udp_drain_packets;
     uint64_t tcp_client_timeouts;
     uint64_t control_client_timeouts;
     uint64_t fail_open_drops;
@@ -1614,6 +1625,12 @@ static void set_socket_timeout(int fd, int timeout_ms) {
     setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
 }
 
+static void set_socket_buffers(int fd) {
+    int size = DNS_SOCKET_BUFFER_BYTES;
+    setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &size, sizeof(size));
+    setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &size, sizeof(size));
+}
+
 static bool socket_timed_out(void) {
     return errno == EAGAIN || errno == EWOULDBLOCK || errno == ETIMEDOUT;
 }
@@ -1632,6 +1649,7 @@ static int connect_upstream(const upstream_t *upstream, int socktype, int timeou
         if (fd < 0) {
             return -1;
         }
+        set_socket_buffers(fd);
         set_socket_timeout(fd, timeout_ms);
         if (connect(fd, (const struct sockaddr *) &upstream->addr, upstream->addr_len) == 0) {
             return fd;
@@ -1651,6 +1669,7 @@ static int connect_upstream(const upstream_t *upstream, int socktype, int timeou
         if (fd < 0) {
             continue;
         }
+        set_socket_buffers(fd);
         set_socket_timeout(fd, timeout_ms);
         if (connect(fd, rp->ai_addr, rp->ai_addrlen) == 0) {
             break;
@@ -2387,6 +2406,7 @@ static int create_udp_socket(int port) {
     }
     setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &off, sizeof(off));
     setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on));
+    set_socket_buffers(fd);
     memset(&addr6, 0, sizeof(addr6));
     addr6.sin6_family = AF_INET6;
     addr6.sin6_addr = in6addr_any;
@@ -2409,6 +2429,7 @@ static int create_tcp_socket(int port) {
     }
     setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &off, sizeof(off));
     setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on));
+    set_socket_buffers(fd);
     memset(&addr6, 0, sizeof(addr6));
     addr6.sin6_family = AF_INET6;
     addr6.sin6_addr = in6addr_any;
@@ -2544,7 +2565,7 @@ static void handle_dns_query(const config_t *cfg, const uint8_t *query, size_t q
     }
 }
 
-static void handle_udp(int fd) {
+static bool handle_udp(int fd, int flags) {
     uint8_t query[MAX_PACKET];
     uint8_t response[MAX_PACKET];
     struct sockaddr_storage peer;
@@ -2554,9 +2575,9 @@ static void handle_udp(int fd) {
     const char *action = "none";
     struct timeval start;
     struct timeval end;
-    got = recvfrom(fd, query, sizeof(query), 0, (struct sockaddr *) &peer, &peer_len);
+    got = recvfrom(fd, query, sizeof(query), flags, (struct sockaddr *) &peer, &peer_len);
     if (got <= 0) {
-        return;
+        return false;
     }
     gettimeofday(&start, NULL);
     handle_dns_query(&g_cfg, query, (size_t) got, response, &response_len, &action, 0);
@@ -2569,6 +2590,7 @@ static void handle_udp(int fd) {
         add_log("unknown", "no_response", "udp", 0,
                 "block", "no_response", "none", elapsed_ms(&start, &end));
     }
+    return true;
 }
 
 static void handle_tcp_client(int client) {
@@ -2696,6 +2718,8 @@ static void write_health_response(int client) {
             "compiled_upstream_addresses=%d\nreusable_udp_upstream_sockets=%d\n"
             "upstream_probe_ms=%d\nupstream_probe_index=%d\nupstream_probe_rcode=%d\n"
             "queries=%llu\nblocked=%llu\nallowed=%llu\ncache_size=%d\ncache_entries=%d\n"
+            "socket_buffer_bytes=%d\nudp_drain_limit=%d\n"
+            "udp_drain_batches=%llu\nudp_drain_packets=%llu\n"
             "cache_positive_entries=%d\ncache_negative_entries=%d\n"
             "cache_positive_hits=%llu\ncache_negative_hits=%llu\n"
             "cache_positive_stores=%llu\ncache_negative_stores=%llu\n"
@@ -2727,6 +2751,10 @@ static void write_health_response(int client) {
             (unsigned long long) g_stats.allowed,
             g_cfg.cache_size,
             cache_entry_count(),
+            DNS_SOCKET_BUFFER_BYTES,
+            UDP_DRAIN_LIMIT,
+            (unsigned long long) g_stats.udp_drain_batches,
+            (unsigned long long) g_stats.udp_drain_packets,
             cache_entry_count_by_type(false),
             cache_entry_count_by_type(true),
             (unsigned long long) g_stats.cache_positive_hits,
@@ -2887,12 +2915,14 @@ static void handle_control(int fd) {
         write_control_response(client,
                 "running=1\npid=%ld\nuptime=%llu\ngeneration=%llu\n"
                 "queries=%llu\nudp_queries=%llu\ntcp_queries=%llu\ninvalid_queries=%llu\n"
+                "udp_drain_batches=%llu\nudp_drain_packets=%llu\n"
                 "tcp_client_timeouts=%llu\ncontrol_client_timeouts=%llu\n"
                 "allowed=%llu\nblocked=%llu\nfail_open_drops=%llu\nfail_closed_blocks=%llu\n"
                 "memory_rss_kb=%ld\nmemory_hwm_kb=%ld\ncpu_user_ms=%llu\n"
                 "cpu_system_ms=%llu\ncpu_total_ms=%llu\n"
                 "query_logging=%d\npersist_query_logs=%d\n"
                 "log_writer_thread=%d\nlog_ring_entries=%llu\nlog_unflushed_entries=%llu\n"
+                "socket_buffer_bytes=%d\nudp_drain_limit=%d\n"
                 "cache_size=%d\ncache_entries=%d\ncache_hits=%llu\ncache_misses=%llu\n"
                 "cache_positive_entries=%d\ncache_negative_entries=%d\n"
                 "cache_positive_hits=%llu\ncache_negative_hits=%llu\n"
@@ -2917,6 +2947,8 @@ static void handle_control(int fd) {
                 (unsigned long long) g_stats.udp_queries,
                 (unsigned long long) g_stats.tcp_queries,
                 (unsigned long long) g_stats.invalid_queries,
+                (unsigned long long) g_stats.udp_drain_batches,
+                (unsigned long long) g_stats.udp_drain_packets,
                 (unsigned long long) g_stats.tcp_client_timeouts,
                 (unsigned long long) g_stats.control_client_timeouts,
                 (unsigned long long) g_stats.allowed,
@@ -2933,6 +2965,8 @@ static void handle_control(int fd) {
                 g_log_thread_started ? 1 : 0,
                 (unsigned long long) log_ring_entries,
                 (unsigned long long) log_unflushed_entries,
+                DNS_SOCKET_BUFFER_BYTES,
+                UDP_DRAIN_LIMIT,
                 g_cfg.cache_size,
                 cache_entry_count(),
                 (unsigned long long) g_stats.cache_hits,
@@ -3122,7 +3156,16 @@ int main(int argc, char **argv) {
             break;
         }
         if (FD_ISSET(udp_fd, &readfds)) {
-            handle_udp(udp_fd);
+            int drained = 0;
+            int limit = AFWALL_HAS_MSG_DONTWAIT ? UDP_DRAIN_LIMIT : 1;
+            /* Drain a bounded UDP burst so queued DNS packets are not left behind under load. */
+            while (drained < limit && handle_udp(udp_fd, MSG_DONTWAIT)) {
+                drained++;
+            }
+            if (drained > 1) {
+                g_stats.udp_drain_batches++;
+                g_stats.udp_drain_packets += (uint64_t) drained;
+            }
         }
         if (FD_ISSET(tcp_fd, &readfds)) {
             handle_tcp(tcp_fd);
