@@ -1,9 +1,11 @@
 package dev.ukanth.ufirewall.dns;
 
 import android.content.Context;
+import android.content.SharedPreferences;
 import android.net.LocalSocket;
 import android.net.LocalSocketAddress;
 import android.os.Build;
+import android.provider.Settings;
 import android.util.Log;
 
 import java.io.ByteArrayOutputStream;
@@ -13,6 +15,7 @@ import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.io.RandomAccessFile;
 import java.net.DatagramPacket;
 import java.net.DatagramSocket;
 import java.net.InetAddress;
@@ -52,6 +55,7 @@ public final class DnsHijackManager {
     private static final String BOOT_LOG = "afwall_dnsd_boot.log";
     private static final String CLEANUP_SCRIPT = "afwall_dnsd_cleanup.sh";
     private static final String CLEANUP_LOG = "afwall_dnsd_cleanup.log";
+    private static final String SERVICE_LOG_PREFS = "AFWallDnsServiceLogBridge";
     private static final String CHAIN_V4 = "afwall-dns";
     private static final String CHAIN_V4_PRE = "afwall-dns-pre";
     private static final String CHAIN_V6 = "afwall-dns6";
@@ -60,7 +64,14 @@ public final class DnsHijackManager {
     private static final String NFT_TABLE_V6 = "afwall_dns6";
     private static final String NFT_OUTPUT = "output";
     private static final String NFT_PREROUTING = "prerouting";
+    private static final String PRIVATE_DNS_MODE = "private_dns_mode";
+    private static final String PRIVATE_DNS_SPECIFIER = "private_dns_specifier";
     private static final int DEFAULT_PORT = 5354;
+    private static final int MAX_SERVICE_LOG_READ = 8192;
+    private static final int MAX_SERVICE_LOG_LINES = 30;
+    private static final int MAX_SERVICE_LOG_LINE_CHARS = 240;
+    private static final int MAX_DIAGNOSTIC_LOG_TAIL = 4096;
+    private static final String UNREADABLE_SERVICE_LOG_PREFIX = "unreadable_";
     public static final int RULE_ALLOW_EXACT = 1;
     public static final int RULE_ALLOW_SUFFIX = 2;
     public static final int RULE_BLOCK_EXACT = 3;
@@ -244,7 +255,15 @@ public final class DnsHijackManager {
                 .setLogging(true)
                 .setReopenShell(true)
                 .setFailureToast(R.string.error_apply)
-                .setCallback(callback)
+                .setCallback(new RootCommand.Callback() {
+                    @Override
+                    public void cbFunc(RootCommand state) {
+                        syncServiceLogsToAppLog(context);
+                        if (callback != null) {
+                            callback.cbFunc(state);
+                        }
+                    }
+                })
                 .run(context.getApplicationContext(), commands);
     }
 
@@ -267,7 +286,15 @@ public final class DnsHijackManager {
                 .setLogging(true)
                 .setReopenShell(true)
                 .setFailureToast(R.string.error_apply)
-                .setCallback(callback)
+                .setCallback(new RootCommand.Callback() {
+                    @Override
+                    public void cbFunc(RootCommand state) {
+                        syncServiceLogsToAppLog(context);
+                        if (callback != null) {
+                            callback.cbFunc(state);
+                        }
+                    }
+                })
                 .run(context.getApplicationContext(), commands);
     }
 
@@ -292,6 +319,7 @@ public final class DnsHijackManager {
                             Api.setRulesUpToDate(false);
                             ApplicationErrorLog.add(context, "DNS protection pause failed; restored previous enabled setting");
                         }
+                        syncServiceLogsToAppLog(context);
                         if (callback != null) {
                             callback.cbFunc(state);
                         }
@@ -327,6 +355,7 @@ public final class DnsHijackManager {
                             Api.setRulesUpToDate(false);
                             ApplicationErrorLog.add(context, "DNS protection resume failed; restored previous enabled setting");
                         }
+                        syncServiceLogsToAppLog(context);
                         if (callback != null) {
                             callback.cbFunc(state);
                         }
@@ -336,6 +365,7 @@ public final class DnsHijackManager {
     }
 
     public static String collectLocalDiagnostics(Context context) {
+        syncServiceLogsToAppLog(context);
         StringBuilder out = new StringBuilder();
         File dir = workDir(context);
         File daemon = new File(dir, DAEMON_NAME);
@@ -363,6 +393,9 @@ public final class DnsHijackManager {
                 .append('\n');
         out.append("boot_persistence_pref=").append(G.dnsHijackBootPersistence()).append('\n');
         out.append("port=").append(G.dnsHijackPort(DEFAULT_PORT)).append('\n');
+        out.append("\n[android dns compatibility]\n");
+        appendAndroidDnsCompatibility(context, out);
+        out.append('\n');
         out.append("fail_open=").append(G.dnsHijackFailOpen()).append('\n');
         out.append("strict_mode=").append(G.dnsHijackStrictMode()).append('\n');
         out.append("safe_search=").append(G.dnsHijackSafeSearch()).append('\n');
@@ -420,6 +453,15 @@ public final class DnsHijackManager {
         appendSmallFileValue(out, "last_exit", lastExit);
         appendSmallFileValue(out, "heartbeat", heartbeat);
 
+        out.append("\n[service event log bridge]\n");
+        appendServiceLogBridgeStatus(context, out, "supervisor", supervisorLog);
+        appendServiceLogBridgeStatus(context, out, "boot", bootLog);
+        appendServiceLogBridgeStatus(context, out, "cleanup", cleanupLog);
+        out.append("\n[recent service events]\n");
+        appendTailFileValue(out, "supervisor_recent", supervisorLog, MAX_DIAGNOSTIC_LOG_TAIL);
+        appendTailFileValue(out, "boot_recent", bootLog, MAX_DIAGNOSTIC_LOG_TAIL);
+        appendTailFileValue(out, "cleanup_recent", cleanupLog, MAX_DIAGNOSTIC_LOG_TAIL);
+
         out.append("\n[control status]\n");
         out.append(queryControl(context, "status"));
         out.append("\n[control health]\n");
@@ -437,6 +479,7 @@ public final class DnsHijackManager {
     }
 
     public static DnsDashboardSnapshot getDashboardSnapshot(Context context) {
+        syncServiceLogsToAppLog(context);
         String status = queryControl(context, "status");
         String health = queryControl(context, "health");
         Map<String, String> statusValues = parseKeyValueLines(status);
@@ -490,6 +533,7 @@ public final class DnsHijackManager {
         boolean udpListener = "1".equals(firstValue(statusValues, healthValues, "udp_listener"));
         boolean tcpListener = "1".equals(firstValue(statusValues, healthValues, "tcp_listener"));
         boolean controlListener = "1".equals(firstValue(statusValues, healthValues, "control_listener"));
+        boolean privateDnsBypass = androidPrivateDnsMayBypass(context);
         long upstreamLatency = parseLong(firstValue(healthValues, statusValues, "upstream_probe_ms"), -1L);
         String upstreamProbe = firstValue(healthValues, statusValues, "upstream_probe");
         String restartCount = readSmallFileValue(new File(workDir(context), RESTART_COUNT), "0");
@@ -511,6 +555,9 @@ public final class DnsHijackManager {
 
         String statusLine = protection + " | " + queriesToday + " queries today | "
                 + blockPercent + " blocked";
+        if (enabled && privateDnsBypass) {
+            statusLine += " | Private DNS may bypass";
+        }
         String blocklistUpdated = blocklistValues.containsKey("updated")
                 ? blocklistValues.get("updated")
                 : "never";
@@ -546,6 +593,7 @@ public final class DnsHijackManager {
                 + " | Redirect setting: " + (enabled ? "enabled" : "disabled")
                 + " | Profile: " + profile
                 + (G.dnsHijackUseProfilePolicy() ? " override" : " global")
+                + privateDnsDashboardLine(context)
                 + "\nBlocklist updated: " + blocklistUpdated
                 + "\nToday: " + allowedToday + " allowed | " + blockedToday + " blocked"
                 + "\nTotal: " + queries + " queries | Restarts: " + restartCount
@@ -560,6 +608,238 @@ public final class DnsHijackManager {
                 + " | TCP " + listenerLabel(tcpListener)
                 + " | Control " + listenerLabel(controlListener);
         return new DnsDashboardSnapshot(statusLine, details);
+    }
+
+    public static boolean androidPrivateDnsMayBypass(Context context) {
+        return privateDnsModeCanBypass(readAndroidPrivateDnsMode(context));
+    }
+
+    public static String androidPrivateDnsWarning(Context context) {
+        String mode = readAndroidPrivateDnsMode(context);
+        if (!privateDnsModeCanBypass(mode)) {
+            return null;
+        }
+        String specifier = readAndroidPrivateDnsSpecifier(context);
+        String provider = specifier.isEmpty() ? "" : " (" + specifier + ")";
+        return "Android Private DNS is " + mode + provider
+                + ". Root DNS capture redirects UDP/TCP port 53, so Private DNS can bypass it.";
+    }
+
+    public static void syncServiceLogsToAppLog(Context context) {
+        if (context == null) {
+            return;
+        }
+        try {
+            File dir = workDir(context);
+            SharedPreferences prefs = context.getApplicationContext()
+                    .getSharedPreferences(SERVICE_LOG_PREFS, Context.MODE_PRIVATE);
+            syncServiceLogFile(context, prefs, new File(dir, SUPERVISOR_LOG), "supervisor");
+            syncServiceLogFile(context, prefs, new File(dir, BOOT_LOG), "boot");
+            syncServiceLogFile(context, prefs, new File(dir, CLEANUP_LOG), "cleanup");
+        } catch (RuntimeException e) {
+            ApplicationErrorLog.add(context, "DNS service log bridge failed: " + e.getMessage());
+        }
+    }
+
+    private static void syncServiceLogFile(Context context, SharedPreferences prefs, File file,
+                                           String label) {
+        if (context == null || prefs == null || file == null || !file.exists()) {
+            return;
+        }
+        String key = serviceLogOffsetKey(label);
+        if (!file.canRead()) {
+            recordUnreadableServiceLog(context, prefs, label);
+            return;
+        }
+        long length = file.length();
+        long offset = prefs.getLong(key, -1L);
+        if (length <= 0L) {
+            prefs.edit()
+                    .putLong(key, 0L)
+                    .putBoolean(UNREADABLE_SERVICE_LOG_PREFIX + label, false)
+                    .apply();
+            return;
+        }
+        if (offset < 0L) {
+            offset = Math.max(0L, length - MAX_SERVICE_LOG_READ);
+        } else if (offset > length) {
+            offset = 0L;
+        }
+        if (length <= offset) {
+            return;
+        }
+        long readStart = offset;
+        if (length - readStart > MAX_SERVICE_LOG_READ) {
+            readStart = length - MAX_SERVICE_LOG_READ;
+            ApplicationErrorLog.add(context, "DNS service " + label
+                    + " log advanced while app was closed; older service events were skipped");
+        }
+        String chunk = readFileRange(file, readStart, length - readStart);
+        if (chunk != null) {
+            bridgeServiceLogLines(context, label, chunk);
+            prefs.edit()
+                    .putLong(key, length)
+                    .putBoolean(UNREADABLE_SERVICE_LOG_PREFIX + label, false)
+                    .apply();
+            return;
+        }
+        recordUnreadableServiceLog(context, prefs, label);
+    }
+
+    private static void recordUnreadableServiceLog(Context context, SharedPreferences prefs,
+                                                   String label) {
+        if (!prefs.getBoolean(UNREADABLE_SERVICE_LOG_PREFIX + label, false)) {
+            ApplicationErrorLog.add(context, "DNS service " + label
+                    + " log could not be read; root log file permissions may need repair");
+        }
+        prefs.edit().putBoolean(UNREADABLE_SERVICE_LOG_PREFIX + label, true).apply();
+    }
+
+    private static void bridgeServiceLogLines(Context context, String label, String chunk) {
+        String[] lines = chunk.split("\\r?\\n");
+        List<String> cleaned = new ArrayList<>();
+        for (String line : lines) {
+            String clean = sanitizeServiceLogLine(line);
+            if (!clean.isEmpty()) {
+                cleaned.add(clean);
+            }
+        }
+        int start = Math.max(0, cleaned.size() - MAX_SERVICE_LOG_LINES);
+        for (int i = start; i < cleaned.size(); i++) {
+            ApplicationErrorLog.add(context, "DNS service " + label + ": " + cleaned.get(i));
+        }
+    }
+
+    private static String sanitizeServiceLogLine(String line) {
+        String clean = line == null ? "" : line.trim().replace('\r', ' ').replace('\n', ' ');
+        clean = clean.replaceAll("\\s+", " ");
+        if (clean.length() > MAX_SERVICE_LOG_LINE_CHARS) {
+            clean = clean.substring(0, MAX_SERVICE_LOG_LINE_CHARS);
+        }
+        return clean;
+    }
+
+    private static void appendServiceLogBridgeStatus(Context context, StringBuilder out,
+                                                     String label, File file) {
+        SharedPreferences prefs = context.getApplicationContext()
+                .getSharedPreferences(SERVICE_LOG_PREFS, Context.MODE_PRIVATE);
+        long offset = prefs.getLong(serviceLogOffsetKey(label), -1L);
+        out.append(label)
+                .append("_log_exists=").append(file != null && file.exists())
+                .append(" readable=").append(file != null && file.canRead())
+                .append(" size=").append(file == null || !file.exists() ? 0L : file.length())
+                .append(" bridged_offset=").append(offset)
+                .append('\n');
+    }
+
+    private static String serviceLogOffsetKey(String label) {
+        return "offset_" + label;
+    }
+
+    private static void appendTailFileValue(StringBuilder out, String label, File file, int maxBytes) {
+        out.append(label).append("=\n");
+        if (file == null || !file.exists()) {
+            out.append("missing\n");
+            return;
+        }
+        long length = file.length();
+        if (length <= 0L) {
+            out.append("empty\n");
+            return;
+        }
+        long readStart = Math.max(0L, length - Math.max(1, maxBytes));
+        String value = readFileRange(file, readStart, length - readStart);
+        if (value == null || value.trim().isEmpty()) {
+            out.append("unreadable or empty\n");
+            return;
+        }
+        out.append(value.trim()).append('\n');
+    }
+
+    private static String readFileRange(File file, long offset, long bytes) {
+        if (file == null || bytes <= 0L) {
+            return "";
+        }
+        int length = (int) Math.min(bytes, Integer.MAX_VALUE);
+        byte[] buffer = new byte[length];
+        try (RandomAccessFile randomAccessFile = new RandomAccessFile(file, "r")) {
+            randomAccessFile.seek(Math.max(0L, offset));
+            int read = randomAccessFile.read(buffer);
+            if (read <= 0) {
+                return "";
+            }
+            return new String(buffer, 0, read, StandardCharsets.UTF_8);
+        } catch (IOException | RuntimeException e) {
+            return null;
+        }
+    }
+
+    private static String privateDnsDashboardLine(Context context) {
+        String warning = androidPrivateDnsWarning(context);
+        if (warning != null) {
+            return "\nAndroid Private DNS warning: " + warning;
+        }
+        return "\nAndroid Private DNS: " + readAndroidPrivateDnsMode(context);
+    }
+
+    private static void appendAndroidDnsCompatibility(Context context, StringBuilder out) {
+        out.append("capture_scope=udp_tcp_port_53_output_and_prerouting\n");
+        out.append("encrypted_dns_note=Private DNS/DoT on 853 and in-app DoH are not port-53 DNS and can bypass NAT capture\n");
+        out.append("private_dns_mode=").append(readAndroidPrivateDnsMode(context)).append('\n');
+        String specifier = readAndroidPrivateDnsSpecifier(context);
+        out.append("private_dns_specifier=")
+                .append(specifier.isEmpty() ? "none" : specifier).append('\n');
+        String warning = androidPrivateDnsWarning(context);
+        out.append("private_dns_capture_warning=")
+                .append(warning == null ? "none" : warning).append('\n');
+        out.append("android_app_battery_optimized=").append(androidAppBatteryOptimized(context)).append('\n');
+        out.append("root_daemon_power_scope=outside_android_app_process\n");
+        out.append("root_watchdog_scope=supervisor_script_restarts_daemon_when_heartbeat_stales\n");
+    }
+
+    private static String androidAppBatteryOptimized(Context context) {
+        if (context == null || Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
+            return "unsupported";
+        }
+        try {
+            return String.valueOf(Api.batteryOptimized(context));
+        } catch (RuntimeException e) {
+            return "unknown";
+        }
+    }
+
+    private static String readAndroidPrivateDnsMode(Context context) {
+        if (context == null || Build.VERSION.SDK_INT < Build.VERSION_CODES.P) {
+            return "unsupported";
+        }
+        try {
+            String value = Settings.Global.getString(context.getContentResolver(), PRIVATE_DNS_MODE);
+            return value == null || value.trim().isEmpty()
+                    ? "unknown"
+                    : value.trim().toLowerCase(Locale.US);
+        } catch (RuntimeException e) {
+            return "unknown";
+        }
+    }
+
+    private static String readAndroidPrivateDnsSpecifier(Context context) {
+        if (context == null || Build.VERSION.SDK_INT < Build.VERSION_CODES.P) {
+            return "";
+        }
+        try {
+            String value = Settings.Global.getString(context.getContentResolver(), PRIVATE_DNS_SPECIFIER);
+            return value == null ? "" : value.trim();
+        } catch (RuntimeException e) {
+            return "";
+        }
+    }
+
+    private static boolean privateDnsModeCanBypass(String mode) {
+        if (mode == null) {
+            return false;
+        }
+        String normalized = mode.trim().toLowerCase(Locale.US);
+        return "opportunistic".equals(normalized) || "hostname".equals(normalized);
     }
 
     public static List<QueryEntry> getHistoricalQueries(Context context, String filter) {
@@ -817,6 +1097,7 @@ public final class DnsHijackManager {
                             ApplicationErrorLog.add(context,
                                     failureMessage + rootFailureSuffix(state));
                         }
+                        syncServiceLogsToAppLog(context);
                         if (callback != null) {
                             callback.cbFunc(state);
                         }
@@ -2678,6 +2959,7 @@ public final class DnsHijackManager {
                 + "if [ -d \"$DIR\" ]; then LOG=\"$APP_LOG\"; else LOG=\"$FALLBACK_LOG\"; fi\n"
                 + "log_msg() {\n"
                 + "  echo \"$(date +%s) $*\" >> \"$LOG\" 2>/dev/null || true\n"
+                + "  chmod 644 \"$LOG\" 2>/dev/null || true\n"
                 + "}\n"
                 + "ipt() {\n"
                 + "  if [ -x \"$IPTABLES\" ]; then \"$IPTABLES\" \"$@\"; elif command -v iptables >/dev/null 2>&1; then iptables \"$@\"; else return 0; fi\n"
@@ -2758,6 +3040,7 @@ public final class DnsHijackManager {
                 + "PRE6=" + CHAIN_V6_PRE + "\n"
                 + "log_msg() {\n"
                 + "  echo \"$(date +%s) $*\" >> \"$LOG\" 2>/dev/null\n"
+                + "  chmod 644 \"$LOG\" 2>/dev/null || true\n"
                 + "}\n"
                 + "ipt() {\n"
                 + "  if [ -x \"$IPTABLES\" ]; then \"$IPTABLES\" \"$@\"; else iptables \"$@\"; fi\n"
@@ -2883,6 +3166,7 @@ public final class DnsHijackManager {
                 + "PRE6=" + CHAIN_V6_PRE + "\n"
                 + "log_msg() {\n"
                 + "  echo \"$(date +%s) $*\" >> \"$LOG\" 2>/dev/null\n"
+                + "  chmod 644 \"$LOG\" 2>/dev/null || true\n"
                 + "}\n"
                 + "ipt() {\n"
                 + "  if [ -x \"$IPTABLES\" ]; then \"$IPTABLES\" \"$@\"; elif command -v iptables >/dev/null 2>&1; then iptables \"$@\"; else return 0; fi\n"

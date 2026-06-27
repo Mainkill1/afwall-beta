@@ -16,6 +16,7 @@ import android.preference.CheckBoxPreference;
 import android.preference.Preference;
 import android.preference.PreferenceFragment;
 import android.preference.SwitchPreference;
+import android.widget.Toast;
 
 import com.afollestad.materialdialogs.MaterialDialog;
 
@@ -784,6 +785,9 @@ public class RulesPreferenceFragment extends PreferenceFragment implements
                         Api.toast(ctx, ctx.getString(enabled
                                 ? R.string.dns_hijack_enable_complete
                                 : R.string.dns_hijack_disable_complete));
+                        if (enabled) {
+                            warnIfPrivateDnsMayBypass();
+                        }
                     } else {
                         setDnsHijackChecked(!enabled);
                         Api.toast(ctx, ctx.getString(enabled
@@ -829,12 +833,25 @@ public class RulesPreferenceFragment extends PreferenceFragment implements
                     if (state.exitCode == 0) {
                         setDnsHijackChecked(true);
                         Api.toast(ctx, ctx.getString(R.string.dns_hijack_enable_complete));
+                        warnIfPrivateDnsMayBypass();
                     } else {
                         Api.toast(ctx, ctx.getString(R.string.dns_hijack_enable_failed));
                     }
                 });
             }
         });
+    }
+
+    private void warnIfPrivateDnsMayBypass() {
+        if (ctx == null) {
+            return;
+        }
+        String warning = DnsHijackManager.androidPrivateDnsWarning(ctx);
+        if (warning == null) {
+            return;
+        }
+        ApplicationErrorLog.add(ctx, warning);
+        Api.toast(ctx, getString(R.string.dns_hijack_private_dns_warning), Toast.LENGTH_LONG);
     }
 
     private void confirmRemoveDnsService() {
