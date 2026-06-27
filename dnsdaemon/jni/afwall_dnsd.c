@@ -3430,7 +3430,12 @@ static bool load_string_rule_file(string_rule_list_t *rules, const char *path) {
     }
     fp = fopen(path, "r");
     if (fp == NULL) {
-        return true;
+        /*
+         * Referenced rule files are part of the compiled rule database. If one
+         * disappears between staging and reload, reject the pending generation
+         * instead of silently activating a weaker empty rule set.
+         */
+        return false;
     }
     while (fgets(line, sizeof(line), fp) != NULL) {
         trim(line);
@@ -3454,7 +3459,11 @@ static bool load_regex_rule_file(regex_rule_list_t *rules, const char *path) {
     }
     fp = fopen(path, "r");
     if (fp == NULL) {
-        return true;
+        /*
+         * Regex file entries are explicit config dependencies and should obey
+         * the same atomic reload contract as exact and suffix rule files.
+         */
+        return false;
     }
     while (fgets(line, sizeof(line), fp) != NULL) {
         trim(line);
