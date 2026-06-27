@@ -359,6 +359,8 @@
     <string name="dns_hijack_disable_complete">DNS protection removed and disabled.</string>
     <string name="dns_hijack_enable_failed">Unable to enable DNS protection. Check root access and diagnostics.</string>
     <string name="dns_hijack_disable_failed">Unable to remove DNS protection. Check root access and diagnostics.</string>
+    <string name="dns_hijack_redirect_settings_applied">DNS redirect settings applied.</string>
+    <string name="dns_hijack_redirect_settings_failed">Unable to apply DNS redirect settings. Check diagnostics.</string>
     <string name="dns_hijack_private_dns_warning">Android Private DNS may bypass DNS capture. Check DNS diagnostics.</string>
     <string name="dns_hijack_boot_persistence_installed">DNS boot restore installed.</string>
     <string name="dns_hijack_boot_persistence_removed">DNS boot restore removed.</string>

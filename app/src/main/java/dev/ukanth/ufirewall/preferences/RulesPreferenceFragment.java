@@ -770,6 +770,10 @@ public class RulesPreferenceFragment extends PreferenceFragment implements
             allow.setChecked(false);
         }
 
+        if (key.equals("enableIPv6") && G.enableDnsHijack() && !suppressDnsLifecycle) {
+            reinstallDnsRedirectsAfterSettingsChange(key);
+        }
+
         if (isDnsHijackPreference(key)) {
             Api.setRulesUpToDate(false);
             if (isDnsHijackBlocklistSchedulePreference(key)) {
@@ -784,6 +788,10 @@ public class RulesPreferenceFragment extends PreferenceFragment implements
             }
             if (key.equals("dnsHijackBootPersistence")) {
                 handleDnsBootPersistenceChanged();
+                return;
+            }
+            if (isDnsHijackRedirectPreference(key) && G.enableDnsHijack()) {
+                reinstallDnsRedirectsAfterSettingsChange(key);
                 return;
             }
             if (shouldReloadDnsHijackPreference(key) && G.enableDnsHijack()) {
@@ -860,6 +868,27 @@ public class RulesPreferenceFragment extends PreferenceFragment implements
                         warnIfPrivateDnsMayBypass();
                     } else {
                         Api.toast(ctx, ctx.getString(R.string.dns_hijack_enable_failed));
+                    }
+                });
+            }
+        });
+    }
+
+    private void reinstallDnsRedirectsAfterSettingsChange(String key) {
+        if (ctx == null) {
+            return;
+        }
+        Api.setRulesUpToDate(false);
+        ApplicationErrorLog.add(ctx, "DNS redirect setting changed; reinstalling service path: " + key);
+        DnsHijackManager.repairDnsProtection(ctx, new RootCommand.Callback() {
+            @Override
+            public void cbFunc(RootCommand state) {
+                new Handler(Looper.getMainLooper()).post(() -> {
+                    if (state.exitCode == 0) {
+                        Api.toast(ctx, ctx.getString(R.string.dns_hijack_redirect_settings_applied));
+                        warnIfPrivateDnsMayBypass();
+                    } else {
+                        Api.toast(ctx, ctx.getString(R.string.dns_hijack_redirect_settings_failed));
                     }
                 });
             }
@@ -1118,6 +1147,14 @@ public class RulesPreferenceFragment extends PreferenceFragment implements
                 || key.equals("dnsHijackScheduledBlocklistUpdates")
                 || key.equals("dnsHijackBlocklistUpdateIntervalHours")
                 || key.equals("dnsHijackUseProfilePolicy"));
+    }
+
+    private boolean isDnsHijackRedirectPreference(String key) {
+        return key != null && (key.equals("dnsHijackPort")
+                || key.equals("dnsHijackCaptureUids")
+                || key.equals("dnsHijackBypassUids")
+                || key.equals("dnsHijackCaptureInterfaces")
+                || key.equals("dnsHijackBypassInterfaces"));
     }
 
     private boolean shouldReloadDnsHijackPreference(String key) {

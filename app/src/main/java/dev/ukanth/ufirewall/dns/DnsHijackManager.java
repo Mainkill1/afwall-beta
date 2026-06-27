@@ -108,7 +108,7 @@ public final class DnsHijackManager {
         if (!ipv6) {
             ApplicationErrorLog.add(context, "DNS hijacker enabled; daemon start and DNS redirect rules queued");
             logRedirectPolicy(context, "DNS redirect policy queued");
-            commands.add("#LITERAL# " + shellQuote(supervisorPath(context)) + " start");
+            commands.add("#LITERAL# " + shellQuote(supervisorPath(context)) + " restart");
             appendBootPersistenceCommand(context, commands);
         }
         appendRedirectRules(commands, ipv6);
@@ -2096,9 +2096,15 @@ public final class DnsHijackManager {
 
     private static String buildNftPurgeCommand() {
         return "if command -v nft >/dev/null 2>&1; then "
-                + "nft delete table ip " + NFT_TABLE_V4 + " >/dev/null 2>&1 || true; "
-                + "nft delete table ip6 " + NFT_TABLE_V6 + " >/dev/null 2>&1 || true; "
+                + buildNftFamilyPurgeCommand(false)
+                + buildNftFamilyPurgeCommand(true)
                 + "fi; true";
+    }
+
+    private static String buildNftFamilyPurgeCommand(boolean ipv6) {
+        String family = ipv6 ? "ip6" : "ip";
+        String table = ipv6 ? NFT_TABLE_V6 : NFT_TABLE_V4;
+        return "nft delete table " + family + " " + table + " >/dev/null 2>&1 || true; ";
     }
 
     private static String buildNftRestoreCommands(String family, String table, String portValue) {
@@ -2681,11 +2687,14 @@ public final class DnsHijackManager {
         List<String> commands = new ArrayList<>();
         File bootScript = new File(workDir(context), BOOT_SCRIPT);
         File cleanupScript = new File(workDir(context), CLEANUP_SCRIPT);
-        commands.add(shellQuote(supervisorPath(context)) + " start");
+        commands.add(shellQuote(supervisorPath(context)) + " restart");
         logRedirectPolicy(context, "DNS redirect policy repair queued");
         appendRootRedirectRepairCommands(context, commands, false);
         if (G.enableIPv6()) {
             appendRootRedirectRepairCommands(context, commands, true);
+        } else {
+            appendDirectPurgeRules(context, commands, true);
+            commands.add(buildNftFamilyPurgeCommand(true));
         }
         commands.add(buildInstallLifecycleCleanupCommand(cleanupScript));
         if (G.dnsHijackBootPersistence()) {
