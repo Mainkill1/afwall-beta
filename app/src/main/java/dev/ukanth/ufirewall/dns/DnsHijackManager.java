@@ -341,6 +341,9 @@ public final class DnsHijackManager {
         long blocked = parseLong(firstValue(statusValues, healthValues, "blocked"), 0L);
         long reloads = parseLong(firstValue(statusValues, healthValues, "reloads"), 0L);
         long reloadFailures = parseLong(firstValue(statusValues, healthValues, "reload_failures"), 0L);
+        boolean udpListener = "1".equals(firstValue(statusValues, healthValues, "udp_listener"));
+        boolean tcpListener = "1".equals(firstValue(statusValues, healthValues, "tcp_listener"));
+        boolean controlListener = "1".equals(firstValue(statusValues, healthValues, "control_listener"));
         long upstreamLatency = parseLong(firstValue(healthValues, statusValues, "upstream_probe_ms"), -1L);
         String upstreamProbe = firstValue(healthValues, statusValues, "upstream_probe");
         String restartCount = readSmallFileValue(new File(workDir(context), RESTART_COUNT), "0");
@@ -378,7 +381,10 @@ public final class DnsHijackManager {
                 + " | Blocklist updated: " + blocklistUpdated
                 + "\nRestarts: " + restartCount
                 + " | Reloads: " + reloads
-                + " | Reload failures: " + reloadFailures;
+                + " | Reload failures: " + reloadFailures
+                + "\nListeners: UDP " + listenerLabel(udpListener)
+                + " | TCP " + listenerLabel(tcpListener)
+                + " | Control " + listenerLabel(controlListener);
         return new DnsDashboardSnapshot(statusLine, details);
     }
 
@@ -817,6 +823,10 @@ public final class DnsHijackManager {
         } catch (IOException e) {
             return fallback;
         }
+    }
+
+    private static String listenerLabel(boolean ready) {
+        return ready ? "ready" : "missing";
     }
 
     private static String normalizeSupervisorAction(String action) {

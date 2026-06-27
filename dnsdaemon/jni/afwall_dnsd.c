@@ -321,6 +321,9 @@ static int g_cache_capacity = 0;
 static uid_cache_entry_t g_uid_cache[UID_CACHE_SIZE];
 static int g_uid_cache_pos = 0;
 static char g_config_path[256];
+static int g_udp_listener_ready = 0;
+static int g_tcp_listener_ready = 0;
+static int g_control_listener_ready = 0;
 
 static void write_control_response(int fd, const char *fmt, ...);
 
@@ -3779,6 +3782,7 @@ static void write_health_response(int client) {
 
     write_control_response(client,
             "health=1\nrunning=1\npid=%ld\nuptime=%llu\nlisten_port=%d\n"
+            "udp_listener=%d\ntcp_listener=%d\ncontrol_listener=%d\n"
             "generation=%llu\nupstreams=%d\nsplit_upstreams=%d\nupstream_probe=%s\n"
             "compiled_upstream_addresses=%d\nreusable_udp_upstream_sockets=%d\n"
             "resolver_scope_hash=%llu\n"
@@ -3812,6 +3816,9 @@ static void write_health_response(int client) {
             (long) getpid(),
             (unsigned long long) (now_seconds() - g_stats.start_time),
             g_cfg.listen_port,
+            g_udp_listener_ready,
+            g_tcp_listener_ready,
+            g_control_listener_ready,
             (unsigned long long) g_cfg.generation,
             g_cfg.upstream_count,
             g_cfg.split_upstream_count,
@@ -4011,7 +4018,8 @@ static void handle_control(int fd) {
         cpu_total_ms = cpu_user_ms + cpu_system_ms;
         read_log_stats(&log_ring_entries, &log_unflushed_entries);
         write_control_response(client,
-                "running=1\npid=%ld\nuptime=%llu\ngeneration=%llu\n"
+                "running=1\npid=%ld\nuptime=%llu\ngeneration=%llu\nlisten_port=%d\n"
+                "udp_listener=%d\ntcp_listener=%d\ncontrol_listener=%d\n"
                 "queries=%llu\nudp_queries=%llu\ntcp_queries=%llu\ninvalid_queries=%llu\n"
                 "udp_drain_batches=%llu\nudp_drain_packets=%llu\n"
                 "tcp_client_timeouts=%llu\ncontrol_client_timeouts=%llu\n"
@@ -4052,6 +4060,10 @@ static void handle_control(int fd) {
                 (long) getpid(),
                 (unsigned long long) (now_seconds() - g_stats.start_time),
                 (unsigned long long) g_cfg.generation,
+                g_cfg.listen_port,
+                g_udp_listener_ready,
+                g_tcp_listener_ready,
+                g_control_listener_ready,
                 (unsigned long long) g_stats.queries,
                 (unsigned long long) g_stats.udp_queries,
                 (unsigned long long) g_stats.tcp_queries,
@@ -4256,6 +4268,9 @@ int main(int argc, char **argv) {
         fprintf(stderr, "failed to create listeners on port %d\n", g_cfg.listen_port);
         return 1;
     }
+    g_udp_listener_ready = 1;
+    g_tcp_listener_ready = 1;
+    g_control_listener_ready = 1;
     /* Publish the PID only after listeners exist so supervisors do not accept a half-start. */
     write_pid_file();
     write_heartbeat_file();
@@ -4318,6 +4333,9 @@ int main(int argc, char **argv) {
         }
     }
     stop_log_thread();
+    g_udp_listener_ready = 0;
+    g_tcp_listener_ready = 0;
+    g_control_listener_ready = 0;
     close(udp_fd);
     close(tcp_fd);
     close(control_fd);
