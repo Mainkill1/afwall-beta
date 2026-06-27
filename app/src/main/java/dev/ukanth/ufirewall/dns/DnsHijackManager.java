@@ -53,6 +53,7 @@ public final class DnsHijackManager {
     private static final String RESTART_COUNT = "afwall_dnsd_restart_count";
     private static final String LAST_EXIT = "afwall_dnsd_last_exit";
     private static final String HEARTBEAT = "afwall_dnsd.heartbeat";
+    private static final String MARK_STATUS = "afwall_dnsd_mark.status";
     private static final String BOOT_SCRIPT = "afwall_dnsd_boot.sh";
     private static final String BOOT_LOG = "afwall_dnsd_boot.log";
     private static final String CLEANUP_SCRIPT = "afwall_dnsd_cleanup.sh";
@@ -120,7 +121,7 @@ public final class DnsHijackManager {
             commands.add("#LITERAL# " + shellQuote(supervisorPath(context)) + " restart");
             appendBootPersistenceCommand(context, commands);
         }
-        appendRedirectRules(commands, ipv6);
+        appendRedirectRules(context, commands, ipv6);
         commands.add("#LITERAL# " + buildNftFallbackRestoreCommand(context, ipv6));
         commands.add("#LITERAL# " + buildRedirectInstallVerificationCommand(context, ipv6));
     }
@@ -390,6 +391,7 @@ public final class DnsHijackManager {
         File restartCount = new File(dir, RESTART_COUNT);
         File lastExit = new File(dir, LAST_EXIT);
         File heartbeat = new File(dir, HEARTBEAT);
+        File markStatus = new File(dir, MARK_STATUS);
         File bootScript = new File(dir, BOOT_SCRIPT);
         File bootLog = new File(dir, BOOT_LOG);
         File cleanupScript = new File(dir, CLEANUP_SCRIPT);
@@ -454,6 +456,7 @@ public final class DnsHijackManager {
         appendFileInfo(out, "restart_count", restartCount);
         appendFileInfo(out, "last_exit", lastExit);
         appendFileInfo(out, "heartbeat", heartbeat);
+        appendFileInfo(out, "mark_status", markStatus);
         appendFileInfo(out, "boot_script", bootScript);
         appendFileInfo(out, "boot_log", bootLog);
         appendFileInfo(out, "cleanup_script", cleanupScript);
@@ -464,6 +467,7 @@ public final class DnsHijackManager {
         appendSmallFileValue(out, "restart_count", restartCount);
         appendSmallFileValue(out, "last_exit", lastExit);
         appendSmallFileValue(out, "heartbeat", heartbeat);
+        appendSmallFileValue(out, "mark_status", markStatus);
 
         out.append("\n[service event log bridge]\n");
         appendServiceLogBridgeStatus(context, out, "supervisor", supervisorLog);
@@ -531,6 +535,10 @@ public final class DnsHijackManager {
                 "compiled_upstream_addresses"), 0L);
         long reusableUdpSockets = parseLong(firstValue(statusValues, healthValues,
                 "reusable_udp_upstream_sockets"), 0L);
+        long socketMarkSupported = parseLong(firstValue(statusValues, healthValues,
+                "socket_mark_supported"), -1L);
+        long socketMarkFailures = parseLong(firstValue(statusValues, healthValues,
+                "socket_mark_failures"), 0L);
         long memoryRssKb = parseLong(firstValue(statusValues, healthValues, "memory_rss_kb"), -1L);
         long memoryHwmKb = parseLong(firstValue(statusValues, healthValues, "memory_hwm_kb"), -1L);
         long cpuTotalMs = parseLong(firstValue(statusValues, healthValues, "cpu_total_ms"), -1L);
@@ -616,12 +624,15 @@ public final class DnsHijackManager {
         String rulesLine = "Rules: " + ruleCount
                 + " | Log ring: " + logRingEntries
                 + " | Pending log writes: " + logUnflushedEntries;
+        String routingLine = "DNS routing: daemon mark " + DAEMON_SOCKET_MARK
+                + " " + daemonMarkSupportLabel(socketMarkSupported)
+                + " | Mark failures: " + socketMarkFailures;
         String details = "Daemon: " + (running ? "running" : "stopped")
                 + " | Redirect setting: " + (enabled ? "enabled" : "disabled")
                 + " | Profile: " + profile
                 + (G.dnsHijackUseProfilePolicy() ? " override" : " global")
                 + privateDnsDashboardLine(context)
-                + rootUidBypassDashboardLine()
+                + "\n" + routingLine
                 + "\nBlocklist updated: " + blocklistUpdated
                 + "\nToday: " + allowedToday + " allowed | " + blockedToday + " blocked"
                 + "\nTotal: " + queries + " queries | Restarts: " + restartCount
@@ -891,14 +902,19 @@ public final class DnsHijackManager {
         return "Power: root daemon watchdog runs outside app power limits; app update power state " + optimized;
     }
 
-    private static String rootUidBypassDashboardLine() {
-        return "\nAndroid DNS routing: daemon upstream sockets use mark "
-                + DAEMON_SOCKET_MARK + " to prevent recursion";
-    }
-
     private static String rootUidBypassWarning() {
         return "UID 0 OUTPUT DNS is only used as a compatibility fallback if mark matching is unavailable; "
                 + "that fallback can let root-owned system DNS bypass capture";
+    }
+
+    private static String daemonMarkSupportLabel(long supported) {
+        if (supported == 1L) {
+            return "supported";
+        }
+        if (supported == 0L) {
+            return "unavailable";
+        }
+        return "unknown";
     }
 
     private static String readAndroidPrivateDnsMode(Context context) {
@@ -2380,9 +2396,15 @@ public final class DnsHijackManager {
     }
 
     private static String buildBootDaemonRecursionBypass(String tool, String chainVariable) {
-        return "  if ! " + tool + " -t nat -A \"" + chainVariable
+        return "  if [ -r \"$MARK_STATUS\" ] && grep -q '^supported ' \"$MARK_STATUS\"; then\n"
+                + "    if ! " + tool + " -t nat -A \"" + chainVariable
                 + "\" -m mark --mark \"$DAEMON_MARK\" -j RETURN >> \"$LOG\" 2>&1; then\n"
-                + "    log_msg 'DNS daemon mark bypass unavailable; falling back to UID 0 OUTPUT bypass'\n"
+                + "      log_msg 'DNS daemon mark matcher unavailable; falling back to UID 0 OUTPUT bypass'\n"
+                + "      " + tool + " -t nat -A \"" + chainVariable
+                + "\" -m owner --uid-owner 0 -j RETURN >> \"$LOG\" 2>&1\n"
+                + "    fi\n"
+                + "  else\n"
+                + "    log_msg 'DNS daemon mark status unavailable; falling back to UID 0 OUTPUT bypass'\n"
                 + "    " + tool + " -t nat -A \"" + chainVariable
                 + "\" -m owner --uid-owner 0 -j RETURN >> \"$LOG\" 2>&1\n"
                 + "  fi\n";
@@ -2914,20 +2936,27 @@ public final class DnsHijackManager {
         commands.add(iptables + " " + args + " >/dev/null 2>&1 || true");
     }
 
-    private static void appendDaemonRecursionBypass(List<String> commands, String iptables,
-                                                    String chain) {
-        commands.add(buildDaemonRecursionBypassCommand(iptables, chain));
+    private static void appendDaemonRecursionBypass(Context context, List<String> commands,
+                                                    String iptables, String chain) {
+        commands.add(buildDaemonRecursionBypassCommand(
+                iptables, chain, new File(workDir(context), MARK_STATUS).getAbsolutePath()));
     }
 
-    private static String buildDaemonRecursionBypassCommand(String iptables, String chain) {
-        return "( " + iptables + " -t nat -A " + chain + " -m mark --mark "
+    private static String buildDaemonRecursionBypassCommand(String iptables, String chain,
+                                                            String markStatusPath) {
+        String status = shellQuote(markStatusPath);
+        return "( if [ -r " + status + " ] && grep -q '^supported ' " + status + "; then "
+                + iptables + " -t nat -A " + chain + " -m mark --mark "
                 + DAEMON_SOCKET_MARK + " -j RETURN >/dev/null 2>&1 || "
                 + iptables + " -t nat -A " + chain
-                + " -m owner --uid-owner 0 -j RETURN )";
+                + " -m owner --uid-owner 0 -j RETURN; else "
+                + iptables + " -t nat -A " + chain
+                + " -m owner --uid-owner 0 -j RETURN; fi )";
     }
 
-    private static String buildApplyDaemonRecursionBypassCommand(String chain) {
-        return buildDaemonRecursionBypassCommand("\"$IPTABLES\"", chain) + " #";
+    private static String buildApplyDaemonRecursionBypassCommand(Context context, String chain) {
+        return buildDaemonRecursionBypassCommand("\"$IPTABLES\"", chain,
+                new File(workDir(context), MARK_STATUS).getAbsolutePath()) + " #";
     }
 
     private static void appendTolerantIptables(List<String> commands, String iptables, String args) {
@@ -2959,7 +2988,7 @@ public final class DnsHijackManager {
         appendTolerantIptables(commands, iptables, "-t nat -F " + chain);
         appendTolerantIptables(commands, iptables, "-t nat -F " + preChain);
         appendTolerantIptables(commands, iptables, "-t nat -A " + chain + " -o lo -j RETURN");
-        appendDaemonRecursionBypass(commands, iptables, chain);
+        appendDaemonRecursionBypass(context, commands, iptables, chain);
         if (!appendOutputPolicyRules(commands, iptables + " -t nat -A " + chain, port, true)) {
             appendTolerantIptables(commands, iptables,
                     "-t nat -A " + chain + " -p udp --dport 53 -j REDIRECT --to-ports " + port);
@@ -2984,7 +3013,7 @@ public final class DnsHijackManager {
         commands.add(buildRedirectInstallVerificationCommand(context, ipv6));
     }
 
-    private static void appendRedirectRules(List<String> commands, boolean ipv6) {
+    private static void appendRedirectRules(Context context, List<String> commands, boolean ipv6) {
         int port = G.dnsHijackPort(DEFAULT_PORT);
         String chain = ipv6 ? CHAIN_V6 : CHAIN_V4;
         String preChain = ipv6 ? CHAIN_V6_PRE : CHAIN_V4_PRE;
@@ -2995,7 +3024,7 @@ public final class DnsHijackManager {
         commands.add("#NOCHK# -t nat -F " + preChain);
 
         commands.add("#NOCHK# -t nat -A " + chain + " -o lo -j RETURN");
-        commands.add("#LITERAL# " + buildApplyDaemonRecursionBypassCommand(chain));
+        commands.add("#LITERAL# " + buildApplyDaemonRecursionBypassCommand(context, chain));
         if (!appendOutputPolicyRules(commands, "#NOCHK# -t nat -A " + chain, port)) {
             commands.add("#NOCHK# -t nat -A " + chain + " -p udp --dport 53 -j REDIRECT --to-ports " + port);
             commands.add("#NOCHK# -t nat -A " + chain + " -p tcp --dport 53 -j REDIRECT --to-ports " + port);
@@ -3114,6 +3143,7 @@ public final class DnsHijackManager {
         config.append("control_socket=").append(new File(dir, SOCKET).getAbsolutePath()).append('\n');
         config.append("pid_file=").append(new File(dir, PID).getAbsolutePath()).append('\n');
         config.append("heartbeat_file=").append(new File(dir, HEARTBEAT).getAbsolutePath()).append('\n');
+        config.append("mark_status_file=").append(new File(dir, MARK_STATUS).getAbsolutePath()).append('\n');
         config.append("log_file=").append(new File(dir, QUERY_LOG).getAbsolutePath()).append('\n');
         config.append("cache_file=").append(new File(dir, "cache.snapshot").getAbsolutePath()).append('\n');
         config.append("fail_open=").append(G.dnsHijackFailOpen() ? "1" : "0").append('\n');
@@ -3629,6 +3659,7 @@ public final class DnsHijackManager {
         String supervisor = new File(dir, SUPERVISOR).getAbsolutePath();
         String marker = new File(dir, ENABLED_MARKER).getAbsolutePath();
         String log = new File(dir, BOOT_LOG).getAbsolutePath();
+        String markStatus = new File(dir, MARK_STATUS).getAbsolutePath();
         String iptables = Api.getBinaryPath(context, false);
         String ip6tables = Api.getBinaryPath(context, true);
         int port = G.dnsHijackPort(DEFAULT_PORT);
@@ -3643,6 +3674,7 @@ public final class DnsHijackManager {
                 + "IP6TABLES=" + shellQuote(ip6tables) + "\n"
                 + "PORT=" + port + "\n"
                 + "DAEMON_MARK=" + DAEMON_SOCKET_MARK + "\n"
+                + "MARK_STATUS=" + shellQuote(markStatus) + "\n"
                 + "IPV6_ENABLED=" + ipv6Enabled + "\n"
                 + "LOG=" + shellQuote(log) + "\n"
                 + "CHAIN4=" + CHAIN_V4 + "\n"

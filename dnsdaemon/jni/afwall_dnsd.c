@@ -216,6 +216,7 @@ typedef struct {
     char cache_file[256];
     char pid_file[256];
     char heartbeat_file[256];
+    char mark_status_file[256];
     safe_search_target_t safe_google;
     safe_search_target_t safe_youtube;
     safe_search_target_t safe_bing;
@@ -321,6 +322,7 @@ typedef struct {
     uint64_t uid_lookup_successes;
     uint64_t uid_lookup_misses;
     uint64_t uid_cache_hits;
+    uint64_t socket_mark_failures;
     uint64_t start_time;
 } stats_t;
 
@@ -390,6 +392,8 @@ static int g_udp_listener_v6_ready = 0;
 static int g_tcp_listener_v4_ready = 0;
 static int g_tcp_listener_v6_ready = 0;
 static int g_control_listener_ready = 0;
+static int g_socket_mark_supported = 0;
+static int g_socket_mark_errno = 0;
 
 static void write_control_response(int fd, const char *fmt, ...);
 
@@ -3020,11 +3024,59 @@ static void set_socket_buffers(int fd) {
     setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &size, sizeof(size));
 }
 
-static void mark_upstream_socket(int fd) {
+static bool set_socket_mark(int fd, bool count_failure) {
     int mark = AFWALL_DNSD_SOCKET_MARK;
-    if (fd >= 0) {
-        setsockopt(fd, SOL_SOCKET, SO_MARK, &mark, sizeof(mark));
+    if (fd < 0) {
+        return false;
     }
+    if (setsockopt(fd, SOL_SOCKET, SO_MARK, &mark, sizeof(mark)) == 0) {
+        return true;
+    }
+    if (count_failure) {
+        g_stats.socket_mark_failures++;
+    }
+    g_socket_mark_errno = errno;
+    return false;
+}
+
+static void write_socket_mark_status_file(void) {
+    FILE *fp;
+    if (g_cfg.mark_status_file[0] == '\0') {
+        return;
+    }
+    fp = fopen(g_cfg.mark_status_file, "w");
+    if (fp == NULL) {
+        return;
+    }
+    if (g_socket_mark_supported) {
+        fprintf(fp, "supported mark=0x%x failures=%llu\n",
+                AFWALL_DNSD_SOCKET_MARK,
+                (unsigned long long) g_stats.socket_mark_failures);
+    } else {
+        fprintf(fp, "failed mark=0x%x errno=%d failures=%llu\n",
+                AFWALL_DNSD_SOCKET_MARK,
+                g_socket_mark_errno,
+                (unsigned long long) g_stats.socket_mark_failures);
+    }
+    fclose(fp);
+    chmod(g_cfg.mark_status_file, 0644);
+}
+
+static void update_socket_mark_status(void) {
+    int fd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (fd < 0) {
+        g_socket_mark_supported = 0;
+        g_socket_mark_errno = errno;
+        write_socket_mark_status_file();
+        return;
+    }
+    g_socket_mark_supported = set_socket_mark(fd, false) ? 1 : 0;
+    close(fd);
+    write_socket_mark_status_file();
+}
+
+static void mark_upstream_socket(int fd) {
+    set_socket_mark(fd, true);
 }
 
 static bool socket_timed_out(void) {
@@ -3859,6 +3911,8 @@ static bool load_config(const char *path, config_t *new_cfg) {
             safe_copy(new_cfg->pid_file, sizeof(new_cfg->pid_file), value);
         } else if (strcmp(key, "heartbeat_file") == 0) {
             safe_copy(new_cfg->heartbeat_file, sizeof(new_cfg->heartbeat_file), value);
+        } else if (strcmp(key, "mark_status_file") == 0) {
+            safe_copy(new_cfg->mark_status_file, sizeof(new_cfg->mark_status_file), value);
         } else if (strcmp(key, "fail_open") == 0) {
             new_cfg->fail_open = atoi(value) != 0;
         } else if (strcmp(key, "strict_mode") == 0) {
@@ -4154,6 +4208,7 @@ static bool reload_config(void) {
     g_cache = next_cache;
     g_cache_capacity = g_cfg.cache_size;
     set_log_output(g_cfg.log_file, g_cfg.persist_query_logs != 0);
+    update_socket_mark_status();
     if (!g_cfg.query_logging) {
         clear_log_ring();
     }
@@ -4202,6 +4257,9 @@ static void write_validate_response(int client) {
             "udp_listener_v4=%d\nudp_listener_v6=%d\n"
             "tcp_listener_v4=%d\ntcp_listener_v6=%d\n"
             "control_socket_configured=%d\npid_file_configured=%d\nheartbeat_file_configured=%d\n"
+            "mark_status_file_configured=%d\n"
+            "daemon_socket_mark=0x%x\nsocket_mark_supported=%d\n"
+            "socket_mark_errno=%d\nsocket_mark_failures=%llu\n"
             "upstreams=%d\nsplit_upstreams=%d\n"
             "compiled_upstream_addresses=%d\nreusable_udp_upstream_sockets=%d\n"
             "rules_exact_allow=%d\nrules_suffix_allow=%d\n"
@@ -4236,6 +4294,11 @@ static void write_validate_response(int client) {
             candidate->control_socket[0] != '\0' ? 1 : 0,
             candidate->pid_file[0] != '\0' ? 1 : 0,
             candidate->heartbeat_file[0] != '\0' ? 1 : 0,
+            candidate->mark_status_file[0] != '\0' ? 1 : 0,
+            AFWALL_DNSD_SOCKET_MARK,
+            g_socket_mark_supported,
+            g_socket_mark_errno,
+            (unsigned long long) g_stats.socket_mark_failures,
             candidate->upstream_count,
             candidate->split_upstream_count,
             candidate_compiled_upstreams,
@@ -4977,6 +5040,8 @@ static void write_health_response(int client) {
             "compiled_upstream_addresses=%d\nreusable_udp_upstream_sockets=%d\n"
             "upstream_backoff_active=%d\n"
             "resolver_scope_hash=%llu\n"
+            "daemon_socket_mark=0x%x\nsocket_mark_supported=%d\n"
+            "socket_mark_errno=%d\nsocket_mark_failures=%llu\n"
             "reloads=%llu\nreload_failures=%llu\nvalidations=%llu\nvalidation_failures=%llu\n"
             "upstream_probe_ms=%d\nupstream_probe_index=%d\nupstream_probe_rcode=%d\n"
             "upstream_probe_dnssec=%d\nupstream_probe_dnssec_auth_required=%d\n"
@@ -5035,6 +5100,10 @@ static void write_health_response(int client) {
             reusable_udp_upstream_socket_count(&g_cfg),
             upstream_backoff_active_count(&g_cfg),
             (unsigned long long) g_cfg.resolver_scope_hash,
+            AFWALL_DNSD_SOCKET_MARK,
+            g_socket_mark_supported,
+            g_socket_mark_errno,
+            (unsigned long long) g_stats.socket_mark_failures,
             (unsigned long long) g_stats.reloads,
             (unsigned long long) g_stats.reload_failures,
             (unsigned long long) g_stats.validations,
@@ -5300,6 +5369,8 @@ static void handle_control(int fd) {
                 "uid_lookup_successes=%llu\nuid_lookup_misses=%llu\nuid_cache_hits=%llu\n"
                 "compiled_upstream_addresses=%d\nreusable_udp_upstream_sockets=%d\n"
                 "resolver_scope_hash=%llu\n"
+                "daemon_socket_mark=0x%x\nsocket_mark_supported=%d\n"
+                "socket_mark_errno=%d\nsocket_mark_failures=%llu\n"
                 "avg_latency_ms=%llu\nmax_latency_ms=%llu\nupstream_avg_latency_ms=%llu\n"
                 "reloads=%llu\nreload_failures=%llu\nvalidations=%llu\nvalidation_failures=%llu\n"
                 "exact_allow_index_size=%d\nexact_block_index_size=%d\n"
@@ -5406,6 +5477,10 @@ static void handle_control(int fd) {
                 compiled_upstream_address_count(&g_cfg),
                 reusable_udp_upstream_socket_count(&g_cfg),
                 (unsigned long long) g_cfg.resolver_scope_hash,
+                AFWALL_DNSD_SOCKET_MARK,
+                g_socket_mark_supported,
+                g_socket_mark_errno,
+                (unsigned long long) g_stats.socket_mark_failures,
                 (unsigned long long) div_u64(g_stats.total_latency_ms, g_stats.queries),
                 (unsigned long long) g_stats.max_latency_ms,
                 (unsigned long long) div_u64(g_stats.upstream_latency_ms, g_stats.upstream_requests),
