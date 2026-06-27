@@ -94,6 +94,8 @@ typedef struct {
     char host[128];
     int port;
     upstream_protocol_t protocol;
+    struct sockaddr_storage addr;
+    socklen_t addr_len;
 } upstream_t;
 
 typedef struct {
@@ -1549,12 +1551,58 @@ static void cache_store(const char *domain, uint16_t qtype, const uint8_t *respo
     }
 }
 
+static void compile_upstream_address(upstream_t *upstream) {
+    struct sockaddr_in *addr4;
+    struct sockaddr_in6 *addr6;
+    if (upstream == NULL || upstream->host[0] == '\0') {
+        return;
+    }
+    memset(&upstream->addr, 0, sizeof(upstream->addr));
+    upstream->addr_len = 0;
+    addr4 = (struct sockaddr_in *) &upstream->addr;
+    if (inet_pton(AF_INET, upstream->host, &addr4->sin_addr) == 1) {
+        addr4->sin_family = AF_INET;
+        addr4->sin_port = htons((uint16_t) upstream->port);
+        upstream->addr_len = sizeof(*addr4);
+        return;
+    }
+    addr6 = (struct sockaddr_in6 *) &upstream->addr;
+    if (inet_pton(AF_INET6, upstream->host, &addr6->sin6_addr) == 1) {
+        addr6->sin6_family = AF_INET6;
+        addr6->sin6_port = htons((uint16_t) upstream->port);
+        upstream->addr_len = sizeof(*addr6);
+    }
+}
+
+static void set_socket_timeout(int fd, int timeout_ms) {
+    struct timeval timeout;
+    timeout.tv_sec = timeout_ms / 1000;
+    timeout.tv_usec = (timeout_ms % 1000) * 1000;
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
+}
+
 static int connect_upstream(const upstream_t *upstream, int socktype, int timeout_ms) {
     struct addrinfo hints;
     struct addrinfo *res = NULL;
     struct addrinfo *rp;
     char port[16];
     int fd = -1;
+    if (upstream == NULL) {
+        return -1;
+    }
+    if (upstream->addr_len > 0) {
+        fd = socket(upstream->addr.ss_family, socktype, 0);
+        if (fd < 0) {
+            return -1;
+        }
+        set_socket_timeout(fd, timeout_ms);
+        if (connect(fd, (const struct sockaddr *) &upstream->addr, upstream->addr_len) == 0) {
+            return fd;
+        }
+        close(fd);
+        return -1;
+    }
     snprintf(port, sizeof(port), "%d", upstream->port);
     memset(&hints, 0, sizeof(hints));
     hints.ai_family = AF_UNSPEC;
@@ -1563,15 +1611,11 @@ static int connect_upstream(const upstream_t *upstream, int socktype, int timeou
         return -1;
     }
     for (rp = res; rp != NULL; rp = rp->ai_next) {
-        struct timeval timeout;
         fd = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
         if (fd < 0) {
             continue;
         }
-        timeout.tv_sec = timeout_ms / 1000;
-        timeout.tv_usec = (timeout_ms % 1000) * 1000;
-        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
-        setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
+        set_socket_timeout(fd, timeout_ms);
         if (connect(fd, rp->ai_addr, rp->ai_addrlen) == 0) {
             break;
         }
@@ -1618,6 +1662,25 @@ static const upstream_t *select_upstreams(const config_t *cfg, const char *domai
         *route = "upstream";
     }
     return cfg->upstreams;
+}
+
+static int compiled_upstream_address_count(const config_t *cfg) {
+    int i;
+    int count = 0;
+    if (cfg == NULL) {
+        return 0;
+    }
+    for (i = 0; i < cfg->upstream_count; i++) {
+        if (cfg->upstreams[i].addr_len > 0) {
+            count++;
+        }
+    }
+    for (i = 0; i < cfg->split_upstream_count; i++) {
+        if (cfg->split_upstreams[i].upstream.addr_len > 0) {
+            count++;
+        }
+    }
+    return count;
 }
 
 static bool dns_response_truncated(const uint8_t *response, size_t response_len);
@@ -1845,6 +1908,7 @@ static void default_config(config_t *cfg) {
     safe_copy(cfg->upstreams[0].host, sizeof(cfg->upstreams[0].host), "1.1.1.1");
     cfg->upstreams[0].port = 53;
     cfg->upstreams[0].protocol = UPSTREAM_PROTO_AUTO;
+    compile_upstream_address(&cfg->upstreams[0]);
 }
 
 static bool parse_upstream_value(const char *value, upstream_t *upstream) {
@@ -1894,7 +1958,11 @@ static bool parse_upstream_value(const char *value, upstream_t *upstream) {
     if (upstream->port <= 0 || upstream->port > 65535) {
         upstream->port = 53;
     }
-    return upstream->host[0] != '\0';
+    if (upstream->host[0] == '\0') {
+        return false;
+    }
+    compile_upstream_address(upstream);
+    return true;
 }
 
 static bool parse_upstream(config_t *cfg, const char *value) {
@@ -2085,6 +2153,7 @@ static bool load_config(const char *path, config_t *new_cfg) {
         safe_copy(new_cfg->upstreams[0].host, sizeof(new_cfg->upstreams[0].host), "1.1.1.1");
         new_cfg->upstreams[0].port = 53;
         new_cfg->upstreams[0].protocol = UPSTREAM_PROTO_AUTO;
+        compile_upstream_address(&new_cfg->upstreams[0]);
         new_cfg->upstream_count = 1;
     }
     if (!build_exact_index(&new_cfg->exact_allow, &new_cfg->exact_allow_index,
@@ -2519,6 +2588,7 @@ static void write_health_response(int client) {
     write_control_response(client,
             "health=1\nrunning=1\npid=%ld\nuptime=%llu\nlisten_port=%d\n"
             "generation=%llu\nupstreams=%d\nsplit_upstreams=%d\nupstream_probe=%s\n"
+            "compiled_upstream_addresses=%d\n"
             "upstream_probe_ms=%d\nupstream_probe_index=%d\nupstream_probe_rcode=%d\n"
             "queries=%llu\nblocked=%llu\nallowed=%llu\ncache_size=%d\ncache_entries=%d\n"
             "cache_positive_entries=%d\ncache_negative_entries=%d\n"
@@ -2540,6 +2610,7 @@ static void write_health_response(int client) {
             g_cfg.upstream_count,
             g_cfg.split_upstream_count,
             response_len > 0 ? "ok" : "fail",
+            compiled_upstream_address_count(&g_cfg),
             latency_ms,
             upstream_index,
             rcode,
@@ -2714,6 +2785,7 @@ static void handle_control(int fd) {
                 "cache_lru_evictions=%llu\n"
                 "upstream_requests=%llu\nupstream_successes=%llu\nupstream_failures=%llu\n"
                 "upstream_tcp_fallbacks=%llu\nupstream_truncated_responses=%llu\n"
+                "compiled_upstream_addresses=%d\n"
                 "avg_latency_ms=%llu\nmax_latency_ms=%llu\nupstream_avg_latency_ms=%llu\n"
                 "reloads=%llu\nexact_allow_index_size=%d\nexact_block_index_size=%d\n"
                 "suffix_allow_trie_nodes=%d\n"
@@ -2763,6 +2835,7 @@ static void handle_control(int fd) {
                 (unsigned long long) g_stats.upstream_failures,
                 (unsigned long long) g_stats.upstream_tcp_fallbacks,
                 (unsigned long long) g_stats.upstream_truncated_responses,
+                compiled_upstream_address_count(&g_cfg),
                 (unsigned long long) div_u64(g_stats.total_latency_ms, g_stats.queries),
                 (unsigned long long) g_stats.max_latency_ms,
                 (unsigned long long) div_u64(g_stats.upstream_latency_ms, g_stats.upstream_requests),
