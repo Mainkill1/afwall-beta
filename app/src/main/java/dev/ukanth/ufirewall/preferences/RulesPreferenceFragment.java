@@ -16,6 +16,7 @@ import android.preference.CheckBoxPreference;
 import android.preference.Preference;
 import android.preference.PreferenceFragment;
 import android.preference.SwitchPreference;
+import android.provider.Settings;
 import android.widget.Toast;
 
 import com.afollestad.materialdialogs.MaterialDialog;
@@ -84,6 +85,15 @@ public class RulesPreferenceFragment extends PreferenceFragment implements
                 return true;
             });
         }
+
+        Preference powerSettings = findPreference("dnsHijackPowerSettings");
+        if (powerSettings != null) {
+            powerSettings.setOnPreferenceClickListener(preference -> {
+                openDnsPowerSettings();
+                return true;
+            });
+        }
+        updateDnsPowerSettingsSummary();
     }
 
     private void wireDnsBlocklistActions() {
@@ -574,6 +584,7 @@ public class RulesPreferenceFragment extends PreferenceFragment implements
         super.onResume();
         getPreferenceManager().getSharedPreferences()
                 .registerOnSharedPreferenceChangeListener(this);
+        updateDnsPowerSettingsSummary();
 
     }
 
@@ -892,6 +903,68 @@ public class RulesPreferenceFragment extends PreferenceFragment implements
                 });
             }
         });
+    }
+
+    private void openDnsPowerSettings() {
+        if (ctx == null) {
+            return;
+        }
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
+            ApplicationErrorLog.add(ctx,
+                    "DNS power settings requested but Android battery optimization controls are unavailable");
+            Api.toast(ctx, getString(R.string.dns_hijack_power_settings_summary_unsupported));
+            return;
+        }
+
+        String powerState = dnsPowerStateForLog();
+        Intent intent = new Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS);
+        if (intent.resolveActivity(ctx.getPackageManager()) != null) {
+            ApplicationErrorLog.add(ctx, "DNS power settings opened; app_battery_optimized=" + powerState);
+            Api.toast(ctx, getString(R.string.dns_hijack_power_settings_opening));
+            startActivity(intent);
+            return;
+        }
+
+        Intent fallback = new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS);
+        fallback.setData(Uri.parse("package:" + ctx.getPackageName()));
+        if (fallback.resolveActivity(ctx.getPackageManager()) != null) {
+            ApplicationErrorLog.add(ctx, "DNS app power details opened; app_battery_optimized=" + powerState);
+            Api.toast(ctx, getString(R.string.dns_hijack_power_settings_opening));
+            startActivity(fallback);
+            return;
+        }
+
+        ApplicationErrorLog.add(ctx, "DNS power settings unavailable; app_battery_optimized=" + powerState);
+        Api.toast(ctx, getString(R.string.dns_hijack_power_settings_unavailable));
+    }
+
+    private void updateDnsPowerSettingsSummary() {
+        Preference powerSettings = findPreference("dnsHijackPowerSettings");
+        if (powerSettings == null) {
+            return;
+        }
+        if (ctx == null || Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
+            powerSettings.setSummary(R.string.dns_hijack_power_settings_summary_unsupported);
+            return;
+        }
+        try {
+            powerSettings.setSummary(Api.batteryOptimized(ctx)
+                    ? R.string.dns_hijack_power_settings_summary_optimized
+                    : R.string.dns_hijack_power_settings_summary_unrestricted);
+        } catch (RuntimeException e) {
+            powerSettings.setSummary(R.string.dns_hijack_power_settings_summary_unknown);
+        }
+    }
+
+    private String dnsPowerStateForLog() {
+        if (ctx == null || Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
+            return "unsupported";
+        }
+        try {
+            return String.valueOf(Api.batteryOptimized(ctx));
+        } catch (RuntimeException e) {
+            return "unknown";
+        }
     }
 
     private void setDnsHijackChecked(boolean enabled) {

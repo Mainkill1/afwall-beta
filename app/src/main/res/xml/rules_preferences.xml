@@ -184,6 +184,12 @@
 
         <Preference
             android:dependency="enableDnsHijack"
+            android:key="dnsHijackPowerSettings"
+            android:summary="@string/dns_hijack_power_settings_summary_unknown"
+            android:title="@string/dns_hijack_power_settings_title" />
+
+        <Preference
+            android:dependency="enableDnsHijack"
             android:key="dnsHijackRepairService"
             android:summary="@string/dns_hijack_repair_service_summary"
             android:title="@string/dns_hijack_repair_service_title" />
