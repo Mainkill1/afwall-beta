@@ -265,6 +265,7 @@ public final class DnsHijackManager {
         out.append("fail_open=").append(G.dnsHijackFailOpen()).append('\n');
         out.append("strict_mode=").append(G.dnsHijackStrictMode()).append('\n');
         out.append("safe_search=").append(G.dnsHijackSafeSearch()).append('\n');
+        out.append("dnssec_request=").append(G.dnsHijackDnssecRequest()).append('\n');
         out.append("timeout_ms=").append(G.dnsHijackTimeoutMs()).append('\n');
         out.append("cache_size=").append(G.dnsHijackCacheSize()).append('\n');
         out.append("stale_cache_seconds=").append(G.dnsHijackStaleCacheSeconds()).append('\n');
@@ -1664,6 +1665,7 @@ public final class DnsHijackManager {
         config.append("persist_cache=").append(G.dnsHijackPersistCache() ? "1" : "0").append('\n');
         config.append("query_logging=").append(G.dnsHijackQueryLogging() ? "1" : "0").append('\n');
         config.append("persist_query_logs=").append(G.dnsHijackPersistQueryLogs() ? "1" : "0").append('\n');
+        config.append("dnssec_request=").append(G.dnsHijackDnssecRequest() ? "1" : "0").append('\n');
         appendSafeSearchConfigEntries(context, config);
 
         appendResolvedUpstreamConfigEntries(context, config, "upstream", G.dnsHijackUpstreams());

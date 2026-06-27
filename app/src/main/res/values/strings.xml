@@ -326,6 +326,8 @@
     <string name="dns_hijack_strict_summary">When enabled, exact and wildcard block rules can override allow rules.</string>
     <string name="dns_hijack_safe_search_title">Force SafeSearch</string>
     <string name="dns_hijack_safe_search_summary">Return daemon-local safe search DNS answers for supported search and video providers.</string>
+    <string name="dns_hijack_dnssec_request_title">Request DNSSEC records</string>
+    <string name="dns_hijack_dnssec_request_summary">Ask upstream resolvers for DNSSEC material with EDNS(0). This forwards DNSSEC data but does not perform local validation.</string>
     <string name="dns_hijack_boot_persistence_title">Restore DNS filtering at boot</string>
     <string name="dns_hijack_boot_persistence_summary">Install a root boot script that restarts the DNS daemon and restores DNS redirect rules before opening the app.</string>
     <string name="dns_hijack_timeout_title">Upstream timeout</string>

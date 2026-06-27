@@ -55,15 +55,18 @@
 #define DEFAULT_STALE_CACHE_SECONDS 300
 #define MAX_STALE_CACHE_SECONDS 86400
 #define CACHE_SNAPSHOT_MAGIC "AFWDNSC1"
-#define CACHE_SNAPSHOT_VERSION 1
+#define CACHE_SNAPSHOT_VERSION 2
 #define DNS_SOCKET_BUFFER_BYTES 262144
 #define UDP_DRAIN_LIMIT 32
 #define UID_UNKNOWN -1
 #define UID_CACHE_SIZE 128
 #define UID_CACHE_TTL 15
 #define DNS_QTYPE_A 1
+#define DNS_QTYPE_OPT 41
 #define DNS_QTYPE_AAAA 28
 #define DNS_CLASS_IN 1
+#define DNSSEC_DO_FLAG 0x8000u
+#define DNSSEC_UDP_PAYLOAD_SIZE 4096
 #define SAFE_SEARCH_TTL 300
 
 #ifndef MSG_DONTWAIT
@@ -188,6 +191,7 @@ typedef struct {
     int query_logging;
     int persist_query_logs;
     int safe_search;
+    int dnssec_request;
     char control_socket[256];
     char log_file[256];
     char cache_file[256];
@@ -266,6 +270,11 @@ typedef struct {
     uint64_t fail_open_drops;
     uint64_t fail_closed_blocks;
     uint64_t safe_search_rewrites;
+    uint64_t dnssec_queries;
+    uint64_t dnssec_client_queries;
+    uint64_t dnssec_opt_added;
+    uint64_t dnssec_opt_updated;
+    uint64_t dnssec_prepare_failures;
     uint64_t upstream_requests;
     uint64_t upstream_successes;
     uint64_t upstream_failures;
@@ -312,6 +321,7 @@ typedef struct {
     uint32_t hash;
     bool used;
     bool negative;
+    bool dnssec;
     bool expired_reported;
 } cache_entry_t;
 
@@ -399,7 +409,7 @@ static void safe_copy(char *dst, size_t dst_len, const char *src) {
     dst[dst_len - 1] = '\0';
 }
 
-static uint32_t hash_domain(const char *domain, uint16_t qtype) {
+static uint32_t hash_domain_cache_key(const char *domain, uint16_t qtype, bool dnssec) {
     uint32_t h = 2166136261u;
     const unsigned char *p = (const unsigned char *) domain;
     while (*p) {
@@ -410,7 +420,13 @@ static uint32_t hash_domain(const char *domain, uint16_t qtype) {
     h *= 16777619u;
     h ^= (qtype >> 8) & 0xffu;
     h *= 16777619u;
+    h ^= dnssec ? 1u : 0u;
+    h *= 16777619u;
     return h;
+}
+
+static uint32_t hash_domain(const char *domain, uint16_t qtype) {
+    return hash_domain_cache_key(domain, qtype, false);
 }
 
 static uint64_t div_u64(uint64_t numerator, uint64_t denominator) {
@@ -1975,6 +1991,154 @@ static bool read_rr_header(const uint8_t *packet, size_t len, size_t *pos,
     return true;
 }
 
+static bool find_dns_opt_record(const uint8_t *packet, size_t len,
+                                bool *has_opt, bool *has_do, size_t *z_flags_pos) {
+    uint16_t qd;
+    uint16_t an;
+    uint16_t ns;
+    uint16_t ar;
+    uint32_t total_rrs;
+    uint32_t i;
+    size_t pos = 12;
+    if (has_opt != NULL) {
+        *has_opt = false;
+    }
+    if (has_do != NULL) {
+        *has_do = false;
+    }
+    if (z_flags_pos != NULL) {
+        *z_flags_pos = 0;
+    }
+    if (packet == NULL || len < 12) {
+        return false;
+    }
+    qd = read_u16(packet + 4);
+    an = read_u16(packet + 6);
+    ns = read_u16(packet + 8);
+    ar = read_u16(packet + 10);
+    for (i = 0; i < qd; i++) {
+        pos = skip_name(packet, len, pos);
+        if (pos + 4 > len) {
+            return false;
+        }
+        pos += 4;
+    }
+    total_rrs = (uint32_t) an + (uint32_t) ns;
+    for (i = 0; i < total_rrs; i++) {
+        uint16_t type;
+        uint16_t rdlen;
+        uint32_t ttl;
+        size_t rdata_pos;
+        if (!read_rr_header(packet, len, &pos, &type, &ttl, &rdlen, &rdata_pos)) {
+            return false;
+        }
+    }
+    for (i = 0; i < ar; i++) {
+        uint16_t type;
+        uint16_t rdlen;
+        size_t rr_pos = skip_name(packet, len, pos);
+        size_t rdata_pos;
+        if (rr_pos + 10 > len) {
+            return false;
+        }
+        type = read_u16(packet + rr_pos);
+        rdlen = read_u16(packet + rr_pos + 8);
+        rdata_pos = rr_pos + 10;
+        if (rdata_pos + rdlen > len) {
+            return false;
+        }
+        if (type == DNS_QTYPE_OPT) {
+            uint16_t z_flags = read_u16(packet + rr_pos + 6);
+            if (has_opt != NULL) {
+                *has_opt = true;
+            }
+            if (has_do != NULL) {
+                *has_do = (z_flags & DNSSEC_DO_FLAG) != 0;
+            }
+            if (z_flags_pos != NULL) {
+                *z_flags_pos = rr_pos + 6;
+            }
+            return true;
+        }
+        pos = rdata_pos + rdlen;
+    }
+    return true;
+}
+
+static bool dns_query_requests_dnssec(const uint8_t *query, size_t query_len) {
+    bool has_do = false;
+    if (!find_dns_opt_record(query, query_len, NULL, &has_do, NULL)) {
+        return false;
+    }
+    return has_do;
+}
+
+static bool prepare_dnssec_query(const uint8_t *query, size_t query_len,
+                                 uint8_t *out, size_t out_len, size_t *prepared_len,
+                                 bool *added_opt, bool *updated_opt) {
+    bool has_opt = false;
+    bool has_do = false;
+    size_t z_flags_pos = 0;
+    uint16_t ar;
+    size_t pos;
+    if (prepared_len != NULL) {
+        *prepared_len = 0;
+    }
+    if (added_opt != NULL) {
+        *added_opt = false;
+    }
+    if (updated_opt != NULL) {
+        *updated_opt = false;
+    }
+    if (query == NULL || out == NULL || query_len < 12 || query_len > out_len
+            || !find_dns_opt_record(query, query_len, &has_opt, &has_do, &z_flags_pos)) {
+        return false;
+    }
+    memcpy(out, query, query_len);
+    if (has_do) {
+        if (prepared_len != NULL) {
+            *prepared_len = query_len;
+        }
+        return true;
+    }
+    if (has_opt) {
+        uint16_t z_flags = (uint16_t) (read_u16(out + z_flags_pos) | DNSSEC_DO_FLAG);
+        write_u16(out + z_flags_pos, z_flags);
+        if (updated_opt != NULL) {
+            *updated_opt = true;
+        }
+        if (prepared_len != NULL) {
+            *prepared_len = query_len;
+        }
+        return true;
+    }
+    if (query_len + 11 > out_len) {
+        return false;
+    }
+    ar = read_u16(out + 10);
+    if (ar == UINT16_MAX) {
+        return false;
+    }
+    write_u16(out + 10, (uint16_t) (ar + 1));
+    pos = query_len;
+    out[pos++] = 0;
+    write_u16(out + pos, DNS_QTYPE_OPT);
+    pos += 2;
+    write_u16(out + pos, DNSSEC_UDP_PAYLOAD_SIZE);
+    pos += 2;
+    write_u32(out + pos, DNSSEC_DO_FLAG);
+    pos += 4;
+    write_u16(out + pos, 0);
+    pos += 2;
+    if (added_opt != NULL) {
+        *added_opt = true;
+    }
+    if (prepared_len != NULL) {
+        *prepared_len = pos;
+    }
+    return true;
+}
+
 static uint32_t clamp_cache_ttl(uint32_t ttl, uint32_t fallback) {
     if (ttl == 0 || ttl == UINT32_MAX) {
         ttl = fallback;
@@ -2110,9 +2274,10 @@ static void rewrite_cached_response_ttls(uint8_t *packet, size_t len, time_t cac
     g_stats.cache_ttl_rewrites++;
 }
 
-static bool cache_lookup(const char *domain, uint16_t qtype, const uint8_t *query,
-                         uint8_t *out, size_t *out_len, bool *negative) {
-    uint32_t h = hash_domain(domain, qtype);
+static bool cache_lookup(const char *domain, uint16_t qtype, bool dnssec,
+                         const uint8_t *query, uint8_t *out, size_t *out_len,
+                         bool *negative) {
+    uint32_t h = hash_domain_cache_key(domain, qtype, dnssec);
     uint32_t start;
     uint32_t i;
     time_t now = time(NULL);
@@ -2125,7 +2290,8 @@ static bool cache_lookup(const char *domain, uint16_t qtype, const uint8_t *quer
         if (!entry->used) {
             continue;
         }
-        if (entry->hash == h && entry->qtype == qtype && strcmp(entry->domain, domain) == 0) {
+        if (entry->hash == h && entry->qtype == qtype && entry->dnssec == dnssec
+                && strcmp(entry->domain, domain) == 0) {
             uint32_t remaining;
             uint64_t lifetime_remaining;
             if (entry->expires_at <= now) {
@@ -2153,10 +2319,10 @@ static bool cache_lookup(const char *domain, uint16_t qtype, const uint8_t *quer
     return false;
 }
 
-static bool cache_lookup_stale(const char *domain, uint16_t qtype, const uint8_t *query,
-                               uint8_t *out, size_t *out_len, bool *negative,
-                               int stale_seconds) {
-    uint32_t h = hash_domain(domain, qtype);
+static bool cache_lookup_stale(const char *domain, uint16_t qtype, bool dnssec,
+                               const uint8_t *query, uint8_t *out, size_t *out_len,
+                               bool *negative, int stale_seconds) {
+    uint32_t h = hash_domain_cache_key(domain, qtype, dnssec);
     uint32_t start;
     uint32_t i;
     time_t now = time(NULL);
@@ -2170,7 +2336,8 @@ static bool cache_lookup_stale(const char *domain, uint16_t qtype, const uint8_t
         if (!entry->used) {
             continue;
         }
-        if (entry->hash != h || entry->qtype != qtype || strcmp(entry->domain, domain) != 0) {
+        if (entry->hash != h || entry->qtype != qtype || entry->dnssec != dnssec
+                || strcmp(entry->domain, domain) != 0) {
             continue;
         }
         if (entry->expires_at > now) {
@@ -2210,7 +2377,8 @@ static bool response_cacheable(const uint8_t *response, size_t response_len) {
     return rcode == 0 || rcode == 3;
 }
 
-static void cache_store(const char *domain, uint16_t qtype, const uint8_t *response, size_t response_len) {
+static void cache_store(const char *domain, uint16_t qtype, bool dnssec,
+                        const uint8_t *response, size_t response_len) {
     uint32_t h;
     uint32_t slot;
     uint32_t ttl;
@@ -2231,7 +2399,7 @@ static void cache_store(const char *domain, uint16_t qtype, const uint8_t *respo
     if (ttl == 0) {
         return;
     }
-    h = hash_domain(domain, qtype);
+    h = hash_domain_cache_key(domain, qtype, dnssec);
     slot = h % (uint32_t) g_cache_capacity;
     entry = NULL;
     for (i = 0; i < (uint32_t) g_cache_capacity; i++) {
@@ -2244,6 +2412,7 @@ static void cache_store(const char *domain, uint16_t qtype, const uint8_t *respo
         }
         if (candidate->used && candidate->hash == h
                 && candidate->qtype == qtype
+                && candidate->dnssec == dnssec
                 && strcmp(candidate->domain, domain) == 0) {
             entry = candidate;
             break;
@@ -2269,6 +2438,7 @@ static void cache_store(const char *domain, uint16_t qtype, const uint8_t *respo
     memset(entry, 0, sizeof(*entry));
     safe_copy(entry->domain, sizeof(entry->domain), domain);
     entry->qtype = qtype;
+    entry->dnssec = dnssec;
     entry->hash = h;
     memcpy(entry->response, response, response_len);
     entry->response_len = response_len;
@@ -2305,6 +2475,7 @@ static bool cache_insert_existing(cache_entry_t *cache, int capacity,
         }
         if (candidate->used && candidate->hash == source->hash
                 && candidate->qtype == source->qtype
+                && candidate->dnssec == source->dnssec
                 && strcmp(candidate->domain, source->domain) == 0) {
             entry = candidate;
             break;
@@ -2415,6 +2586,7 @@ static bool write_cache_snapshot(const config_t *cfg, const cache_entry_t *cache
         uint16_t domain_len;
         uint16_t response_len;
         uint8_t negative;
+        uint8_t dnssec;
         int64_t cached_at;
         int64_t expires_at;
         if (!entry->used || entry->expires_at <= now || entry->response_len == 0
@@ -2424,6 +2596,7 @@ static bool write_cache_snapshot(const config_t *cfg, const cache_entry_t *cache
         domain_len = (uint16_t) strlen(entry->domain);
         response_len = (uint16_t) entry->response_len;
         negative = entry->negative ? 1 : 0;
+        dnssec = entry->dnssec ? 1 : 0;
         cached_at = (int64_t) entry->cached_at;
         expires_at = (int64_t) entry->expires_at;
         if (domain_len == 0 || domain_len >= MAX_DOMAIN
@@ -2431,6 +2604,7 @@ static bool write_cache_snapshot(const config_t *cfg, const cache_entry_t *cache
                 || fwrite(&domain_len, sizeof(domain_len), 1, fp) != 1
                 || fwrite(&response_len, sizeof(response_len), 1, fp) != 1
                 || fwrite(&negative, sizeof(negative), 1, fp) != 1
+                || fwrite(&dnssec, sizeof(dnssec), 1, fp) != 1
                 || fwrite(&cached_at, sizeof(cached_at), 1, fp) != 1
                 || fwrite(&expires_at, sizeof(expires_at), 1, fp) != 1
                 || fwrite(entry->domain, 1, domain_len, fp) != domain_len
@@ -2488,6 +2662,7 @@ static bool load_cache_snapshot(const config_t *cfg, cache_entry_t *cache, int c
         uint16_t domain_len;
         uint16_t response_len;
         uint8_t negative;
+        uint8_t dnssec;
         int64_t cached_at;
         int64_t expires_at;
         memset(&entry, 0, sizeof(entry));
@@ -2495,6 +2670,7 @@ static bool load_cache_snapshot(const config_t *cfg, cache_entry_t *cache, int c
                 || fread(&domain_len, sizeof(domain_len), 1, fp) != 1
                 || fread(&response_len, sizeof(response_len), 1, fp) != 1
                 || fread(&negative, sizeof(negative), 1, fp) != 1
+                || fread(&dnssec, sizeof(dnssec), 1, fp) != 1
                 || fread(&cached_at, sizeof(cached_at), 1, fp) != 1
                 || fread(&expires_at, sizeof(expires_at), 1, fp) != 1
                 || domain_len == 0 || domain_len >= MAX_DOMAIN
@@ -2510,7 +2686,8 @@ static bool load_cache_snapshot(const config_t *cfg, cache_entry_t *cache, int c
         entry.cached_at = (time_t) cached_at;
         entry.last_access = now;
         entry.expires_at = (time_t) expires_at;
-        entry.hash = hash_domain(entry.domain, entry.qtype);
+        entry.dnssec = dnssec != 0;
+        entry.hash = hash_domain_cache_key(entry.domain, entry.qtype, entry.dnssec);
         entry.used = true;
         entry.negative = negative != 0;
         if (entry.expires_at > now && cache_insert_existing(cache, capacity, &entry, now)) {
@@ -2560,6 +2737,7 @@ static uint64_t compute_resolver_scope_hash(const config_t *cfg) {
     for (i = 0; i < cfg->upstream_count; i++) {
         hash = hash_scope_upstream(hash, &cfg->upstreams[i]);
     }
+    hash = hash_scope_u64(hash, (uint64_t) cfg->dnssec_request);
     hash = hash_scope_u64(hash, (uint64_t) cfg->split_upstream_count);
     for (i = 0; i < cfg->split_upstream_count; i++) {
         hash = hash_scope_string(hash, cfg->split_upstreams[i].suffix);
@@ -3055,6 +3233,7 @@ static void default_config(config_t *cfg) {
     cfg->persist_cache = 0;
     cfg->query_logging = 1;
     cfg->persist_query_logs = 1;
+    cfg->dnssec_request = 0;
     safe_copy(cfg->control_socket, sizeof(cfg->control_socket), "/data/local/tmp/afwall_dnsd.sock");
     cfg->upstream_count = 1;
     init_upstream_runtime(&cfg->upstreams[0]);
@@ -3301,6 +3480,8 @@ static bool load_config(const char *path, config_t *new_cfg) {
             new_cfg->persist_query_logs = config_bool_value(value);
         } else if (strcmp(key, "safe_search") == 0) {
             new_cfg->safe_search = config_bool_value(value);
+        } else if (strcmp(key, "dnssec_request") == 0) {
+            new_cfg->dnssec_request = config_bool_value(value);
         } else if (strcmp(key, "safe_search_address") == 0) {
             parse_safe_search_address(new_cfg, value);
         } else if (strcmp(key, "upstream") == 0) {
@@ -3596,6 +3777,7 @@ static void write_validate_response(int client) {
             "rules_regex_allow=%d\nrules_regex_block=%d\n"
             "rules_temp_allow=%d\nrules_temp_block=%d\n"
             "cache_size=%d\nstale_cache_seconds=%d\npersist_cache=%d\n"
+            "dnssec_request=%d\n"
             "cache_file_configured=%d\nresolver_scope_hash=%llu\n",
             (unsigned long long) g_cfg.generation,
             (unsigned long long) candidate->generation,
@@ -3618,6 +3800,7 @@ static void write_validate_response(int client) {
             candidate->cache_size,
             candidate->stale_cache_seconds,
             candidate->persist_cache,
+            candidate->dnssec_request,
             candidate->cache_file[0] != '\0' ? 1 : 0,
             (unsigned long long) candidate->resolver_scope_hash);
     free_config_dynamic(candidate);
@@ -3741,6 +3924,11 @@ static void handle_dns_query(config_t *cfg, const uint8_t *query, size_t query_l
     struct timeval upstream_end;
     int upstream_latency_ms;
     bool cache_negative = false;
+    bool client_dnssec;
+    bool upstream_dnssec;
+    uint8_t dnssec_query[MAX_PACKET];
+    const uint8_t *forward_query = query;
+    size_t forward_query_len = query_len;
     const char *transport = tcp ? "tcp" : "udp";
     gettimeofday(&start, NULL);
     g_stats.queries++;
@@ -3757,6 +3945,14 @@ static void handle_dns_query(config_t *cfg, const uint8_t *query, size_t query_l
         finish_dns_query("unknown", "invalid", transport, source, uid, qtype,
                 "block", "parse", "none", &start);
         return;
+    }
+    client_dnssec = dns_query_requests_dnssec(query, query_len);
+    upstream_dnssec = client_dnssec || cfg->dnssec_request;
+    if (client_dnssec) {
+        g_stats.dnssec_client_queries++;
+    }
+    if (upstream_dnssec) {
+        g_stats.dnssec_queries++;
     }
     if (evaluate_domain(cfg, domain, uid, &reason) == DECISION_BLOCK) {
         *response_len = build_block_response(query, query_len, response, MAX_PACKET);
@@ -3776,7 +3972,27 @@ static void handle_dns_query(config_t *cfg, const uint8_t *query, size_t query_l
                 "allow", "safe_search", "local", &start);
         return;
     }
-    if (cache_lookup(domain, qtype, query, response, response_len, &cache_negative)) {
+    if (cfg->dnssec_request && !client_dnssec) {
+        size_t prepared_len = 0;
+        bool added_opt = false;
+        bool updated_opt = false;
+        if (prepare_dnssec_query(query, query_len, dnssec_query, sizeof(dnssec_query),
+                &prepared_len, &added_opt, &updated_opt)) {
+            forward_query = dnssec_query;
+            forward_query_len = prepared_len;
+            if (added_opt) {
+                g_stats.dnssec_opt_added++;
+            }
+            if (updated_opt) {
+                g_stats.dnssec_opt_updated++;
+            }
+        } else {
+            g_stats.dnssec_prepare_failures++;
+            upstream_dnssec = false;
+        }
+    }
+    if (cache_lookup(domain, qtype, upstream_dnssec, query, response, response_len,
+            &cache_negative)) {
         g_stats.cache_hits++;
         if (cache_negative) {
             g_stats.cache_negative_hits++;
@@ -3793,8 +4009,8 @@ static void handle_dns_query(config_t *cfg, const uint8_t *query, size_t query_l
     g_stats.upstream_requests++;
     gettimeofday(&upstream_start, NULL);
     forwarded = tcp
-            ? forward_tcp(cfg, domain, query, query_len, response, MAX_PACKET, &route)
-            : forward_udp(cfg, domain, query, query_len, response, MAX_PACKET, &route);
+            ? forward_tcp(cfg, domain, forward_query, forward_query_len, response, MAX_PACKET, &route)
+            : forward_udp(cfg, domain, forward_query, forward_query_len, response, MAX_PACKET, &route);
     gettimeofday(&upstream_end, NULL);
     upstream_latency_ms = elapsed_ms(&upstream_start, &upstream_end);
     if (upstream_latency_ms > 0) {
@@ -3803,7 +4019,7 @@ static void handle_dns_query(config_t *cfg, const uint8_t *query, size_t query_l
     if (forwarded > 0) {
         *response_len = (size_t) forwarded;
         if (!dns_response_truncated(response, *response_len)) {
-            cache_store(domain, qtype, response, *response_len);
+            cache_store(domain, qtype, upstream_dnssec, response, *response_len);
         }
         g_stats.allowed++;
         g_stats.upstream_successes++;
@@ -3813,8 +4029,8 @@ static void handle_dns_query(config_t *cfg, const uint8_t *query, size_t query_l
         return;
     }
     g_stats.upstream_failures++;
-    if (cache_lookup_stale(domain, qtype, query, response, response_len, &cache_negative,
-            cfg->stale_cache_seconds)) {
+    if (cache_lookup_stale(domain, qtype, upstream_dnssec, query, response, response_len,
+            &cache_negative, cfg->stale_cache_seconds)) {
         g_stats.allowed++;
         g_stats.cache_stale_hits++;
         if (cache_negative) {
@@ -4221,6 +4437,9 @@ static void write_health_response(int client) {
             "cpu_system_ms=%llu\ncpu_total_ms=%llu\n"
             "query_logging=%d\npersist_query_logs=%d\n"
             "safe_search=%d\nsafe_search_rewrites=%llu\n"
+            "dnssec_request=%d\ndnssec_queries=%llu\ndnssec_client_queries=%llu\n"
+            "dnssec_opt_added=%llu\ndnssec_opt_updated=%llu\n"
+            "dnssec_prepare_failures=%llu\n"
             "log_writer_thread=%d\nlog_ring_entries=%llu\nlog_unflushed_entries=%llu\n"
             "exact_allow_index_size=%d\nexact_block_index_size=%d\n"
             "app_exact_allow_index_size=%d\napp_exact_block_index_size=%d\n"
@@ -4296,6 +4515,12 @@ static void write_health_response(int client) {
             g_cfg.persist_query_logs,
             g_cfg.safe_search,
             (unsigned long long) g_stats.safe_search_rewrites,
+            g_cfg.dnssec_request,
+            (unsigned long long) g_stats.dnssec_queries,
+            (unsigned long long) g_stats.dnssec_client_queries,
+            (unsigned long long) g_stats.dnssec_opt_added,
+            (unsigned long long) g_stats.dnssec_opt_updated,
+            (unsigned long long) g_stats.dnssec_prepare_failures,
             g_log_thread_started ? 1 : 0,
             (unsigned long long) log_ring_entries,
             (unsigned long long) log_unflushed_entries,
@@ -4454,6 +4679,9 @@ static void handle_control(int fd) {
                 "cpu_system_ms=%llu\ncpu_total_ms=%llu\n"
                 "query_logging=%d\npersist_query_logs=%d\n"
                 "safe_search=%d\nsafe_search_rewrites=%llu\n"
+                "dnssec_request=%d\ndnssec_queries=%llu\ndnssec_client_queries=%llu\n"
+                "dnssec_opt_added=%llu\ndnssec_opt_updated=%llu\n"
+                "dnssec_prepare_failures=%llu\n"
                 "log_writer_thread=%d\nlog_ring_entries=%llu\nlog_unflushed_entries=%llu\n"
                 "socket_buffer_bytes=%d\nudp_drain_limit=%d\n"
                 "cache_size=%d\ncache_entries=%d\ncache_hits=%llu\ncache_misses=%llu\n"
@@ -4515,6 +4743,12 @@ static void handle_control(int fd) {
                 g_cfg.persist_query_logs,
                 g_cfg.safe_search,
                 (unsigned long long) g_stats.safe_search_rewrites,
+                g_cfg.dnssec_request,
+                (unsigned long long) g_stats.dnssec_queries,
+                (unsigned long long) g_stats.dnssec_client_queries,
+                (unsigned long long) g_stats.dnssec_opt_added,
+                (unsigned long long) g_stats.dnssec_opt_updated,
+                (unsigned long long) g_stats.dnssec_prepare_failures,
                 g_log_thread_started ? 1 : 0,
                 (unsigned long long) log_ring_entries,
                 (unsigned long long) log_unflushed_entries,
