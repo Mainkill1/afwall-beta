@@ -1054,6 +1054,14 @@ public final class DnsHijackManager {
                 "PREROUTING", "udp", preChain));
         commands.add(buildRuleStatusCommand(prefix + "_prerouting_tcp", iptables,
                 "PREROUTING", "tcp", preChain));
+        commands.add(buildRedirectTargetStatusCommand(prefix + "_chain_udp_redirect",
+                iptables, chain, "udp", port));
+        commands.add(buildRedirectTargetStatusCommand(prefix + "_chain_tcp_redirect",
+                iptables, chain, "tcp", port));
+        commands.add(buildRedirectTargetStatusCommand(prefix + "_pre_chain_udp_redirect",
+                iptables, preChain, "udp", port));
+        commands.add(buildRedirectTargetStatusCommand(prefix + "_pre_chain_tcp_redirect",
+                iptables, preChain, "tcp", port));
         commands.add(buildNftTableStatusCommand(prefix + "_nft_table", nftFamily, nftTable));
         commands.add(buildNftRedirectStatusCommand(prefix + "_nft_output_udp",
                 nftFamily, nftTable, NFT_OUTPUT, "udp", port));
@@ -1079,6 +1087,14 @@ public final class DnsHijackManager {
                 + "; then echo " + key + "=1; else echo " + key + "=0; fi";
     }
 
+    private static String buildRedirectTargetStatusCommand(String key, String iptables, String chain,
+                                                           String protocol, int port) {
+        String pattern = "-p " + protocol + " .*--dport 53.*-j REDIRECT.*--to-ports " + port;
+        return "if " + iptables + " -t nat -S " + shellQuote(chain)
+                + " 2>/dev/null | grep -q -- " + shellQuote(pattern)
+                + "; then echo " + key + "=1; else echo " + key + "=0; fi";
+    }
+
     private static String buildNftTableStatusCommand(String key, String family, String table) {
         return "if command -v nft >/dev/null 2>&1 && nft list table "
                 + shellQuote(family) + " " + shellQuote(table)
@@ -1097,29 +1113,32 @@ public final class DnsHijackManager {
 
     private static String redirectFamilyStatus(Map<String, String> values, String prefix) {
         boolean nftTable = "1".equals(values.get(prefix + "_nft_table"));
-        int installed = redirectFamilyScore(values, prefix);
+        int hookScore = redirectFamilyHookScore(values, prefix);
+        int targetScore = redirectFamilyTargetScore(values, prefix);
         int nftInstalled = redirectFamilyNftScore(values, prefix);
-        if (nftInstalled >= 4 && installed >= 6) {
+        boolean iptablesInstalled = hookScore >= 6 && targetScore >= 4;
+        if (nftInstalled >= 4 && iptablesInstalled) {
             return "installed (iptables+nft)";
         }
         if (nftInstalled >= 4) {
             return "installed (nft)";
         }
-        if (installed >= 6) {
+        if (iptablesInstalled) {
             return "installed";
         }
-        if (installed > 0 || nftInstalled > 0 || nftTable) {
+        if (hookScore > 0 || targetScore > 0 || nftInstalled > 0 || nftTable) {
             return "partial";
         }
         return "missing";
     }
 
     private static boolean redirectFamilyHealthy(Map<String, String> values, String prefix) {
-        return redirectFamilyScore(values, prefix) >= 6
+        return (redirectFamilyHookScore(values, prefix) >= 6
+                && redirectFamilyTargetScore(values, prefix) >= 4)
                 || redirectFamilyNftScore(values, prefix) >= 4;
     }
 
-    private static int redirectFamilyScore(Map<String, String> values, String prefix) {
+    private static int redirectFamilyHookScore(Map<String, String> values, String prefix) {
         String[] keys = new String[] {
                 "_chain",
                 "_pre_chain",
@@ -1127,6 +1146,22 @@ public final class DnsHijackManager {
                 "_output_tcp",
                 "_prerouting_udp",
                 "_prerouting_tcp"
+        };
+        int score = 0;
+        for (String suffix : keys) {
+            if ("1".equals(values.get(prefix + suffix))) {
+                score++;
+            }
+        }
+        return score;
+    }
+
+    private static int redirectFamilyTargetScore(Map<String, String> values, String prefix) {
+        String[] keys = new String[] {
+                "_chain_udp_redirect",
+                "_chain_tcp_redirect",
+                "_pre_chain_udp_redirect",
+                "_pre_chain_tcp_redirect"
         };
         int score = 0;
         for (String suffix : keys) {
