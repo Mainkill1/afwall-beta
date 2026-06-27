@@ -53,6 +53,10 @@ public final class DnsHijackManager {
     private static final String CHAIN_V4_PRE = "afwall-dns-pre";
     private static final String CHAIN_V6 = "afwall-dns6";
     private static final String CHAIN_V6_PRE = "afwall-dns6-pre";
+    private static final String NFT_TABLE_V4 = "afwall_dns";
+    private static final String NFT_TABLE_V6 = "afwall_dns6";
+    private static final String NFT_OUTPUT = "output";
+    private static final String NFT_PREROUTING = "prerouting";
     private static final int DEFAULT_PORT = 5354;
     public static final int RULE_ALLOW_EXACT = 1;
     public static final int RULE_ALLOW_SUFFIX = 2;
@@ -89,10 +93,14 @@ public final class DnsHijackManager {
             appendBootPersistenceCommand(context, commands);
         }
         appendRedirectRules(commands, ipv6);
+        commands.add("#LITERAL# " + buildNftFallbackRestoreCommand(context, ipv6));
     }
 
     public static void appendPurgeCommands(Context context, List<String> commands, boolean ipv6) {
         appendPurgeRules(commands, ipv6);
+        if (!ipv6) {
+            commands.add("#LITERAL# " + buildNftPurgeCommand());
+        }
         if (!ipv6) {
             appendStopCommand(context, commands);
             appendRemoveBootPersistenceCommand(commands);
@@ -194,6 +202,8 @@ public final class DnsHijackManager {
                 .append(parseInterfaceList(G.dnsHijackCaptureInterfaces()).size()).append('\n');
         out.append("bypass_interface_entries=")
                 .append(parseInterfaceList(G.dnsHijackBypassInterfaces()).size()).append('\n');
+        out.append("nft_table_v4=").append(NFT_TABLE_V4).append('\n');
+        out.append("nft_table_v6=").append(NFT_TABLE_V6).append('\n');
         out.append("scheduled_blocklist_updates=").append(G.dnsHijackScheduledBlocklistUpdates()).append('\n');
         out.append("blocklist_update_interval_hours=")
                 .append(G.dnsHijackBlocklistUpdateIntervalHours()).append('\n');
@@ -356,6 +366,11 @@ public final class DnsHijackManager {
         commands.add("echo '[IPv6 DNS NAT chains]'");
         commands.add(ip6tables + " -t nat -S " + CHAIN_V6 + " 2>&1 || true");
         commands.add(ip6tables + " -t nat -S " + CHAIN_V6_PRE + " 2>&1 || true");
+        commands.add("echo '[nft DNS redirect tables]'");
+        commands.add("if command -v nft >/dev/null 2>&1; then "
+                + "nft list table ip " + NFT_TABLE_V4 + " 2>&1 || true; "
+                + "nft list table ip6 " + NFT_TABLE_V6 + " 2>&1 || true; "
+                + "else echo 'nft missing'; fi");
         commands.add("echo '[DNS boot persistence]'");
         commands.add("for f in /data/adb/service.d/" + BOOT_SCRIPT
                 + " /su/su.d/" + BOOT_SCRIPT
@@ -797,6 +812,138 @@ public final class DnsHijackManager {
         }
         commands.add(appendCommand + " -j RETURN");
         return true;
+    }
+
+    private static String buildNftFallbackRestoreCommand(Context context, boolean ipv6) {
+        String iptables = shellQuote(Api.getBinaryPath(context, ipv6));
+        String chain = ipv6 ? CHAIN_V6 : CHAIN_V4;
+        String family = ipv6 ? "ip6" : "ip";
+        String table = ipv6 ? NFT_TABLE_V6 : NFT_TABLE_V4;
+        int port = G.dnsHijackPort(DEFAULT_PORT);
+        return "if command -v nft >/dev/null 2>&1 && ! " + iptables
+                + " -t nat -S " + chain + " >/dev/null 2>&1; then "
+                + buildNftRestoreCommands(family, table, String.valueOf(port))
+                + "fi; true";
+    }
+
+    private static String buildNftPurgeCommand() {
+        return "if command -v nft >/dev/null 2>&1; then "
+                + "nft delete table ip " + NFT_TABLE_V4 + " >/dev/null 2>&1 || true; "
+                + "nft delete table ip6 " + NFT_TABLE_V6 + " >/dev/null 2>&1 || true; "
+                + "fi; true";
+    }
+
+    private static String buildNftRestoreCommands(String family, String table, String portValue) {
+        StringBuilder command = new StringBuilder();
+        command.append("nft delete table ").append(family).append(' ').append(table)
+                .append(" >/dev/null 2>&1 || true; ");
+        appendNftCommand(command, "add table " + family + " " + table);
+        appendNftCommand(command, "add chain " + family + " " + table + " " + NFT_OUTPUT
+                + " { type nat hook output priority dstnat; policy accept; }");
+        appendNftCommand(command, "add chain " + family + " " + table + " " + NFT_PREROUTING
+                + " { type nat hook prerouting priority dstnat; policy accept; }");
+        appendNftOutputRules(command, family, table, portValue);
+        appendNftPreroutingRules(command, family, table, portValue);
+        command.append("true; ");
+        return command.toString();
+    }
+
+    private static void appendNftCommand(StringBuilder command, String nftArgs) {
+        command.append("nft ").append(shellQuote(nftArgs)).append(" && ");
+    }
+
+    private static void appendNftOutputRules(StringBuilder command, String family,
+                                             String table, String portValue) {
+        List<Integer> bypassUids = parseUidList(G.dnsHijackBypassUids());
+        List<Integer> captureUids = parseUidList(G.dnsHijackCaptureUids());
+        List<String> bypassInterfaces = parseInterfaceList(G.dnsHijackBypassInterfaces());
+        List<String> captureInterfaces = parseInterfaceList(G.dnsHijackCaptureInterfaces());
+        appendNftRule(command, family, table, NFT_OUTPUT, "oifname " + nftString("lo") + " return");
+        appendNftRule(command, family, table, NFT_OUTPUT, "meta skuid 0 return");
+        for (String iface : bypassInterfaces) {
+            appendNftRule(command, family, table, NFT_OUTPUT,
+                    "oifname " + nftString(nftInterfacePattern(iface)) + " return");
+        }
+        for (Integer uid : bypassUids) {
+            appendNftRule(command, family, table, NFT_OUTPUT, "meta skuid " + uid + " return");
+        }
+        if (captureUids.isEmpty() && captureInterfaces.isEmpty()) {
+            appendNftRedirect(command, family, table, NFT_OUTPUT, "", portValue);
+            return;
+        }
+        if (captureUids.isEmpty()) {
+            for (String iface : captureInterfaces) {
+                appendNftRedirect(command, family, table, NFT_OUTPUT,
+                        "oifname " + nftString(nftInterfacePattern(iface)), portValue);
+            }
+        } else if (captureInterfaces.isEmpty()) {
+            for (Integer uid : captureUids) {
+                if (!bypassUids.contains(uid)) {
+                    appendNftRedirect(command, family, table, NFT_OUTPUT,
+                            "meta skuid " + uid, portValue);
+                }
+            }
+        } else {
+            for (String iface : captureInterfaces) {
+                if (bypassInterfaces.contains(iface)) {
+                    continue;
+                }
+                for (Integer uid : captureUids) {
+                    if (!bypassUids.contains(uid)) {
+                        appendNftRedirect(command, family, table, NFT_OUTPUT,
+                                "oifname " + nftString(nftInterfacePattern(iface))
+                                        + " meta skuid " + uid, portValue);
+                    }
+                }
+            }
+        }
+    }
+
+    private static void appendNftPreroutingRules(StringBuilder command, String family,
+                                                 String table, String portValue) {
+        List<String> bypassInterfaces = parseInterfaceList(G.dnsHijackBypassInterfaces());
+        List<String> captureInterfaces = parseInterfaceList(G.dnsHijackCaptureInterfaces());
+        appendNftRule(command, family, table, NFT_PREROUTING,
+                "iifname " + nftString("lo") + " return");
+        for (String iface : bypassInterfaces) {
+            appendNftRule(command, family, table, NFT_PREROUTING,
+                    "iifname " + nftString(nftInterfacePattern(iface)) + " return");
+        }
+        if (captureInterfaces.isEmpty()) {
+            appendNftRedirect(command, family, table, NFT_PREROUTING, "", portValue);
+            return;
+        }
+        for (String iface : captureInterfaces) {
+            if (bypassInterfaces.contains(iface)) {
+                continue;
+            }
+            appendNftRedirect(command, family, table, NFT_PREROUTING,
+                    "iifname " + nftString(nftInterfacePattern(iface)), portValue);
+        }
+    }
+
+    private static void appendNftRedirect(StringBuilder command, String family, String table,
+                                          String chain, String matcher, String portValue) {
+        String prefix = matcher == null || matcher.isEmpty() ? "" : matcher + " ";
+        appendNftRule(command, family, table, chain,
+                prefix + "udp dport 53 redirect to :" + portValue);
+        appendNftRule(command, family, table, chain,
+                prefix + "tcp dport 53 redirect to :" + portValue);
+    }
+
+    private static void appendNftRule(StringBuilder command, String family, String table,
+                                      String chain, String rule) {
+        appendNftCommand(command, "add rule " + family + " " + table + " " + chain + " " + rule);
+    }
+
+    private static String nftInterfacePattern(String iface) {
+        return iface != null && iface.endsWith("+")
+                ? iface.substring(0, iface.length() - 1) + "*"
+                : iface;
+    }
+
+    private static String nftString(String value) {
+        return "\"" + value + "\"";
     }
 
     private static String buildBootOutputRedirectRules(String tool, String chainVariable) {
@@ -1242,6 +1389,7 @@ public final class DnsHijackManager {
         commands.add(iptables + " -t nat -I OUTPUT 1 -p tcp --dport 53 -j " + chain);
         commands.add(iptables + " -t nat -I PREROUTING 1 -p udp --dport 53 -j " + preChain);
         commands.add(iptables + " -t nat -I PREROUTING 1 -p tcp --dport 53 -j " + preChain);
+        commands.add(buildNftFallbackRestoreCommand(context, ipv6));
     }
 
     private static void appendRedirectRules(List<String> commands, boolean ipv6) {
@@ -1651,6 +1799,18 @@ public final class DnsHijackManager {
         return ((packet[offset] & 0xff) << 8) | (packet[offset + 1] & 0xff);
     }
 
+    private static String buildBootNftFallbackRestore(boolean ipv6, int port) {
+        String tool = ipv6 ? "ip6t" : "ipt";
+        String chainVariable = ipv6 ? "$CHAIN6" : "$CHAIN4";
+        String family = ipv6 ? "ip6" : "ip";
+        String table = ipv6 ? NFT_TABLE_V6 : NFT_TABLE_V4;
+        return "  if command -v nft >/dev/null 2>&1 && ! " + tool
+                + " -t nat -S \"" + chainVariable + "\" >/dev/null 2>&1; then\n"
+                + "    log_msg 'DNS nftables fallback restore starting for " + family + "'\n"
+                + "    ( " + buildNftRestoreCommands(family, table, String.valueOf(port)) + " ) >> \"$LOG\" 2>&1\n"
+                + "  fi\n";
+    }
+
     private static String buildBootScript(Context context, File dir) {
         String supervisor = new File(dir, SUPERVISOR).getAbsolutePath();
         String log = new File(dir, BOOT_LOG).getAbsolutePath();
@@ -1696,6 +1856,7 @@ public final class DnsHijackManager {
                 + "  ipt -t nat -I OUTPUT 1 -p tcp --dport 53 -j \"$CHAIN4\" >> \"$LOG\" 2>&1\n"
                 + "  ipt -t nat -I PREROUTING 1 -p udp --dport 53 -j \"$PRE4\" >> \"$LOG\" 2>&1\n"
                 + "  ipt -t nat -I PREROUTING 1 -p tcp --dport 53 -j \"$PRE4\" >> \"$LOG\" 2>&1\n"
+                + buildBootNftFallbackRestore(false, port)
                 + "}\n"
                 + "restore_v6() {\n"
                 + "  ip6t -t nat -D OUTPUT -p udp --dport 53 -j \"$CHAIN6\" >/dev/null 2>&1\n"
@@ -1715,6 +1876,7 @@ public final class DnsHijackManager {
                 + "  ip6t -t nat -I OUTPUT 1 -p tcp --dport 53 -j \"$CHAIN6\" >> \"$LOG\" 2>&1\n"
                 + "  ip6t -t nat -I PREROUTING 1 -p udp --dport 53 -j \"$PRE6\" >> \"$LOG\" 2>&1\n"
                 + "  ip6t -t nat -I PREROUTING 1 -p tcp --dport 53 -j \"$PRE6\" >> \"$LOG\" 2>&1\n"
+                + buildBootNftFallbackRestore(true, port)
                 + "}\n"
                 + "log_msg 'DNS boot restore starting'\n"
                 + "sleep 15\n"
