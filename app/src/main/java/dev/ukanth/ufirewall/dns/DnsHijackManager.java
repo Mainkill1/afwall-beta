@@ -343,6 +343,8 @@ public final class DnsHijackManager {
         out.append("app_block_exact_entries=").append(countLines(G.dnsHijackAppBlockExact())).append('\n');
         out.append("app_allow_suffix_entries=").append(countLines(G.dnsHijackAppAllowSuffix())).append('\n');
         out.append("app_block_suffix_entries=").append(countLines(G.dnsHijackAppBlockSuffix())).append('\n');
+        out.append("network_allow_entries=").append(countLines(G.dnsHijackNetworkAllow())).append('\n');
+        out.append("network_block_entries=").append(countLines(G.dnsHijackNetworkBlock())).append('\n');
         out.append("temporary_allow_entries=").append(countLines(G.dnsHijackTempAllow())).append('\n');
         out.append("temporary_block_entries=").append(countLines(G.dnsHijackTempBlock())).append('\n');
         out.append("\n[blocklists]\n");
@@ -1843,6 +1845,8 @@ public final class DnsHijackManager {
         appendConfigEntries(config, "app_block_exact", G.dnsHijackAppBlockExact());
         appendConfigEntries(config, "app_allow_suffix", G.dnsHijackAppAllowSuffix());
         appendConfigEntries(config, "app_block_suffix", G.dnsHijackAppBlockSuffix());
+        appendConfigEntries(config, "network_allow", G.dnsHijackNetworkAllow());
+        appendConfigEntries(config, "network_block", G.dnsHijackNetworkBlock());
         appendConfigEntries(config, "allow_regex", G.dnsHijackAllowRegex());
         appendConfigEntries(config, "block_regex", G.dnsHijackBlockRegex());
         appendConfigEntries(config, "temp_allow", G.dnsHijackTempAllow());

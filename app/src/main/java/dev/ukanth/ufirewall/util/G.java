@@ -199,6 +199,8 @@ public class G extends Application implements Application.ActivityLifecycleCallb
     private static final String DNS_HIJACK_APP_BLOCK_EXACT = "dnsHijackAppBlockExact";
     private static final String DNS_HIJACK_APP_ALLOW_SUFFIX = "dnsHijackAppAllowSuffix";
     private static final String DNS_HIJACK_APP_BLOCK_SUFFIX = "dnsHijackAppBlockSuffix";
+    private static final String DNS_HIJACK_NETWORK_ALLOW = "dnsHijackNetworkAllow";
+    private static final String DNS_HIJACK_NETWORK_BLOCK = "dnsHijackNetworkBlock";
     private static final String DNS_HIJACK_ALLOW_REGEX = "dnsHijackAllowRegex";
     private static final String DNS_HIJACK_BLOCK_REGEX = "dnsHijackBlockRegex";
     private static final String DNS_HIJACK_TEMP_ALLOW = "dnsHijackTempAllow";
@@ -234,6 +236,8 @@ public class G extends Application implements Application.ActivityLifecycleCallb
             DNS_HIJACK_APP_BLOCK_EXACT,
             DNS_HIJACK_APP_ALLOW_SUFFIX,
             DNS_HIJACK_APP_BLOCK_SUFFIX,
+            DNS_HIJACK_NETWORK_ALLOW,
+            DNS_HIJACK_NETWORK_BLOCK,
             DNS_HIJACK_ALLOW_REGEX,
             DNS_HIJACK_BLOCK_REGEX,
             DNS_HIJACK_TEMP_ALLOW,
@@ -447,6 +451,14 @@ public class G extends Application implements Application.ActivityLifecycleCallb
 
     public static String dnsHijackAppBlockSuffix() {
         return dnsPolicyPrefs().getString(DNS_HIJACK_APP_BLOCK_SUFFIX, "");
+    }
+
+    public static String dnsHijackNetworkAllow() {
+        return dnsPolicyPrefs().getString(DNS_HIJACK_NETWORK_ALLOW, "");
+    }
+
+    public static String dnsHijackNetworkBlock() {
+        return dnsPolicyPrefs().getString(DNS_HIJACK_NETWORK_BLOCK, "");
     }
 
     public static String dnsHijackAllowRegex() {

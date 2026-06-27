@@ -374,6 +374,10 @@
     <string name="dns_hijack_app_allow_suffix_summary">UID and suffix pairs that should allow matching subdomains for one app. Use one uid|domain entry per line.</string>
     <string name="dns_hijack_app_block_suffix_title">Per-app wildcard block suffixes</string>
     <string name="dns_hijack_app_block_suffix_summary">UID and suffix pairs that should block matching subdomains for one app. Use one uid|domain entry per line.</string>
+    <string name="dns_hijack_network_allow_title">Per-network allow CIDRs</string>
+    <string name="dns_hijack_network_allow_summary">Source networks allowed before global block rules. Use one IPv4 or IPv6 CIDR per line, such as 192.168.1.0/24 or fd00::/8.</string>
+    <string name="dns_hijack_network_block_title">Per-network block CIDRs</string>
+    <string name="dns_hijack_network_block_summary">Source networks blocked before global exact and wildcard rules. Use one IPv4 or IPv6 CIDR per line.</string>
     <string name="dns_hijack_allow_regex_title">Regex allow rules</string>
     <string name="dns_hijack_allow_regex_summary">Regular expressions that allow matching queries.</string>
     <string name="dns_hijack_block_regex_title">Regex block rules</string>

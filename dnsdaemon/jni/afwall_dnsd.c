@@ -39,6 +39,7 @@
 #define MIN_EXACT_INDEX_SIZE 65536
 #define MAX_EXACT_INDEX_SIZE (1 << 24)
 #define MAX_TEMP_RULES 1024
+#define MAX_NETWORK_RULES 128
 #define MAX_UPSTREAMS 8
 #define MAX_SPLIT_UPSTREAMS 32
 #define DEFAULT_CACHE_SIZE 1024
@@ -101,6 +102,12 @@ typedef struct {
     int count;
     int capacity;
 } app_exact_rule_list_t;
+
+typedef struct {
+    int family;
+    uint8_t address[16];
+    int prefix_len;
+} network_rule_t;
 
 typedef struct {
     regex_t compiled;
@@ -213,6 +220,10 @@ typedef struct {
     app_exact_rule_list_t app_exact_block;
     app_exact_rule_list_t app_suffix_allow;
     app_exact_rule_list_t app_suffix_block;
+    network_rule_t network_allow[MAX_NETWORK_RULES];
+    network_rule_t network_block[MAX_NETWORK_RULES];
+    int network_allow_count;
+    int network_block_count;
     int *app_exact_allow_index;
     int app_exact_allow_index_size;
     int *app_exact_block_index;
@@ -1011,6 +1022,75 @@ static bool add_app_domain_rule(app_exact_rule_list_t *rules, const char *value)
     return true;
 }
 
+static bool parse_network_rule(const char *value, network_rule_t *rule) {
+    char text[128];
+    char *slash;
+    char *prefix_text = NULL;
+    char *end;
+    long prefix = -1;
+    struct in_addr addr4;
+    struct in6_addr addr6;
+    int max_prefix;
+    if (value == NULL || rule == NULL || value[0] == '\0') {
+        return false;
+    }
+    memset(rule, 0, sizeof(*rule));
+    safe_copy(text, sizeof(text), value);
+    trim(text);
+    if (text[0] == '\0') {
+        return false;
+    }
+    slash = strchr(text, '/');
+    if (slash != NULL) {
+        *slash = '\0';
+        prefix_text = slash + 1;
+        trim(prefix_text);
+    }
+    trim(text);
+    if (inet_pton(AF_INET, text, &addr4) == 1) {
+        rule->family = AF_INET;
+        memcpy(rule->address, &addr4, sizeof(addr4));
+        max_prefix = 32;
+    } else if (inet_pton(AF_INET6, text, &addr6) == 1) {
+        rule->family = AF_INET6;
+        memcpy(rule->address, &addr6, sizeof(addr6));
+        max_prefix = 128;
+    } else {
+        return false;
+    }
+    if (prefix_text == NULL) {
+        rule->prefix_len = max_prefix;
+        return true;
+    }
+    if (prefix_text[0] == '\0') {
+        return false;
+    }
+    errno = 0;
+    prefix = strtol(prefix_text, &end, 10);
+    if (errno != 0 || end == prefix_text || *end != '\0'
+            || prefix < 0 || prefix > max_prefix) {
+        return false;
+    }
+    rule->prefix_len = (int) prefix;
+    return true;
+}
+
+static bool add_network_rule(network_rule_t *rules, int *count, const char *value) {
+    network_rule_t parsed;
+    if (rules == NULL || count == NULL || value == NULL || value[0] == '\0') {
+        return false;
+    }
+    if (*count < 0 || *count >= MAX_NETWORK_RULES) {
+        return false;
+    }
+    if (!parse_network_rule(value, &parsed)) {
+        return false;
+    }
+    rules[*count] = parsed;
+    (*count)++;
+    return true;
+}
+
 static bool reserve_regex_rule_list(regex_rule_list_t *list, int needed) {
     int next_capacity;
     regex_rule_t *items;
@@ -1671,14 +1751,84 @@ static bool regex_match_rules(const regex_rule_list_t *rules, const char *domain
     return false;
 }
 
+static bool peer_address_bytes(const struct sockaddr_storage *peer, int *family, uint8_t address[16]) {
+    if (peer == NULL || family == NULL || address == NULL) {
+        return false;
+    }
+    memset(address, 0, 16);
+    if (peer->ss_family == AF_INET) {
+        const struct sockaddr_in *in = (const struct sockaddr_in *) peer;
+        *family = AF_INET;
+        memcpy(address, &in->sin_addr, sizeof(in->sin_addr));
+        return true;
+    }
+    if (peer->ss_family == AF_INET6) {
+        const struct sockaddr_in6 *in6 = (const struct sockaddr_in6 *) peer;
+        if (IN6_IS_ADDR_V4MAPPED(&in6->sin6_addr)) {
+            *family = AF_INET;
+            memcpy(address, &in6->sin6_addr.s6_addr[12], 4);
+            return true;
+        }
+        *family = AF_INET6;
+        memcpy(address, &in6->sin6_addr, sizeof(in6->sin6_addr));
+        return true;
+    }
+    return false;
+}
+
+static bool network_prefix_match(const uint8_t *rule_address, const uint8_t *peer_address,
+                                 int prefix_len) {
+    int full_bytes;
+    int remaining_bits;
+    uint8_t mask;
+    if (prefix_len < 0 || rule_address == NULL || peer_address == NULL) {
+        return false;
+    }
+    if (prefix_len == 0) {
+        return true;
+    }
+    full_bytes = prefix_len / 8;
+    remaining_bits = prefix_len % 8;
+    if (full_bytes > 0 && memcmp(rule_address, peer_address, (size_t) full_bytes) != 0) {
+        return false;
+    }
+    if (remaining_bits == 0) {
+        return true;
+    }
+    mask = (uint8_t) (0xffu << (8 - remaining_bits));
+    return (rule_address[full_bytes] & mask) == (peer_address[full_bytes] & mask);
+}
+
+static bool network_rules_match(const network_rule_t *rules, int count,
+                                const struct sockaddr_storage *peer) {
+    int i;
+    int peer_family;
+    uint8_t peer_address[16];
+    if (rules == NULL || count <= 0
+            || !peer_address_bytes(peer, &peer_family, peer_address)) {
+        return false;
+    }
+    for (i = 0; i < count; i++) {
+        if (rules[i].family == peer_family
+                && network_prefix_match(rules[i].address, peer_address, rules[i].prefix_len)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 static decision_t evaluate_domain(const config_t *cfg, const char *domain, int uid,
-                                  const char **reason) {
+                                  const struct sockaddr_storage *peer, const char **reason) {
     uint64_t now = now_seconds();
     bool temp_allow = temp_match(cfg->temp_allow, cfg->temp_allow_count, domain, now);
     bool temp_block = temp_match(cfg->temp_block, cfg->temp_block_count, domain, now);
     bool app_allow = app_exact_match_indexed(&cfg->app_exact_allow,
             cfg->app_exact_allow_index, cfg->app_exact_allow_index_size, uid, domain);
     bool app_suffix_allow = app_suffix_trie_match(&cfg->app_suffix_allow_trie, uid, domain);
+    bool network_allow = network_rules_match(cfg->network_allow,
+            cfg->network_allow_count, peer);
+    bool network_block = network_rules_match(cfg->network_block,
+            cfg->network_block_count, peer);
     bool exact_allow = exact_match_indexed(&cfg->exact_allow, cfg->exact_allow_index,
             cfg->exact_allow_index_size, domain);
     bool suffix_allow = suffix_trie_match(&cfg->suffix_allow_trie, domain);
@@ -1694,6 +1844,9 @@ static decision_t evaluate_domain(const config_t *cfg, const char *domain, int u
         block = true;
     } else if (app_suffix_trie_match(&cfg->app_suffix_block_trie, uid, domain)) {
         *reason = "app_suffix_block";
+        block = true;
+    } else if (network_block) {
+        *reason = "network_block";
         block = true;
     } else if (exact_match_indexed(&cfg->exact_block, cfg->exact_block_index,
             cfg->exact_block_index_size, domain)) {
@@ -1725,6 +1878,10 @@ static decision_t evaluate_domain(const config_t *cfg, const char *domain, int u
     }
     if (app_suffix_allow) {
         *reason = "app_suffix_allow";
+        return DECISION_ALLOW;
+    }
+    if (network_allow) {
+        *reason = "network_allow";
         return DECISION_ALLOW;
     }
     if (exact_allow) {
@@ -3565,6 +3722,18 @@ static bool load_config(const char *path, config_t *new_cfg) {
                 fclose(fp);
                 return false;
             }
+        } else if (strcmp(key, "network_allow") == 0) {
+            if (!add_network_rule(new_cfg->network_allow,
+                    &new_cfg->network_allow_count, value)) {
+                fclose(fp);
+                return false;
+            }
+        } else if (strcmp(key, "network_block") == 0) {
+            if (!add_network_rule(new_cfg->network_block,
+                    &new_cfg->network_block_count, value)) {
+                fclose(fp);
+                return false;
+            }
         } else if (strcmp(key, "allow_regex") == 0) {
             if (!add_regex_rule(&new_cfg->regex_allow, value)) {
                 fclose(fp);
@@ -3774,6 +3943,7 @@ static void write_validate_response(int client) {
             "rules_exact_block=%d\nrules_suffix_block=%d\n"
             "rules_app_exact_allow=%d\nrules_app_exact_block=%d\n"
             "rules_app_suffix_allow=%d\nrules_app_suffix_block=%d\n"
+            "rules_network_allow=%d\nrules_network_block=%d\n"
             "rules_regex_allow=%d\nrules_regex_block=%d\n"
             "rules_temp_allow=%d\nrules_temp_block=%d\n"
             "cache_size=%d\nstale_cache_seconds=%d\npersist_cache=%d\n"
@@ -3793,6 +3963,8 @@ static void write_validate_response(int client) {
             candidate->app_exact_block.count,
             candidate->app_suffix_allow.count,
             candidate->app_suffix_block.count,
+            candidate->network_allow_count,
+            candidate->network_block_count,
             candidate->regex_allow.count,
             candidate->regex_block.count,
             candidate->temp_allow_count,
@@ -3913,7 +4085,8 @@ static void finish_dns_query(const char *domain, const char *action, const char 
 
 static void handle_dns_query(config_t *cfg, const uint8_t *query, size_t query_len,
                              uint8_t *response, size_t *response_len, const char **action_out,
-                             int tcp, const char *source, int uid) {
+                             int tcp, const char *source, int uid,
+                             const struct sockaddr_storage *peer) {
     char domain[MAX_DOMAIN];
     uint16_t qtype = 0;
     const char *reason = "parse";
@@ -3954,7 +4127,7 @@ static void handle_dns_query(config_t *cfg, const uint8_t *query, size_t query_l
     if (upstream_dnssec) {
         g_stats.dnssec_queries++;
     }
-    if (evaluate_domain(cfg, domain, uid, &reason) == DECISION_BLOCK) {
+    if (evaluate_domain(cfg, domain, uid, peer, &reason) == DECISION_BLOCK) {
         *response_len = build_block_response(query, query_len, response, MAX_PACKET);
         g_stats.blocked++;
         *action_out = reason;
@@ -4211,7 +4384,8 @@ static bool handle_udp(int fd, int flags) {
     format_sockaddr_endpoint(&peer, source, sizeof(source));
     uid = lookup_query_uid(&peer, 0);
     gettimeofday(&start, NULL);
-    handle_dns_query(&g_cfg, query, (size_t) got, response, &response_len, &action, 0, source, uid);
+    handle_dns_query(&g_cfg, query, (size_t) got, response, &response_len, &action,
+            0, source, uid, &peer);
     gettimeofday(&end, NULL);
     (void) action;
     if (response_len > 0) {
@@ -4224,7 +4398,8 @@ static bool handle_udp(int fd, int flags) {
     return true;
 }
 
-static void handle_tcp_client(int client, const char *source, int uid) {
+static void handle_tcp_client(int client, const char *source, int uid,
+                              const struct sockaddr_storage *peer) {
     uint8_t lenbuf[2];
     uint8_t query[MAX_PACKET];
     uint8_t response[MAX_PACKET + 2];
@@ -4248,7 +4423,8 @@ static void handle_tcp_client(int client, const char *source, int uid) {
         }
         return;
     }
-    handle_dns_query(&g_cfg, query, qlen, response + 2, &response_len, &action, 1, source, uid);
+    handle_dns_query(&g_cfg, query, qlen, response + 2, &response_len, &action,
+            1, source, uid, peer);
     (void) action;
     if (response_len > 0) {
         response[0] = (uint8_t) ((response_len >> 8) & 0xffu);
@@ -4266,7 +4442,7 @@ static void handle_tcp(int fd) {
     if (client >= 0) {
         format_sockaddr_endpoint(&peer, source, sizeof(source));
         uid = lookup_query_uid(&peer, 1);
-        handle_tcp_client(client, source, uid);
+        handle_tcp_client(client, source, uid, &peer);
         close(client);
     }
 }
@@ -4466,6 +4642,7 @@ static void write_health_response(int client) {
             "app_suffix_allow_trie_nodes=%d\napp_suffix_block_trie_nodes=%d\n"
             "rules_app_exact_allow=%d\nrules_app_exact_block=%d\n"
             "rules_app_suffix_allow=%d\nrules_app_suffix_block=%d\n"
+            "rules_network_allow=%d\nrules_network_block=%d\n"
             "rules_total=%d\n",
             (long) getpid(),
             (unsigned long long) (now_seconds() - g_stats.start_time),
@@ -4556,12 +4733,15 @@ static void write_health_response(int client) {
             g_cfg.app_exact_block.count,
             g_cfg.app_suffix_allow.count,
             g_cfg.app_suffix_block.count,
+            g_cfg.network_allow_count,
+            g_cfg.network_block_count,
             g_cfg.exact_allow.count + g_cfg.suffix_allow.count
                     + g_cfg.exact_block.count + g_cfg.suffix_block.count
                     + g_cfg.regex_allow.count + g_cfg.regex_block.count
                     + g_cfg.temp_allow_count + g_cfg.temp_block_count
                     + g_cfg.app_exact_allow.count + g_cfg.app_exact_block.count
-                    + g_cfg.app_suffix_allow.count + g_cfg.app_suffix_block.count);
+                    + g_cfg.app_suffix_allow.count + g_cfg.app_suffix_block.count
+                    + g_cfg.network_allow_count + g_cfg.network_block_count);
     write_upstream_runtime_stats(client, &g_cfg);
 }
 
@@ -4735,6 +4915,7 @@ static void handle_control(int fd) {
                 "rules_exact_block=%d\nrules_suffix_block=%d\n"
                 "rules_app_exact_allow=%d\nrules_app_exact_block=%d\n"
                 "rules_app_suffix_allow=%d\nrules_app_suffix_block=%d\n"
+                "rules_network_allow=%d\nrules_network_block=%d\n"
                 "rules_regex_allow=%d\nrules_regex_block=%d\n"
                 "rules_temp_allow=%d\nrules_temp_block=%d\nsplit_upstreams=%d\n",
                 (long) getpid(),
@@ -4841,6 +5022,8 @@ static void handle_control(int fd) {
                 g_cfg.app_exact_block.count,
                 g_cfg.app_suffix_allow.count,
                 g_cfg.app_suffix_block.count,
+                g_cfg.network_allow_count,
+                g_cfg.network_block_count,
                 g_cfg.regex_allow.count,
                 g_cfg.regex_block.count,
                 g_cfg.temp_allow_count,
