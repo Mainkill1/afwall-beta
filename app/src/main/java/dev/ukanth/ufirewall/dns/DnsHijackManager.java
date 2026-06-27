@@ -595,6 +595,8 @@ public final class DnsHijackManager {
 
         commands.add("echo '[supervisor status]'");
         commands.add("if [ -x " + supervisor + " ]; then " + supervisor + " status 2>&1; else echo 'supervisor missing'; fi");
+        commands.add("echo '[DNS redirect status]'");
+        commands.addAll(buildRootRedirectStatusCommands(context));
         commands.add("echo '[pid]'");
         commands.add("cat " + shellQuote(new File(workDir(context), PID).getAbsolutePath()) + " 2>&1 || true");
         commands.add("echo '[IPv4 DNS NAT OUTPUT]'");
@@ -625,6 +627,125 @@ public final class DnsHijackManager {
                 + " /system/etc/init.d/" + CLEANUP_SCRIPT
                 + "; do if [ -f \"$f\" ]; then ls -l \"$f\"; fi; done");
         return commands;
+    }
+
+    public static List<String> buildRootRedirectStatusCommands(Context context) {
+        List<String> commands = new ArrayList<>();
+        String iptables = shellQuote(Api.getBinaryPath(context, false));
+        String ip6tables = shellQuote(Api.getBinaryPath(context, true));
+        appendRedirectStatusCommands(commands, "dns_redirect_ipv4", iptables,
+                CHAIN_V4, CHAIN_V4_PRE, "ip", NFT_TABLE_V4);
+        appendRedirectStatusCommands(commands, "dns_redirect_ipv6", ip6tables,
+                CHAIN_V6, CHAIN_V6_PRE, "ip6", NFT_TABLE_V6);
+        return commands;
+    }
+
+    public static String formatRootRedirectStatus(String raw) {
+        if (raw == null || raw.trim().isEmpty()) {
+            return "Redirect rules: root check failed";
+        }
+        Map<String, String> values = parseKeyValueLines(raw);
+        if (values.isEmpty()) {
+            return "Redirect rules: root check failed";
+        }
+        String ipv4 = redirectFamilyStatus(values, "dns_redirect_ipv4");
+        String ipv6 = G.enableIPv6()
+                ? redirectFamilyStatus(values, "dns_redirect_ipv6")
+                : "disabled";
+        return "Redirect rules: IPv4 " + ipv4 + " | IPv6 " + ipv6;
+    }
+
+    public static boolean isRootRedirectStatusHealthy(String raw) {
+        if (!G.enableDnsHijack()) {
+            return true;
+        }
+        if (raw == null || raw.trim().isEmpty()) {
+            return false;
+        }
+        Map<String, String> values = parseKeyValueLines(raw);
+        if (values.isEmpty()) {
+            return false;
+        }
+        if (!redirectFamilyHealthy(values, "dns_redirect_ipv4")) {
+            return false;
+        }
+        return !G.enableIPv6() || redirectFamilyHealthy(values, "dns_redirect_ipv6");
+    }
+
+    private static void appendRedirectStatusCommands(List<String> commands, String prefix,
+                                                     String iptables, String chain,
+                                                     String preChain, String nftFamily,
+                                                     String nftTable) {
+        commands.add(buildChainStatusCommand(prefix + "_chain", iptables, chain));
+        commands.add(buildChainStatusCommand(prefix + "_pre_chain", iptables, preChain));
+        commands.add(buildRuleStatusCommand(prefix + "_output_udp", iptables,
+                "OUTPUT", "udp", chain));
+        commands.add(buildRuleStatusCommand(prefix + "_output_tcp", iptables,
+                "OUTPUT", "tcp", chain));
+        commands.add(buildRuleStatusCommand(prefix + "_prerouting_udp", iptables,
+                "PREROUTING", "udp", preChain));
+        commands.add(buildRuleStatusCommand(prefix + "_prerouting_tcp", iptables,
+                "PREROUTING", "tcp", preChain));
+        commands.add(buildNftTableStatusCommand(prefix + "_nft_table", nftFamily, nftTable));
+    }
+
+    private static String buildChainStatusCommand(String key, String iptables, String chain) {
+        return "if " + iptables + " -t nat -S " + shellQuote(chain)
+                + " >/dev/null 2>&1; then echo " + key + "=1; else echo "
+                + key + "=0; fi";
+    }
+
+    private static String buildRuleStatusCommand(String key, String iptables, String parentChain,
+                                                 String protocol, String targetChain) {
+        String pattern = "-p " + protocol + " .*--dport 53.*-j " + targetChain;
+        return "if " + iptables + " -t nat -S " + shellQuote(parentChain)
+                + " 2>/dev/null | grep -q -- " + shellQuote(pattern)
+                + "; then echo " + key + "=1; else echo " + key + "=0; fi";
+    }
+
+    private static String buildNftTableStatusCommand(String key, String family, String table) {
+        return "if command -v nft >/dev/null 2>&1 && nft list table "
+                + shellQuote(family) + " " + shellQuote(table)
+                + " >/dev/null 2>&1; then echo " + key + "=1; else echo "
+                + key + "=0; fi";
+    }
+
+    private static String redirectFamilyStatus(Map<String, String> values, String prefix) {
+        boolean nft = "1".equals(values.get(prefix + "_nft_table"));
+        int installed = redirectFamilyScore(values, prefix);
+        if (nft && installed >= 6) {
+            return "installed (iptables+nft)";
+        }
+        if (nft) {
+            return "installed (nft)";
+        }
+        if (installed >= 6) {
+            return "installed";
+        }
+        return installed > 0 ? "partial" : "missing";
+    }
+
+    private static boolean redirectFamilyHealthy(Map<String, String> values, String prefix) {
+        return "1".equals(values.get(prefix + "_nft_table"))
+                || redirectFamilyScore(values, prefix) >= 6;
+    }
+
+    private static int redirectFamilyScore(Map<String, String> values, String prefix) {
+        String[] keys = new String[] {
+                "_chain",
+                "_pre_chain",
+                "_output_udp",
+                "_output_tcp",
+                "_prerouting_udp",
+                "_prerouting_tcp"
+        };
+        int score = 0;
+        for (String suffix : keys) {
+            if ("1".equals(values.get(prefix + suffix))) {
+                score++;
+            }
+        }
+        return score;
     }
 
     private static void failSupervisorAction(Context context, RootCommand.Callback callback, String message) {

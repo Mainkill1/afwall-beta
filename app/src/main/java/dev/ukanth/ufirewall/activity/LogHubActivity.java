@@ -140,8 +140,39 @@ public class LogHubActivity extends AppCompatActivity {
                             ? R.string.dns_dashboard_pause
                             : R.string.dns_dashboard_resume);
                 }
+                loadDnsRedirectStatus(snapshot.detailLine);
             });
         });
+    }
+
+    private void loadDnsRedirectStatus(String baseDetails) {
+        if (dnsDashboardDetails == null) {
+            return;
+        }
+        if (!G.enableDnsHijack()) {
+            dnsDashboardDetails.setText(baseDetails + "\nRedirect rules: disabled");
+            return;
+        }
+        new RootCommand()
+                .setLogging(true)
+                .setReopenShell(true)
+                .setCallback(new RootCommand.Callback() {
+                    @Override
+                    public void cbFunc(RootCommand state) {
+                        String output = state.res == null ? "" : state.res.toString();
+                        String redirectStatus = DnsHijackManager.formatRootRedirectStatus(output);
+                        if (state.exitCode != 0) {
+                            ApplicationErrorLog.add(LogHubActivity.this,
+                                    "DNS dashboard redirect status check failed");
+                        } else if (!DnsHijackManager.isRootRedirectStatusHealthy(output)) {
+                            ApplicationErrorLog.add(LogHubActivity.this,
+                                    "DNS dashboard redirect status needs repair: " + redirectStatus);
+                        }
+                        mainHandler.post(() -> dnsDashboardDetails.setText(
+                                baseDetails + "\n" + redirectStatus));
+                    }
+                })
+                .run(getApplicationContext(), DnsHijackManager.buildRootRedirectStatusCommands(this));
     }
 
     private void runDashboardPauseResume() {
