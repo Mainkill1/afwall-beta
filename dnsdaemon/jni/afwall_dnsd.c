@@ -54,6 +54,9 @@
 #define MAX_CACHE_TTL 86400
 #define DNS_SOCKET_BUFFER_BYTES 262144
 #define UDP_DRAIN_LIMIT 32
+#define UID_UNKNOWN -1
+#define UID_CACHE_SIZE 128
+#define UID_CACHE_TTL 15
 #define DNS_QTYPE_A 1
 #define DNS_QTYPE_AAAA 28
 #define DNS_CLASS_IN 1
@@ -216,6 +219,9 @@ typedef struct {
     uint64_t upstream_latency_ms;
     uint64_t max_latency_ms;
     uint64_t reloads;
+    uint64_t uid_lookup_successes;
+    uint64_t uid_lookup_misses;
+    uint64_t uid_cache_hits;
     uint64_t start_time;
 } stats_t;
 
@@ -225,6 +231,7 @@ typedef struct {
     char action[32];
     char transport[8];
     char source[64];
+    int uid;
     char result[16];
     char rule[32];
     char upstream[32];
@@ -246,6 +253,15 @@ typedef struct {
     bool negative;
 } cache_entry_t;
 
+typedef struct {
+    uint16_t port;
+    int family;
+    int tcp;
+    int uid;
+    uint64_t expires_at;
+    bool used;
+} uid_cache_entry_t;
+
 static volatile sig_atomic_t g_running = 1;
 static volatile sig_atomic_t g_reload_requested = 0;
 static config_t g_cfg;
@@ -263,6 +279,8 @@ static char g_log_file_path[256];
 static bool g_log_persistence_enabled = true;
 static cache_entry_t *g_cache = NULL;
 static int g_cache_capacity = 0;
+static uid_cache_entry_t g_uid_cache[UID_CACHE_SIZE];
+static int g_uid_cache_pos = 0;
 static char g_config_path[256];
 
 static bool config_bool_value(const char *value) {
@@ -491,7 +509,7 @@ static int cache_entry_count_by_type(bool negative) {
 }
 
 static void add_log(const char *domain, const char *action, const char *transport,
-                    const char *source,
+                    const char *source, int uid,
                     uint16_t qtype, const char *result, const char *rule,
                     const char *upstream, int latency_ms) {
     log_entry_t *entry;
@@ -505,6 +523,7 @@ static void add_log(const char *domain, const char *action, const char *transpor
     safe_copy(entry->action, sizeof(entry->action), action);
     safe_copy(entry->transport, sizeof(entry->transport), transport);
     safe_copy(entry->source, sizeof(entry->source), source == NULL ? "unknown" : source);
+    entry->uid = uid;
     safe_copy(entry->result, sizeof(entry->result), result);
     safe_copy(entry->rule, sizeof(entry->rule), rule);
     safe_copy(entry->upstream, sizeof(entry->upstream), upstream);
@@ -587,13 +606,14 @@ static void flush_logs(void) {
 
     for (i = 0; i < pending_count; i++) {
         const log_entry_t *entry = &pending[i];
-        fprintf(fp, "%llu %s %s %dms transport=%s source=%s qtype=%u result=%s rule=%s upstream=%s\n",
+        fprintf(fp, "%llu %s %s %dms transport=%s source=%s uid=%d qtype=%u result=%s rule=%s upstream=%s\n",
                 (unsigned long long) entry->timestamp,
                 entry->action,
                 entry->domain,
                 entry->latency_ms,
                 entry->transport,
                 entry->source,
+                entry->uid,
                 (unsigned int) entry->qtype,
                 entry->result,
                 entry->rule,
@@ -2815,7 +2835,7 @@ static int create_control_socket(const char *path) {
 }
 
 static void finish_dns_query(const char *domain, const char *action, const char *transport,
-                             const char *source, uint16_t qtype,
+                             const char *source, int uid, uint16_t qtype,
                              const char *result, const char *rule,
                              const char *upstream, const struct timeval *start) {
     struct timeval end;
@@ -2823,12 +2843,12 @@ static void finish_dns_query(const char *domain, const char *action, const char 
     gettimeofday(&end, NULL);
     latency_ms = elapsed_ms(start, &end);
     record_query_latency(latency_ms);
-    add_log(domain, action, transport, source, qtype, result, rule, upstream, latency_ms);
+    add_log(domain, action, transport, source, uid, qtype, result, rule, upstream, latency_ms);
 }
 
 static void handle_dns_query(const config_t *cfg, const uint8_t *query, size_t query_len,
                              uint8_t *response, size_t *response_len, const char **action_out,
-                             int tcp, const char *source) {
+                             int tcp, const char *source, int uid) {
     char domain[MAX_DOMAIN];
     uint16_t qtype = 0;
     const char *reason = "parse";
@@ -2852,7 +2872,7 @@ static void handle_dns_query(const config_t *cfg, const uint8_t *query, size_t q
         *action_out = "invalid";
         g_stats.invalid_queries++;
         g_stats.blocked++;
-        finish_dns_query("unknown", "invalid", transport, source, qtype,
+        finish_dns_query("unknown", "invalid", transport, source, uid, qtype,
                 "block", "parse", "none", &start);
         return;
     }
@@ -2860,7 +2880,7 @@ static void handle_dns_query(const config_t *cfg, const uint8_t *query, size_t q
         *response_len = build_block_response(query, query_len, response, MAX_PACKET);
         g_stats.blocked++;
         *action_out = reason;
-        finish_dns_query(domain, reason, transport, source, qtype,
+        finish_dns_query(domain, reason, transport, source, uid, qtype,
                 "block", reason, "none", &start);
         return;
     }
@@ -2870,7 +2890,7 @@ static void handle_dns_query(const config_t *cfg, const uint8_t *query, size_t q
         g_stats.allowed++;
         g_stats.safe_search_rewrites++;
         *action_out = "safe_search";
-        finish_dns_query(domain, *action_out, transport, source, qtype,
+        finish_dns_query(domain, *action_out, transport, source, uid, qtype,
                 "allow", "safe_search", "local", &start);
         return;
     }
@@ -2883,7 +2903,7 @@ static void handle_dns_query(const config_t *cfg, const uint8_t *query, size_t q
         }
         g_stats.allowed++;
         *action_out = cache_negative ? "cache_negative" : "cache";
-        finish_dns_query(domain, *action_out, transport, source, qtype,
+        finish_dns_query(domain, *action_out, transport, source, uid, qtype,
                 "allow", *action_out, "cache", &start);
         return;
     }
@@ -2906,7 +2926,7 @@ static void handle_dns_query(const config_t *cfg, const uint8_t *query, size_t q
         g_stats.allowed++;
         g_stats.upstream_successes++;
         *action_out = route;
-        finish_dns_query(domain, route, transport, source, qtype,
+        finish_dns_query(domain, route, transport, source, uid, qtype,
                 "allow", "upstream", route, &start);
         return;
     }
@@ -2915,16 +2935,124 @@ static void handle_dns_query(const config_t *cfg, const uint8_t *query, size_t q
         *response_len = 0;
         *action_out = "upstream_failed";
         g_stats.fail_open_drops++;
-        finish_dns_query(domain, *action_out, transport, source, qtype,
+        finish_dns_query(domain, *action_out, transport, source, uid, qtype,
                 "fail_open", "upstream_failed", route, &start);
     } else {
         *response_len = build_block_response(query, query_len, response, MAX_PACKET);
         g_stats.blocked++;
         *action_out = "fail_closed";
         g_stats.fail_closed_blocks++;
-        finish_dns_query(domain, *action_out, transport, source, qtype,
+        finish_dns_query(domain, *action_out, transport, source, uid, qtype,
                 "block", "fail_closed", route, &start);
     }
+}
+
+static uint16_t sockaddr_port(const struct sockaddr_storage *addr) {
+    if (addr == NULL) {
+        return 0;
+    }
+    if (addr->ss_family == AF_INET) {
+        return ntohs(((const struct sockaddr_in *) addr)->sin_port);
+    }
+    if (addr->ss_family == AF_INET6) {
+        return ntohs(((const struct sockaddr_in6 *) addr)->sin6_port);
+    }
+    return 0;
+}
+
+static bool lookup_uid_cache(uint16_t port, int family, int tcp, int *uid) {
+    int i;
+    uint64_t now = now_seconds();
+    for (i = 0; i < UID_CACHE_SIZE; i++) {
+        uid_cache_entry_t *entry = &g_uid_cache[i];
+        if (!entry->used || entry->expires_at < now) {
+            continue;
+        }
+        if (entry->port == port && entry->family == family && entry->tcp == tcp) {
+            *uid = entry->uid;
+            g_stats.uid_cache_hits++;
+            return true;
+        }
+    }
+    return false;
+}
+
+static void store_uid_cache(uint16_t port, int family, int tcp, int uid) {
+    uid_cache_entry_t *entry = &g_uid_cache[g_uid_cache_pos % UID_CACHE_SIZE];
+    g_uid_cache_pos = (g_uid_cache_pos + 1) % UID_CACHE_SIZE;
+    entry->port = port;
+    entry->family = family;
+    entry->tcp = tcp;
+    entry->uid = uid;
+    entry->expires_at = now_seconds() + UID_CACHE_TTL;
+    entry->used = true;
+}
+
+static int lookup_uid_in_proc_file(const char *path, uint16_t port) {
+    FILE *fp;
+    char line[512];
+    fp = fopen(path, "r");
+    if (fp == NULL) {
+        return UID_UNKNOWN;
+    }
+    while (fgets(line, sizeof(line), fp) != NULL) {
+        char local[96];
+        char remote[96];
+        char state[8];
+        char *colon;
+        unsigned int local_port;
+        unsigned int uid;
+        if (sscanf(line, " %*d: %95s %95s %7s %*s %*s %*s %u",
+                local, remote, state, &uid) != 4) {
+            continue;
+        }
+        (void) remote;
+        (void) state;
+        colon = strchr(local, ':');
+        if (colon == NULL) {
+            continue;
+        }
+        if (sscanf(colon + 1, "%x", &local_port) != 1) {
+            continue;
+        }
+        if (local_port == port) {
+            fclose(fp);
+            return (int) uid;
+        }
+    }
+    fclose(fp);
+    return UID_UNKNOWN;
+}
+
+static int lookup_query_uid(const struct sockaddr_storage *peer, int tcp) {
+    uint16_t port = sockaddr_port(peer);
+    int family = peer == NULL ? AF_UNSPEC : peer->ss_family;
+    int uid;
+    if (port == 0) {
+        g_stats.uid_lookup_misses++;
+        return UID_UNKNOWN;
+    }
+    if (lookup_uid_cache(port, family, tcp, &uid)) {
+        return uid;
+    }
+    if (tcp) {
+        uid = lookup_uid_in_proc_file("/proc/net/tcp", port);
+        if (uid == UID_UNKNOWN) {
+            uid = lookup_uid_in_proc_file("/proc/net/tcp6", port);
+        }
+    } else {
+        uid = lookup_uid_in_proc_file("/proc/net/udp", port);
+        if (uid == UID_UNKNOWN) {
+            uid = lookup_uid_in_proc_file("/proc/net/udp6", port);
+        }
+    }
+    store_uid_cache(port, family, tcp, uid);
+    if (uid == UID_UNKNOWN) {
+        g_stats.uid_lookup_misses++;
+    } else {
+        g_stats.uid_lookup_successes++;
+    }
+    return uid;
 }
 
 static void format_sockaddr_endpoint(const struct sockaddr_storage *addr, char *out, size_t out_len) {
@@ -2960,6 +3088,7 @@ static bool handle_udp(int fd, int flags) {
     struct sockaddr_storage peer;
     socklen_t peer_len = sizeof(peer);
     char source[64];
+    int uid;
     ssize_t got;
     size_t response_len = 0;
     const char *action = "none";
@@ -2970,21 +3099,22 @@ static bool handle_udp(int fd, int flags) {
         return false;
     }
     format_sockaddr_endpoint(&peer, source, sizeof(source));
+    uid = lookup_query_uid(&peer, 0);
     gettimeofday(&start, NULL);
-    handle_dns_query(&g_cfg, query, (size_t) got, response, &response_len, &action, 0, source);
+    handle_dns_query(&g_cfg, query, (size_t) got, response, &response_len, &action, 0, source, uid);
     gettimeofday(&end, NULL);
     (void) action;
     if (response_len > 0) {
         sendto(fd, response, response_len, 0, (struct sockaddr *) &peer, peer_len);
     }
     if (response_len == 0 && !g_cfg.fail_open) {
-        add_log("unknown", "no_response", "udp", source, 0,
+        add_log("unknown", "no_response", "udp", source, uid, 0,
                 "block", "no_response", "none", elapsed_ms(&start, &end));
     }
     return true;
 }
 
-static void handle_tcp_client(int client, const char *source) {
+static void handle_tcp_client(int client, const char *source, int uid) {
     uint8_t lenbuf[2];
     uint8_t query[MAX_PACKET];
     uint8_t response[MAX_PACKET + 2];
@@ -3008,7 +3138,7 @@ static void handle_tcp_client(int client, const char *source) {
         }
         return;
     }
-    handle_dns_query(&g_cfg, query, qlen, response + 2, &response_len, &action, 1, source);
+    handle_dns_query(&g_cfg, query, qlen, response + 2, &response_len, &action, 1, source, uid);
     (void) action;
     if (response_len > 0) {
         response[0] = (uint8_t) ((response_len >> 8) & 0xffu);
@@ -3021,10 +3151,12 @@ static void handle_tcp(int fd) {
     struct sockaddr_storage peer;
     socklen_t peer_len = sizeof(peer);
     char source[64];
+    int uid;
     int client = accept(fd, (struct sockaddr *) &peer, &peer_len);
     if (client >= 0) {
         format_sockaddr_endpoint(&peer, source, sizeof(source));
-        handle_tcp_client(client, source);
+        uid = lookup_query_uid(&peer, 1);
+        handle_tcp_client(client, source, uid);
         close(client);
     }
 }
@@ -3125,6 +3257,7 @@ static void write_health_response(int client) {
             "upstream_tcp_fallbacks=%llu\nupstream_truncated_responses=%llu\n"
             "upstream_udp_socket_reuses=%llu\nupstream_udp_stale_replies=%llu\n"
             "tcp_client_timeouts=%llu\ncontrol_client_timeouts=%llu\n"
+            "uid_lookup_successes=%llu\nuid_lookup_misses=%llu\nuid_cache_hits=%llu\n"
             "memory_rss_kb=%ld\nmemory_hwm_kb=%ld\ncpu_user_ms=%llu\n"
             "cpu_system_ms=%llu\ncpu_total_ms=%llu\n"
             "query_logging=%d\npersist_query_logs=%d\n"
@@ -3172,6 +3305,9 @@ static void write_health_response(int client) {
             (unsigned long long) g_stats.upstream_udp_stale_replies,
             (unsigned long long) g_stats.tcp_client_timeouts,
             (unsigned long long) g_stats.control_client_timeouts,
+            (unsigned long long) g_stats.uid_lookup_successes,
+            (unsigned long long) g_stats.uid_lookup_misses,
+            (unsigned long long) g_stats.uid_cache_hits,
             memory_rss_kb,
             memory_hwm_kb,
             (unsigned long long) cpu_user_ms,
@@ -3341,6 +3477,7 @@ static void handle_control(int fd) {
                 "upstream_requests=%llu\nupstream_successes=%llu\nupstream_failures=%llu\n"
                 "upstream_tcp_fallbacks=%llu\nupstream_truncated_responses=%llu\n"
                 "upstream_udp_socket_reuses=%llu\nupstream_udp_stale_replies=%llu\n"
+                "uid_lookup_successes=%llu\nuid_lookup_misses=%llu\nuid_cache_hits=%llu\n"
                 "compiled_upstream_addresses=%d\nreusable_udp_upstream_sockets=%d\n"
                 "resolver_scope_hash=%llu\n"
                 "avg_latency_ms=%llu\nmax_latency_ms=%llu\nupstream_avg_latency_ms=%llu\n"
@@ -3405,6 +3542,9 @@ static void handle_control(int fd) {
                 (unsigned long long) g_stats.upstream_truncated_responses,
                 (unsigned long long) g_stats.upstream_udp_socket_reuses,
                 (unsigned long long) g_stats.upstream_udp_stale_replies,
+                (unsigned long long) g_stats.uid_lookup_successes,
+                (unsigned long long) g_stats.uid_lookup_misses,
+                (unsigned long long) g_stats.uid_cache_hits,
                 compiled_upstream_address_count(&g_cfg),
                 reusable_udp_upstream_socket_count(&g_cfg),
                 (unsigned long long) g_cfg.resolver_scope_hash,
@@ -3450,13 +3590,14 @@ static void handle_control(int fd) {
         pthread_mutex_unlock(&g_log_mutex);
         for (i = 0; i < count; i++) {
             write_control_response(client,
-                    "%llu %s %s %dms transport=%s source=%s qtype=%u result=%s rule=%s upstream=%s\n",
+                    "%llu %s %s %dms transport=%s source=%s uid=%d qtype=%u result=%s rule=%s upstream=%s\n",
                     (unsigned long long) entries[i].timestamp,
                     entries[i].action,
                     entries[i].domain,
                     entries[i].latency_ms,
                     entries[i].transport,
                     entries[i].source,
+                    entries[i].uid,
                     (unsigned int) entries[i].qtype,
                     entries[i].result,
                     entries[i].rule,

@@ -198,7 +198,7 @@ public class DnsQueriesActivity extends AppCompatActivity {
                 : "--:--:--";
         return time + "  " + entry.result + "  " + entry.domain + "  " + entry.latency
                 + "\n" + entry.transport.toUpperCase(Locale.US) + " " + entry.qtype
-                + "  source=" + entry.source
+                + "  source=" + entry.source + "  uid=" + entry.uid
                 + "  rule=" + entry.rule + "  upstream=" + entry.upstream;
     }
 
