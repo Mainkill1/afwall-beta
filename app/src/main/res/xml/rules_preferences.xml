@@ -176,6 +176,13 @@
             android:summary="@string/dns_hijack_cache_size_summary"
             android:title="@string/dns_hijack_cache_size_title" />
 
+        <EditTextPreference
+            android:defaultValue="300"
+            android:dependency="enableDnsHijack"
+            android:key="dnsHijackStaleCacheSeconds"
+            android:summary="@string/dns_hijack_stale_cache_seconds_summary"
+            android:title="@string/dns_hijack_stale_cache_seconds_title" />
+
         <CheckBoxPreference
             android:defaultValue="true"
             android:dependency="enableDnsHijack"

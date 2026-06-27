@@ -52,6 +52,8 @@
 #define DEFAULT_POSITIVE_TTL 60
 #define DEFAULT_NEGATIVE_TTL 30
 #define MAX_CACHE_TTL 86400
+#define DEFAULT_STALE_CACHE_SECONDS 300
+#define MAX_STALE_CACHE_SECONDS 86400
 #define DNS_SOCKET_BUFFER_BYTES 262144
 #define UDP_DRAIN_LIMIT 32
 #define UID_UNKNOWN -1
@@ -171,6 +173,7 @@ typedef struct {
     int fail_open;
     int timeout_ms;
     int cache_size;
+    int stale_cache_seconds;
     int query_logging;
     int persist_query_logs;
     int safe_search;
@@ -231,6 +234,9 @@ typedef struct {
     uint64_t cache_evictions;
     uint64_t cache_ttl_rewrites;
     uint64_t cache_lru_evictions;
+    uint64_t cache_stale_hits;
+    uint64_t cache_stale_negative_hits;
+    uint64_t cache_stale_expired;
     uint64_t cache_reload_preserved;
     uint64_t cache_reload_dropped;
     uint64_t cache_reload_scope_changes;
@@ -290,6 +296,7 @@ typedef struct {
     uint32_t hash;
     bool used;
     bool negative;
+    bool expired_reported;
 } cache_entry_t;
 
 typedef struct {
@@ -2100,9 +2107,11 @@ static bool cache_lookup(const char *domain, uint16_t qtype, const uint8_t *quer
             uint32_t remaining;
             uint64_t lifetime_remaining;
             if (entry->expires_at <= now) {
-                entry->used = false;
-                g_stats.cache_expired++;
-                continue;
+                if (!entry->expired_reported) {
+                    entry->expired_reported = true;
+                    g_stats.cache_expired++;
+                }
+                return false;
             }
             lifetime_remaining = (uint64_t) (entry->expires_at - now);
             remaining = lifetime_remaining > (uint64_t) UINT32_MAX
@@ -2118,6 +2127,49 @@ static bool cache_lookup(const char *domain, uint16_t qtype, const uint8_t *quer
             }
             return true;
         }
+    }
+    return false;
+}
+
+static bool cache_lookup_stale(const char *domain, uint16_t qtype, const uint8_t *query,
+                               uint8_t *out, size_t *out_len, bool *negative,
+                               int stale_seconds) {
+    uint32_t h = hash_domain(domain, qtype);
+    uint32_t start;
+    uint32_t i;
+    time_t now = time(NULL);
+    if (g_cache == NULL || g_cache_capacity <= 0 || stale_seconds <= 0) {
+        return false;
+    }
+    start = h % (uint32_t) g_cache_capacity;
+    for (i = 0; i < (uint32_t) g_cache_capacity; i++) {
+        cache_entry_t *entry = &g_cache[(start + i) % (uint32_t) g_cache_capacity];
+        time_t stale_age;
+        if (!entry->used) {
+            continue;
+        }
+        if (entry->hash != h || entry->qtype != qtype || strcmp(entry->domain, domain) != 0) {
+            continue;
+        }
+        if (entry->expires_at > now) {
+            return false;
+        }
+        stale_age = now - entry->expires_at;
+        if (stale_age < 0 || stale_age > stale_seconds) {
+            entry->used = false;
+            g_stats.cache_stale_expired++;
+            return false;
+        }
+        memcpy(out, entry->response, entry->response_len);
+        out[0] = query[0];
+        out[1] = query[1];
+        *out_len = entry->response_len;
+        entry->last_access = now;
+        rewrite_cached_response_ttls(out, *out_len, entry->cached_at, now, 0);
+        if (negative != NULL) {
+            *negative = entry->negative;
+        }
+        return true;
     }
     return false;
 }
@@ -2163,8 +2215,10 @@ static void cache_store(const char *domain, uint16_t qtype, const uint8_t *respo
     for (i = 0; i < (uint32_t) g_cache_capacity; i++) {
         cache_entry_t *candidate = &g_cache[(slot + i) % (uint32_t) g_cache_capacity];
         if (candidate->used && candidate->expires_at <= now) {
+            if (!candidate->expired_reported) {
+                g_stats.cache_expired++;
+            }
             candidate->used = false;
-            g_stats.cache_expired++;
         }
         if (candidate->used && candidate->hash == h
                 && candidate->qtype == qtype
@@ -2770,6 +2824,7 @@ static void default_config(config_t *cfg) {
     cfg->fail_open = 1;
     cfg->timeout_ms = DEFAULT_TIMEOUT_MS;
     cfg->cache_size = DEFAULT_CACHE_SIZE;
+    cfg->stale_cache_seconds = DEFAULT_STALE_CACHE_SECONDS;
     cfg->query_logging = 1;
     cfg->persist_query_logs = 1;
     safe_copy(cfg->control_socket, sizeof(cfg->control_socket), "/data/local/tmp/afwall_dnsd.sock");
@@ -3001,6 +3056,11 @@ static bool load_config(const char *path, config_t *new_cfg) {
             int cache_size = atoi(value);
             if (cache_size >= 0 && cache_size <= MAX_CACHE_SIZE) {
                 new_cfg->cache_size = cache_size;
+            }
+        } else if (strcmp(key, "stale_cache_seconds") == 0) {
+            int stale_seconds = atoi(value);
+            if (stale_seconds >= 0 && stale_seconds <= MAX_STALE_CACHE_SECONDS) {
+                new_cfg->stale_cache_seconds = stale_seconds;
             }
         } else if (strcmp(key, "query_logging") == 0) {
             new_cfg->query_logging = config_bool_value(value);
@@ -3258,7 +3318,7 @@ static void write_validate_response(int client) {
             "rules_app_suffix_allow=%d\nrules_app_suffix_block=%d\n"
             "rules_regex_allow=%d\nrules_regex_block=%d\n"
             "rules_temp_allow=%d\nrules_temp_block=%d\n"
-            "cache_size=%d\nresolver_scope_hash=%llu\n",
+            "cache_size=%d\nstale_cache_seconds=%d\nresolver_scope_hash=%llu\n",
             (unsigned long long) g_cfg.generation,
             (unsigned long long) candidate->generation,
             (unsigned long long) g_stats.validations,
@@ -3278,6 +3338,7 @@ static void write_validate_response(int client) {
             candidate->temp_allow_count,
             candidate->temp_block_count,
             candidate->cache_size,
+            candidate->stale_cache_seconds,
             (unsigned long long) candidate->resolver_scope_hash);
     free_config_dynamic(candidate);
     free(candidate);
@@ -3472,6 +3533,18 @@ static void handle_dns_query(const config_t *cfg, const uint8_t *query, size_t q
         return;
     }
     g_stats.upstream_failures++;
+    if (cache_lookup_stale(domain, qtype, query, response, response_len, &cache_negative,
+            cfg->stale_cache_seconds)) {
+        g_stats.allowed++;
+        g_stats.cache_stale_hits++;
+        if (cache_negative) {
+            g_stats.cache_stale_negative_hits++;
+        }
+        *action_out = cache_negative ? "cache_stale_negative" : "cache_stale";
+        finish_dns_query(domain, *action_out, transport, source, uid, qtype,
+                "allow", *action_out, "stale_cache", &start);
+        return;
+    }
     if (cfg->fail_open) {
         *response_len = 0;
         *action_out = "upstream_failed";
@@ -3794,6 +3867,8 @@ static void write_health_response(int client) {
             "cache_positive_entries=%d\ncache_negative_entries=%d\n"
             "cache_positive_hits=%llu\ncache_negative_hits=%llu\n"
             "cache_positive_stores=%llu\ncache_negative_stores=%llu\n"
+            "stale_cache_seconds=%d\ncache_stale_hits=%llu\n"
+            "cache_stale_negative_hits=%llu\ncache_stale_expired=%llu\n"
             "cache_ttl_rewrites=%llu\ncache_lru_evictions=%llu\n"
             "cache_reload_preserved=%llu\ncache_reload_dropped=%llu\n"
             "cache_reload_scope_changes=%llu\n"
@@ -3848,6 +3923,10 @@ static void write_health_response(int client) {
             (unsigned long long) g_stats.cache_negative_hits,
             (unsigned long long) g_stats.cache_positive_stores,
             (unsigned long long) g_stats.cache_negative_stores,
+            g_cfg.stale_cache_seconds,
+            (unsigned long long) g_stats.cache_stale_hits,
+            (unsigned long long) g_stats.cache_stale_negative_hits,
+            (unsigned long long) g_stats.cache_stale_expired,
             (unsigned long long) g_stats.cache_ttl_rewrites,
             (unsigned long long) g_stats.cache_lru_evictions,
             (unsigned long long) g_stats.cache_reload_preserved,
@@ -4035,6 +4114,8 @@ static void handle_control(int fd) {
                 "cache_positive_hits=%llu\ncache_negative_hits=%llu\n"
                 "cache_hit_rate_ppm=%llu\ncache_stores=%llu\n"
                 "cache_positive_stores=%llu\ncache_negative_stores=%llu\n"
+                "stale_cache_seconds=%d\ncache_stale_hits=%llu\n"
+                "cache_stale_negative_hits=%llu\ncache_stale_expired=%llu\n"
                 "cache_expired=%llu\ncache_evictions=%llu\ncache_ttl_rewrites=%llu\n"
                 "cache_lru_evictions=%llu\n"
                 "cache_reload_preserved=%llu\ncache_reload_dropped=%llu\n"
@@ -4103,6 +4184,10 @@ static void handle_control(int fd) {
                 (unsigned long long) g_stats.cache_stores,
                 (unsigned long long) g_stats.cache_positive_stores,
                 (unsigned long long) g_stats.cache_negative_stores,
+                g_cfg.stale_cache_seconds,
+                (unsigned long long) g_stats.cache_stale_hits,
+                (unsigned long long) g_stats.cache_stale_negative_hits,
+                (unsigned long long) g_stats.cache_stale_expired,
                 (unsigned long long) g_stats.cache_expired,
                 (unsigned long long) g_stats.cache_evictions,
                 (unsigned long long) g_stats.cache_ttl_rewrites,
