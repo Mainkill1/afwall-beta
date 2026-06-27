@@ -1980,25 +1980,37 @@ public final class DnsHijackManager {
     }
 
     private static String buildNftRestoreCommands(String family, String table, String portValue) {
+        List<String> nftCommands = new ArrayList<>();
+        appendNftCommand(nftCommands, "add table " + family + " " + table);
+        appendNftCommand(nftCommands, "add chain " + family + " " + table + " " + NFT_OUTPUT
+                + " { type nat hook output priority dstnat; policy accept; }");
+        appendNftCommand(nftCommands, "add chain " + family + " " + table + " " + NFT_PREROUTING
+                + " { type nat hook prerouting priority dstnat; policy accept; }");
+        appendNftOutputRules(nftCommands, family, table, portValue);
+        appendNftPreroutingRules(nftCommands, family, table, portValue);
+
         StringBuilder command = new StringBuilder();
         command.append("nft delete table ").append(family).append(' ').append(table)
                 .append(" >/dev/null 2>&1 || true; ");
-        appendNftCommand(command, "add table " + family + " " + table);
-        appendNftCommand(command, "add chain " + family + " " + table + " " + NFT_OUTPUT
-                + " { type nat hook output priority dstnat; policy accept; }");
-        appendNftCommand(command, "add chain " + family + " " + table + " " + NFT_PREROUTING
-                + " { type nat hook prerouting priority dstnat; policy accept; }");
-        appendNftOutputRules(command, family, table, portValue);
-        appendNftPreroutingRules(command, family, table, portValue);
+        appendNftScriptCommand(command, nftCommands);
         command.append("true; ");
         return command.toString();
     }
 
-    private static void appendNftCommand(StringBuilder command, String nftArgs) {
-        command.append("nft ").append(shellQuote(nftArgs)).append(" && ");
+    private static void appendNftCommand(List<String> commands, String nftArgs) {
+        commands.add(nftArgs);
     }
 
-    private static void appendNftOutputRules(StringBuilder command, String family,
+    private static void appendNftScriptCommand(StringBuilder command, List<String> nftCommands) {
+        // nft chain definitions include shell-significant braces and semicolons, so feed nft a script.
+        command.append("printf '%s\\n'");
+        for (String nftCommand : nftCommands) {
+            command.append(' ').append(shellQuote(nftCommand));
+        }
+        command.append(" | nft -f - && ");
+    }
+
+    private static void appendNftOutputRules(List<String> command, String family,
                                              String table, String portValue) {
         List<Integer> bypassUids = parseUidList(G.dnsHijackBypassUids());
         List<Integer> captureUids = parseUidList(G.dnsHijackCaptureUids());
@@ -2045,7 +2057,7 @@ public final class DnsHijackManager {
         }
     }
 
-    private static void appendNftPreroutingRules(StringBuilder command, String family,
+    private static void appendNftPreroutingRules(List<String> command, String family,
                                                  String table, String portValue) {
         List<String> bypassInterfaces = parseInterfaceList(G.dnsHijackBypassInterfaces());
         List<String> captureInterfaces = parseInterfaceList(G.dnsHijackCaptureInterfaces());
@@ -2068,7 +2080,7 @@ public final class DnsHijackManager {
         }
     }
 
-    private static void appendNftRedirect(StringBuilder command, String family, String table,
+    private static void appendNftRedirect(List<String> command, String family, String table,
                                           String chain, String matcher, String portValue) {
         String prefix = matcher == null || matcher.isEmpty() ? "" : matcher + " ";
         appendNftRule(command, family, table, chain,
@@ -2077,7 +2089,7 @@ public final class DnsHijackManager {
                 prefix + "tcp dport 53 redirect to :" + portValue);
     }
 
-    private static void appendNftRule(StringBuilder command, String family, String table,
+    private static void appendNftRule(List<String> command, String family, String table,
                                       String chain, String rule) {
         appendNftCommand(command, "add rule " + family + " " + table + " " + chain + " " + rule);
     }
