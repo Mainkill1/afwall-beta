@@ -35,9 +35,9 @@
 #define MAX_DOMAIN 256
 #define MAX_LABEL 64
 #define INITIAL_RULE_CAPACITY 1024
+#define INITIAL_REGEX_CAPACITY 16
 #define MIN_EXACT_INDEX_SIZE 65536
 #define MAX_EXACT_INDEX_SIZE (1 << 24)
-#define MAX_REGEX 128
 #define MAX_TEMP_RULES 1024
 #define MAX_UPSTREAMS 8
 #define MAX_SPLIT_UPSTREAMS 32
@@ -72,6 +72,12 @@ typedef struct {
     char pattern[MAX_DOMAIN];
     bool valid;
 } regex_rule_t;
+
+typedef struct {
+    regex_rule_t *items;
+    int count;
+    int capacity;
+} regex_rule_list_t;
 
 typedef struct {
     char value[MAX_DOMAIN];
@@ -133,10 +139,8 @@ typedef struct {
     int exact_block_index_size;
     suffix_trie_t suffix_allow_trie;
     suffix_trie_t suffix_block_trie;
-    regex_rule_t regex_allow[MAX_REGEX];
-    regex_rule_t regex_block[MAX_REGEX];
-    int regex_allow_count;
-    int regex_block_count;
+    regex_rule_list_t regex_allow;
+    regex_rule_list_t regex_block;
     temp_rule_t temp_allow[MAX_TEMP_RULES];
     temp_rule_t temp_block[MAX_TEMP_RULES];
     int temp_allow_count;
@@ -623,20 +627,21 @@ static void clear_log_ring(void) {
     pthread_mutex_unlock(&g_log_mutex);
 }
 
-static void free_regex_rules(config_t *cfg) {
+static void free_regex_rule_list(regex_rule_list_t *list) {
     int i;
-    for (i = 0; i < cfg->regex_allow_count; i++) {
-        if (cfg->regex_allow[i].valid) {
-            regfree(&cfg->regex_allow[i].compiled);
-            cfg->regex_allow[i].valid = false;
+    if (list == NULL) {
+        return;
+    }
+    for (i = 0; i < list->count; i++) {
+        if (list->items[i].valid) {
+            regfree(&list->items[i].compiled);
+            list->items[i].valid = false;
         }
     }
-    for (i = 0; i < cfg->regex_block_count; i++) {
-        if (cfg->regex_block[i].valid) {
-            regfree(&cfg->regex_block[i].compiled);
-            cfg->regex_block[i].valid = false;
-        }
-    }
+    free(list->items);
+    list->items = NULL;
+    list->count = 0;
+    list->capacity = 0;
 }
 
 static void free_suffix_trie(suffix_trie_t *trie) {
@@ -663,7 +668,8 @@ static void free_config_dynamic(config_t *cfg) {
     if (cfg == NULL) {
         return;
     }
-    free_regex_rules(cfg);
+    free_regex_rule_list(&cfg->regex_allow);
+    free_regex_rule_list(&cfg->regex_block);
     free_string_rule_list(&cfg->exact_allow);
     free_string_rule_list(&cfg->suffix_allow);
     free_string_rule_list(&cfg->exact_block);
@@ -716,6 +722,34 @@ static bool add_string_rule(string_rule_list_t *rules, const char *value) {
     safe_copy(rules->items[rules->count].value, sizeof(rules->items[rules->count].value), value);
     lower_ascii(rules->items[rules->count].value);
     rules->count++;
+    return true;
+}
+
+static bool reserve_regex_rule_list(regex_rule_list_t *list, int needed) {
+    int next_capacity;
+    regex_rule_t *items;
+    if (list == NULL || needed < 0) {
+        return false;
+    }
+    if (list->capacity >= needed) {
+        return true;
+    }
+    next_capacity = list->capacity <= 0 ? INITIAL_REGEX_CAPACITY : list->capacity;
+    while (next_capacity < needed) {
+        if (next_capacity > INT_MAX / 2) {
+            return false;
+        }
+        next_capacity *= 2;
+    }
+    items = (regex_rule_t *) realloc(list->items,
+            (size_t) next_capacity * sizeof(regex_rule_t));
+    if (items == NULL) {
+        return false;
+    }
+    memset(items + list->capacity, 0,
+            (size_t) (next_capacity - list->capacity) * sizeof(regex_rule_t));
+    list->items = items;
+    list->capacity = next_capacity;
     return true;
 }
 
@@ -777,19 +811,24 @@ static bool add_temp_rule(temp_rule_t *rules, int *count, const char *value) {
     return true;
 }
 
-static bool add_regex_rule(regex_rule_t *rules, int *count, const char *value) {
+static bool add_regex_rule(regex_rule_list_t *rules, const char *value) {
     regex_rule_t *rule;
-    if (*count >= MAX_REGEX || value == NULL || value[0] == '\0') {
+    if (rules == NULL || value == NULL || value[0] == '\0') {
         return false;
     }
-    rule = &rules[*count];
+    if (!reserve_regex_rule_list(rules, rules->count + 1)) {
+        return false;
+    }
+    rule = &rules->items[rules->count];
     memset(rule, 0, sizeof(*rule));
     safe_copy(rule->pattern, sizeof(rule->pattern), value);
+    /* Compile during reload so malformed regex rules reject the pending generation. */
     if (regcomp(&rule->compiled, value, REG_EXTENDED | REG_NOSUB | REG_ICASE) != 0) {
+        memset(rule, 0, sizeof(*rule));
         return false;
     }
     rule->valid = true;
-    (*count)++;
+    rules->count++;
     return true;
 }
 
@@ -1065,10 +1104,14 @@ static bool domain_has_suffix(const char *domain, const char *suffix) {
     return suffix_len == domain_len || domain[domain_len - suffix_len - 1] == '.';
 }
 
-static bool regex_match_rules(const regex_rule_t *rules, int count, const char *domain) {
+static bool regex_match_rules(const regex_rule_list_t *rules, const char *domain) {
     int i;
-    for (i = 0; i < count; i++) {
-        if (rules[i].valid && regexec(&rules[i].compiled, domain, 0, NULL, 0) == 0) {
+    if (rules == NULL || domain == NULL) {
+        return false;
+    }
+    for (i = 0; i < rules->count; i++) {
+        if (rules->items[i].valid
+                && regexec(&rules->items[i].compiled, domain, 0, NULL, 0) == 0) {
             return true;
         }
     }
@@ -1081,7 +1124,7 @@ static decision_t evaluate_domain(const config_t *cfg, const char *domain, const
     bool exact_allow = exact_match_indexed(&cfg->exact_allow, cfg->exact_allow_index,
             cfg->exact_allow_index_size, domain);
     bool suffix_allow = suffix_trie_match(&cfg->suffix_allow_trie, domain);
-    bool regex_allow = regex_match_rules(cfg->regex_allow, cfg->regex_allow_count, domain);
+    bool regex_allow = regex_match_rules(&cfg->regex_allow, domain);
     bool block = false;
 
     if (temp_match(cfg->temp_block, cfg->temp_block_count, domain, now)) {
@@ -1094,7 +1137,7 @@ static decision_t evaluate_domain(const config_t *cfg, const char *domain, const
     } else if (suffix_trie_match(&cfg->suffix_block_trie, domain)) {
         *reason = "suffix_block";
         block = true;
-    } else if (regex_match_rules(cfg->regex_block, cfg->regex_block_count, domain)) {
+    } else if (regex_match_rules(&cfg->regex_block, domain)) {
         *reason = "regex_block";
         block = true;
     }
@@ -1831,7 +1874,7 @@ static bool parse_split_upstream(config_t *cfg, const char *value) {
 }
 
 static bool load_string_rule_file(string_rule_list_t *rules, const char *path);
-static void load_regex_rule_file(regex_rule_t *rules, int *count, const char *path);
+static bool load_regex_rule_file(regex_rule_list_t *rules, const char *path);
 
 static bool load_config(const char *path, config_t *new_cfg) {
     FILE *fp;
@@ -1932,13 +1975,25 @@ static bool load_config(const char *path, config_t *new_cfg) {
                 return false;
             }
         } else if (strcmp(key, "allow_regex") == 0) {
-            add_regex_rule(new_cfg->regex_allow, &new_cfg->regex_allow_count, value);
+            if (!add_regex_rule(&new_cfg->regex_allow, value)) {
+                fclose(fp);
+                return false;
+            }
         } else if (strcmp(key, "allow_regex_file") == 0) {
-            load_regex_rule_file(new_cfg->regex_allow, &new_cfg->regex_allow_count, value);
+            if (!load_regex_rule_file(&new_cfg->regex_allow, value)) {
+                fclose(fp);
+                return false;
+            }
         } else if (strcmp(key, "block_regex") == 0) {
-            add_regex_rule(new_cfg->regex_block, &new_cfg->regex_block_count, value);
+            if (!add_regex_rule(&new_cfg->regex_block, value)) {
+                fclose(fp);
+                return false;
+            }
         } else if (strcmp(key, "block_regex_file") == 0) {
-            load_regex_rule_file(new_cfg->regex_block, &new_cfg->regex_block_count, value);
+            if (!load_regex_rule_file(&new_cfg->regex_block, value)) {
+                fclose(fp);
+                return false;
+            }
         } else if (strcmp(key, "temp_allow") == 0) {
             add_temp_rule(new_cfg->temp_allow, &new_cfg->temp_allow_count, value);
         } else if (strcmp(key, "temp_block") == 0) {
@@ -1988,24 +2043,28 @@ static bool load_string_rule_file(string_rule_list_t *rules, const char *path) {
     return true;
 }
 
-static void load_regex_rule_file(regex_rule_t *rules, int *count, const char *path) {
+static bool load_regex_rule_file(regex_rule_list_t *rules, const char *path) {
     FILE *fp;
     char line[1024];
     if (path == NULL || path[0] == '\0') {
-        return;
+        return true;
     }
     fp = fopen(path, "r");
     if (fp == NULL) {
-        return;
+        return true;
     }
     while (fgets(line, sizeof(line), fp) != NULL) {
         trim(line);
         if (line[0] == '\0' || line[0] == '#') {
             continue;
         }
-        add_regex_rule(rules, count, line);
+        if (!add_regex_rule(rules, line)) {
+            fclose(fp);
+            return false;
+        }
     }
     fclose(fp);
+    return true;
 }
 
 static bool reload_config(void) {
@@ -2420,7 +2479,7 @@ static void write_health_response(int client) {
             g_cfg.suffix_block_trie.count,
             g_cfg.exact_allow.count + g_cfg.suffix_allow.count
                     + g_cfg.exact_block.count + g_cfg.suffix_block.count
-                    + g_cfg.regex_allow_count + g_cfg.regex_block_count
+                    + g_cfg.regex_allow.count + g_cfg.regex_block.count
                     + g_cfg.temp_allow_count + g_cfg.temp_block_count);
 }
 
@@ -2618,8 +2677,8 @@ static void handle_control(int fd) {
                 g_cfg.suffix_allow.count,
                 g_cfg.exact_block.count,
                 g_cfg.suffix_block.count,
-                g_cfg.regex_allow_count,
-                g_cfg.regex_block_count,
+                g_cfg.regex_allow.count,
+                g_cfg.regex_block.count,
                 g_cfg.temp_allow_count,
                 g_cfg.temp_block_count,
                 g_cfg.split_upstream_count);
