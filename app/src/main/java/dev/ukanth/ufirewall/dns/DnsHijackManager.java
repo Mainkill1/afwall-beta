@@ -340,6 +340,7 @@ public final class DnsHijackManager {
         long queries = parseLong(firstValue(statusValues, healthValues, "queries"), 0L);
         long blocked = parseLong(firstValue(statusValues, healthValues, "blocked"), 0L);
         long reloads = parseLong(firstValue(statusValues, healthValues, "reloads"), 0L);
+        long reloadFailures = parseLong(firstValue(statusValues, healthValues, "reload_failures"), 0L);
         long upstreamLatency = parseLong(firstValue(healthValues, statusValues, "upstream_probe_ms"), -1L);
         String upstreamProbe = firstValue(healthValues, statusValues, "upstream_probe");
         String restartCount = readSmallFileValue(new File(workDir(context), RESTART_COUNT), "0");
@@ -376,7 +377,8 @@ public final class DnsHijackManager {
                 + "\nUpstream: " + upstream
                 + " | Blocklist updated: " + blocklistUpdated
                 + "\nRestarts: " + restartCount
-                + " | Reloads: " + reloads;
+                + " | Reloads: " + reloads
+                + " | Reload failures: " + reloadFailures;
         return new DnsDashboardSnapshot(statusLine, details);
     }
 

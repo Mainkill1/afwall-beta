@@ -255,6 +255,9 @@ typedef struct {
     uint64_t upstream_latency_ms;
     uint64_t max_latency_ms;
     uint64_t reloads;
+    uint64_t reload_failures;
+    uint64_t validations;
+    uint64_t validation_failures;
     uint64_t uid_lookup_successes;
     uint64_t uid_lookup_misses;
     uint64_t uid_cache_hits;
@@ -3176,11 +3179,13 @@ static bool reload_config(void) {
     config_t *next = (config_t *) calloc(1, sizeof(config_t));
     cache_entry_t *next_cache = NULL;
     if (next == NULL) {
+        g_stats.reload_failures++;
         return false;
     }
     if (!load_config(g_config_path, next)) {
         free_config_dynamic(next);
         free(next);
+        g_stats.reload_failures++;
         return false;
     }
     if (next->cache_size > 0) {
@@ -3188,6 +3193,7 @@ static bool reload_config(void) {
         if (next_cache == NULL) {
             free_config_dynamic(next);
             free(next);
+            g_stats.reload_failures++;
             return false;
         }
     }
@@ -3216,22 +3222,32 @@ static bool reload_config(void) {
 
 static void write_validate_response(int client) {
     config_t *candidate = (config_t *) calloc(1, sizeof(config_t));
+    g_stats.validations++;
     if (candidate == NULL) {
+        g_stats.validation_failures++;
         write_control_response(client,
-                "validate=0\nstatus=allocation_failed\nactive_generation=%llu\n",
-                (unsigned long long) g_cfg.generation);
+                "validate=0\nstatus=allocation_failed\nactive_generation=%llu\n"
+                "validations=%llu\nvalidation_failures=%llu\n",
+                (unsigned long long) g_cfg.generation,
+                (unsigned long long) g_stats.validations,
+                (unsigned long long) g_stats.validation_failures);
         return;
     }
     if (!load_config(g_config_path, candidate)) {
         free_config_dynamic(candidate);
         free(candidate);
+        g_stats.validation_failures++;
         write_control_response(client,
-                "validate=0\nstatus=config_rejected\nactive_generation=%llu\n",
-                (unsigned long long) g_cfg.generation);
+                "validate=0\nstatus=config_rejected\nactive_generation=%llu\n"
+                "validations=%llu\nvalidation_failures=%llu\n",
+                (unsigned long long) g_cfg.generation,
+                (unsigned long long) g_stats.validations,
+                (unsigned long long) g_stats.validation_failures);
         return;
     }
     write_control_response(client,
             "validate=1\nstatus=ok\nactive_generation=%llu\ncandidate_generation=%llu\n"
+            "validations=%llu\nvalidation_failures=%llu\n"
             "upstreams=%d\nsplit_upstreams=%d\n"
             "rules_exact_allow=%d\nrules_suffix_allow=%d\n"
             "rules_exact_block=%d\nrules_suffix_block=%d\n"
@@ -3242,6 +3258,8 @@ static void write_validate_response(int client) {
             "cache_size=%d\nresolver_scope_hash=%llu\n",
             (unsigned long long) g_cfg.generation,
             (unsigned long long) candidate->generation,
+            (unsigned long long) g_stats.validations,
+            (unsigned long long) g_stats.validation_failures,
             candidate->upstream_count,
             candidate->split_upstream_count,
             candidate->exact_allow.count,
@@ -3764,6 +3782,7 @@ static void write_health_response(int client) {
             "generation=%llu\nupstreams=%d\nsplit_upstreams=%d\nupstream_probe=%s\n"
             "compiled_upstream_addresses=%d\nreusable_udp_upstream_sockets=%d\n"
             "resolver_scope_hash=%llu\n"
+            "reloads=%llu\nreload_failures=%llu\nvalidations=%llu\nvalidation_failures=%llu\n"
             "upstream_probe_ms=%d\nupstream_probe_index=%d\nupstream_probe_rcode=%d\n"
             "queries=%llu\nblocked=%llu\nallowed=%llu\ncache_size=%d\ncache_entries=%d\n"
             "socket_buffer_bytes=%d\nudp_drain_limit=%d\n"
@@ -3800,6 +3819,10 @@ static void write_health_response(int client) {
             compiled_upstream_address_count(&g_cfg),
             reusable_udp_upstream_socket_count(&g_cfg),
             (unsigned long long) g_cfg.resolver_scope_hash,
+            (unsigned long long) g_stats.reloads,
+            (unsigned long long) g_stats.reload_failures,
+            (unsigned long long) g_stats.validations,
+            (unsigned long long) g_stats.validation_failures,
             latency_ms,
             upstream_index,
             rcode,
@@ -4015,7 +4038,8 @@ static void handle_control(int fd) {
                 "compiled_upstream_addresses=%d\nreusable_udp_upstream_sockets=%d\n"
                 "resolver_scope_hash=%llu\n"
                 "avg_latency_ms=%llu\nmax_latency_ms=%llu\nupstream_avg_latency_ms=%llu\n"
-                "reloads=%llu\nexact_allow_index_size=%d\nexact_block_index_size=%d\n"
+                "reloads=%llu\nreload_failures=%llu\nvalidations=%llu\nvalidation_failures=%llu\n"
+                "exact_allow_index_size=%d\nexact_block_index_size=%d\n"
                 "app_exact_allow_index_size=%d\napp_exact_block_index_size=%d\n"
                 "suffix_allow_trie_nodes=%d\n"
                 "suffix_block_trie_nodes=%d\napp_suffix_allow_trie_nodes=%d\n"
@@ -4091,6 +4115,9 @@ static void handle_control(int fd) {
                 (unsigned long long) g_stats.max_latency_ms,
                 (unsigned long long) div_u64(g_stats.upstream_latency_ms, g_stats.upstream_requests),
                 (unsigned long long) g_stats.reloads,
+                (unsigned long long) g_stats.reload_failures,
+                (unsigned long long) g_stats.validations,
+                (unsigned long long) g_stats.validation_failures,
                 g_cfg.exact_allow_index_size,
                 g_cfg.exact_block_index_size,
                 g_cfg.app_exact_allow_index_size,
@@ -4122,7 +4149,9 @@ static void handle_control(int fd) {
         if (reload_config()) {
             write_control_response(client, "ok reload generation=%llu\n", (unsigned long long) g_cfg.generation);
         } else {
-            write_control_response(client, "error reload\n");
+            write_control_response(client, "error reload active_generation=%llu reload_failures=%llu\n",
+                    (unsigned long long) g_cfg.generation,
+                    (unsigned long long) g_stats.reload_failures);
         }
     } else if (strcmp(cmd, "logs") == 0) {
         int i;
