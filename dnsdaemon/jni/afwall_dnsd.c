@@ -2328,6 +2328,8 @@ static bool parse_upstream_value(const char *value, upstream_t *upstream) {
     } else if (strncmp(target, "tcp://", 6) == 0) {
         upstream->protocol = UPSTREAM_PROTO_TCP;
         target += 6;
+    } else if (strstr(target, "://") != NULL) {
+        return false;
     }
     trim(target);
     if (target[0] == '[') {

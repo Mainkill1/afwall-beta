@@ -1294,6 +1294,8 @@ public final class DnsHijackManager {
                 protocol = "tcp";
                 value = value.substring(6).trim();
                 host = value;
+            } else if (value.contains("://")) {
+                return null;
             }
             if (value.startsWith("[") && value.contains("]")) {
                 int end = value.indexOf(']');
@@ -1310,7 +1312,8 @@ public final class DnsHijackManager {
                 }
             }
             host = host.trim().toLowerCase(Locale.US);
-            if (host.isEmpty()) {
+            if (host.isEmpty() || host.contains("/") || host.contains("\\")
+                    || host.contains(" ") || host.contains("\t")) {
                 return null;
             }
             return new UpstreamTarget(host, port, protocol);
@@ -1715,8 +1718,13 @@ public final class DnsHijackManager {
     private static List<String> resolveUpstreamValue(Context context, String value) {
         List<String> resolvedValues = new ArrayList<>();
         UpstreamTarget target = UpstreamTarget.parse(value);
-        if (target == null || target.hasLiteralHost()) {
-            resolvedValues.add(value.toLowerCase(Locale.US));
+        if (target == null) {
+            ApplicationErrorLog.add(context, "DNS upstream entry ignored because it is invalid or unsupported: "
+                    + safeLogValue(value));
+            return resolvedValues;
+        }
+        if (target.hasLiteralHost()) {
+            resolvedValues.add(target.toConfigValue());
             return resolvedValues;
         }
 
@@ -1844,6 +1852,15 @@ public final class DnsHijackManager {
         query.write(0x00);
         query.write(0x01);
         return query.toByteArray();
+    }
+
+    private static String safeLogValue(String raw) {
+        String clean = raw == null ? "" : raw.trim().replace('\n', ' ').replace('\r', ' ');
+        clean = clean.replaceAll("\\s+", " ");
+        if (clean.length() > 120) {
+            clean = clean.substring(0, 120);
+        }
+        return clean.isEmpty() ? "empty" : clean;
     }
 
     private static void addResolvedAddresses(List<String> addresses, byte[] response, int qtype) {
