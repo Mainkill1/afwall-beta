@@ -1043,6 +1043,7 @@ public final class DnsHijackManager {
                                                      String iptables, String chain,
                                                      String preChain, String nftFamily,
                                                      String nftTable) {
+        int port = G.dnsHijackPort(DEFAULT_PORT);
         commands.add(buildChainStatusCommand(prefix + "_chain", iptables, chain));
         commands.add(buildChainStatusCommand(prefix + "_pre_chain", iptables, preChain));
         commands.add(buildRuleStatusCommand(prefix + "_output_udp", iptables,
@@ -1054,6 +1055,14 @@ public final class DnsHijackManager {
         commands.add(buildRuleStatusCommand(prefix + "_prerouting_tcp", iptables,
                 "PREROUTING", "tcp", preChain));
         commands.add(buildNftTableStatusCommand(prefix + "_nft_table", nftFamily, nftTable));
+        commands.add(buildNftRedirectStatusCommand(prefix + "_nft_output_udp",
+                nftFamily, nftTable, NFT_OUTPUT, "udp", port));
+        commands.add(buildNftRedirectStatusCommand(prefix + "_nft_output_tcp",
+                nftFamily, nftTable, NFT_OUTPUT, "tcp", port));
+        commands.add(buildNftRedirectStatusCommand(prefix + "_nft_prerouting_udp",
+                nftFamily, nftTable, NFT_PREROUTING, "udp", port));
+        commands.add(buildNftRedirectStatusCommand(prefix + "_nft_prerouting_tcp",
+                nftFamily, nftTable, NFT_PREROUTING, "tcp", port));
     }
 
     private static String buildChainStatusCommand(String key, String iptables, String chain) {
@@ -1077,24 +1086,37 @@ public final class DnsHijackManager {
                 + key + "=0; fi";
     }
 
+    private static String buildNftRedirectStatusCommand(String key, String family, String table,
+                                                        String chain, String protocol, int port) {
+        String pattern = protocol + " dport 53.*redirect to :" + port;
+        return "if command -v nft >/dev/null 2>&1 && nft list chain "
+                + shellQuote(family) + " " + shellQuote(table) + " " + shellQuote(chain)
+                + " 2>/dev/null | grep -q -- " + shellQuote(pattern)
+                + "; then echo " + key + "=1; else echo " + key + "=0; fi";
+    }
+
     private static String redirectFamilyStatus(Map<String, String> values, String prefix) {
-        boolean nft = "1".equals(values.get(prefix + "_nft_table"));
+        boolean nftTable = "1".equals(values.get(prefix + "_nft_table"));
         int installed = redirectFamilyScore(values, prefix);
-        if (nft && installed >= 6) {
+        int nftInstalled = redirectFamilyNftScore(values, prefix);
+        if (nftInstalled >= 4 && installed >= 6) {
             return "installed (iptables+nft)";
         }
-        if (nft) {
+        if (nftInstalled >= 4) {
             return "installed (nft)";
         }
         if (installed >= 6) {
             return "installed";
         }
-        return installed > 0 ? "partial" : "missing";
+        if (installed > 0 || nftInstalled > 0 || nftTable) {
+            return "partial";
+        }
+        return "missing";
     }
 
     private static boolean redirectFamilyHealthy(Map<String, String> values, String prefix) {
-        return "1".equals(values.get(prefix + "_nft_table"))
-                || redirectFamilyScore(values, prefix) >= 6;
+        return redirectFamilyScore(values, prefix) >= 6
+                || redirectFamilyNftScore(values, prefix) >= 4;
     }
 
     private static int redirectFamilyScore(Map<String, String> values, String prefix) {
@@ -1105,6 +1127,22 @@ public final class DnsHijackManager {
                 "_output_tcp",
                 "_prerouting_udp",
                 "_prerouting_tcp"
+        };
+        int score = 0;
+        for (String suffix : keys) {
+            if ("1".equals(values.get(prefix + suffix))) {
+                score++;
+            }
+        }
+        return score;
+    }
+
+    private static int redirectFamilyNftScore(Map<String, String> values, String prefix) {
+        String[] keys = new String[] {
+                "_nft_output_udp",
+                "_nft_output_tcp",
+                "_nft_prerouting_udp",
+                "_nft_prerouting_tcp"
         };
         int score = 0;
         for (String suffix : keys) {
