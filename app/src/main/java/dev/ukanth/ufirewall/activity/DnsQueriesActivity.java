@@ -50,6 +50,7 @@ public class DnsQueriesActivity extends AppCompatActivity {
     private static final int MENU_TOGGLE_HISTORY = 4;
     private static final int MENU_EXPORT = 5;
     private static final int QUERY_ACTION_VIEW_APP = 100;
+    private static final int QUERY_ACTION_VIEW_RULE = 101;
     private static final long REFRESH_MS = 2500L;
 
     private final Handler handler = new Handler(Looper.getMainLooper());
@@ -227,6 +228,8 @@ public class DnsQueriesActivity extends AppCompatActivity {
                 DnsHijackManager.RULE_BLOCK_SUFFIX);
         addQueryAction(labels, actions, R.string.dns_query_temp_block,
                 DnsHijackManager.RULE_TEMP_BLOCK);
+        addQueryAction(labels, actions, R.string.dns_query_view_rule,
+                QUERY_ACTION_VIEW_RULE);
         if (resolveAppPackage(entry) != null) {
             addQueryAction(labels, actions, R.string.dns_query_view_app,
                     QUERY_ACTION_VIEW_APP);
@@ -249,6 +252,10 @@ public class DnsQueriesActivity extends AppCompatActivity {
         int action;
         if (actionId == QUERY_ACTION_VIEW_APP) {
             openQueryApp(entry);
+            return;
+        }
+        if (actionId == QUERY_ACTION_VIEW_RULE) {
+            showRuleDetails(entry);
             return;
         }
         switch (actionId) {
@@ -277,6 +284,32 @@ public class DnsQueriesActivity extends AppCompatActivity {
         Api.setRulesUpToDate(false);
         Api.toast(this, getString(added ? R.string.dns_query_rule_added : R.string.dns_query_rule_exists));
         loadQueries(false);
+    }
+
+    private void showRuleDetails(DnsHijackManager.QueryEntry entry) {
+        String timestamp = entry.timestamp > 0
+                ? new SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US)
+                .format(new Date(entry.timestamp * 1000L))
+                : "unknown";
+        StringBuilder details = new StringBuilder();
+        details.append("Time: ").append(timestamp).append('\n');
+        details.append("Domain: ").append(entry.domain).append('\n');
+        details.append("Decision: ").append(entry.result).append('\n');
+        details.append("Rule source: ").append(entry.rule).append('\n');
+        details.append("Action: ").append(entry.action).append('\n');
+        details.append("Query type: ").append(entry.qtype).append('\n');
+        details.append("Transport: ").append(entry.transport).append('\n');
+        details.append("Source: ").append(entry.source).append('\n');
+        details.append("UID: ").append(entry.uid).append('\n');
+        details.append("App: ").append(resolveAppLabel(entry)).append('\n');
+        details.append("Upstream: ").append(entry.upstream).append('\n');
+        details.append("Latency: ").append(entry.latency);
+
+        new MaterialDialog.Builder(this)
+                .title(R.string.dns_query_rule_details_title)
+                .content(details.toString())
+                .positiveText(R.string.OK)
+                .show();
     }
 
     private void openQueryApp(DnsHijackManager.QueryEntry entry) {
