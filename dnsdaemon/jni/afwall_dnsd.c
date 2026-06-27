@@ -2078,14 +2078,12 @@ static bool cache_lookup(const char *domain, uint16_t qtype, const uint8_t *quer
     uint32_t h = hash_domain(domain, qtype);
     uint32_t start;
     uint32_t i;
-    uint32_t probe_count;
     time_t now = time(NULL);
     if (g_cache == NULL || g_cache_capacity <= 0) {
         return false;
     }
     start = h % (uint32_t) g_cache_capacity;
-    probe_count = g_cache_capacity < 8 ? (uint32_t) g_cache_capacity : 8u;
-    for (i = 0; i < probe_count; i++) {
+    for (i = 0; i < (uint32_t) g_cache_capacity; i++) {
         cache_entry_t *entry = &g_cache[(start + i) % (uint32_t) g_cache_capacity];
         if (!entry->used) {
             continue;
@@ -2136,10 +2134,10 @@ static void cache_store(const char *domain, uint16_t qtype, const uint8_t *respo
     uint32_t ttl;
     cache_entry_t *entry;
     uint32_t i;
-    uint32_t probe_count;
     time_t now = time(NULL);
     bool evicting = false;
     bool negative;
+    cache_entry_t *reusable = NULL;
     cache_entry_t *lru = NULL;
     if (g_cache == NULL || g_cache_capacity <= 0
             || response_len < 12 || response_len > MAX_PACKET
@@ -2153,29 +2151,31 @@ static void cache_store(const char *domain, uint16_t qtype, const uint8_t *respo
     }
     h = hash_domain(domain, qtype);
     slot = h % (uint32_t) g_cache_capacity;
-    probe_count = g_cache_capacity < 8 ? (uint32_t) g_cache_capacity : 8u;
     entry = NULL;
-    for (i = 0; i < probe_count; i++) {
+    for (i = 0; i < (uint32_t) g_cache_capacity; i++) {
         cache_entry_t *candidate = &g_cache[(slot + i) % (uint32_t) g_cache_capacity];
+        if (candidate->used && candidate->expires_at <= now) {
+            candidate->used = false;
+            g_stats.cache_expired++;
+        }
         if (candidate->used && candidate->hash == h
                 && candidate->qtype == qtype
                 && strcmp(candidate->domain, domain) == 0) {
             entry = candidate;
             break;
         }
-        if (!candidate->used || candidate->expires_at <= now) {
-            if (candidate->used) {
-                g_stats.cache_expired++;
+        if (!candidate->used) {
+            if (reusable == NULL) {
+                reusable = candidate;
             }
-            entry = candidate;
-            break;
+            continue;
         }
         if (lru == NULL || candidate->last_access < lru->last_access) {
             lru = candidate;
         }
     }
     if (entry == NULL) {
-        entry = lru != NULL ? lru : &g_cache[slot];
+        entry = reusable != NULL ? reusable : lru != NULL ? lru : &g_cache[slot];
         evicting = entry->used && entry->expires_at > now;
     }
     if (evicting) {
@@ -2205,8 +2205,8 @@ static bool cache_insert_existing(cache_entry_t *cache, int capacity,
                                   const cache_entry_t *source, time_t now) {
     uint32_t slot;
     uint32_t i;
-    uint32_t probe_count;
     cache_entry_t *entry = NULL;
+    cache_entry_t *reusable = NULL;
     cache_entry_t *lru = NULL;
     if (cache == NULL || capacity <= 0 || source == NULL || !source->used
             || source->expires_at <= now || source->response_len == 0
@@ -2214,25 +2214,29 @@ static bool cache_insert_existing(cache_entry_t *cache, int capacity,
         return false;
     }
     slot = source->hash % (uint32_t) capacity;
-    probe_count = capacity < 8 ? (uint32_t) capacity : 8u;
-    for (i = 0; i < probe_count; i++) {
+    for (i = 0; i < (uint32_t) capacity; i++) {
         cache_entry_t *candidate = &cache[(slot + i) % (uint32_t) capacity];
+        if (candidate->used && candidate->expires_at <= now) {
+            candidate->used = false;
+        }
         if (candidate->used && candidate->hash == source->hash
                 && candidate->qtype == source->qtype
                 && strcmp(candidate->domain, source->domain) == 0) {
             entry = candidate;
             break;
         }
-        if (!candidate->used || candidate->expires_at <= now) {
-            entry = candidate;
-            break;
+        if (!candidate->used) {
+            if (reusable == NULL) {
+                reusable = candidate;
+            }
+            continue;
         }
         if (lru == NULL || candidate->last_access < lru->last_access) {
             lru = candidate;
         }
     }
     if (entry == NULL) {
-        entry = lru != NULL ? lru : &cache[slot];
+        entry = reusable != NULL ? reusable : lru != NULL ? lru : &cache[slot];
     }
     *entry = *source;
     entry->used = true;
