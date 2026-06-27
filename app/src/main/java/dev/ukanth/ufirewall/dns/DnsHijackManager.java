@@ -115,7 +115,7 @@ public final class DnsHijackManager {
         }
 
         if (!ipv6) {
-            ApplicationErrorLog.add(context, "DNS hijacker enabled; daemon start and DNS redirect rules queued");
+            ApplicationErrorLog.add(context, "DNS hijacker enabled; daemon start, daemon filter bypass, and DNS redirect rules queued");
             logRedirectPolicy(context, "DNS redirect policy queued");
             commands.add("#LITERAL# " + buildRepairServiceEventLogFilesCommand(context));
             commands.add("#LITERAL# " + shellQuote(supervisorPath(context)) + " restart");
@@ -151,7 +151,7 @@ public final class DnsHijackManager {
             }
             runLifecycleCommands(context,
                     buildRootRepairCommands(context),
-                    "DNS protection enable queued: daemon start, redirect reinstall, boot persistence sync",
+                    "DNS protection enable queued: daemon start, daemon filter bypass, redirect reinstall, boot persistence sync",
                     "DNS protection enable completed",
                     "DNS protection enable failed",
                     callback);
@@ -293,7 +293,7 @@ public final class DnsHijackManager {
         }
 
         List<String> commands = buildRootRepairCommands(context);
-        ApplicationErrorLog.add(context, "DNS hijacker repair queued: daemon start and DNS redirect reinstall");
+        ApplicationErrorLog.add(context, "DNS hijacker repair queued: daemon start, daemon filter bypass, and DNS redirect reinstall");
         new RootCommand()
                 .setLogging(true)
                 .setReopenShell(true)
@@ -354,7 +354,7 @@ public final class DnsHijackManager {
         }
 
         List<String> commands = buildRootRepairCommands(context);
-        ApplicationErrorLog.add(context, "DNS protection resume queued: daemon start and DNS redirect reinstall");
+        ApplicationErrorLog.add(context, "DNS protection resume queued: daemon start, daemon filter bypass, and DNS redirect reinstall");
         new RootCommand()
                 .setLogging(true)
                 .setReopenShell(true)
@@ -866,6 +866,7 @@ public final class DnsHijackManager {
         out.append("encrypted_dns_note=Private DNS/DoT on 853 and in-app DoH are not port-53 DNS and can bypass NAT capture\n");
         out.append("daemon_socket_mark=").append(DAEMON_SOCKET_MARK).append('\n');
         out.append("daemon_mark_output_bypass=enabled_to_prevent_daemon_upstream_recursion\n");
+        out.append("daemon_mark_filter_bypass=enabled_for_daemon_upstream_packets\n");
         out.append("root_uid_output_bypass=fallback_only_when_mark_match_is_unavailable\n");
         out.append("root_uid_capture_warning=").append(rootUidBypassWarning()).append('\n');
         out.append("private_dns_mode=").append(readAndroidPrivateDnsMode(context)).append('\n');
@@ -1031,11 +1032,17 @@ public final class DnsHijackManager {
         commands.add("cat " + shellQuote(new File(workDir(context), PID).getAbsolutePath()) + " 2>&1 || true");
         commands.add("echo '[IPv4 DNS NAT OUTPUT]'");
         commands.add(iptables + " -t nat -S OUTPUT 2>&1 | grep 'afwall-dns' || true");
+        commands.add("echo '[IPv4 DNS filter daemon bypass]'");
+        commands.add(iptables + " -S OUTPUT 2>&1 | grep " + shellQuote(DAEMON_SOCKET_MARK)
+                + " || true");
         commands.add("echo '[IPv4 DNS NAT chains]'");
         commands.add(iptables + " -t nat -S " + CHAIN_V4 + " 2>&1 || true");
         commands.add(iptables + " -t nat -S " + CHAIN_V4_PRE + " 2>&1 || true");
         commands.add("echo '[IPv6 DNS NAT OUTPUT]'");
         commands.add(ip6tables + " -t nat -S OUTPUT 2>&1 | grep 'afwall-dns6' || true");
+        commands.add("echo '[IPv6 DNS filter daemon bypass]'");
+        commands.add(ip6tables + " -S OUTPUT 2>&1 | grep " + shellQuote(DAEMON_SOCKET_MARK)
+                + " || true");
         commands.add("echo '[IPv6 DNS NAT chains]'");
         commands.add(ip6tables + " -t nat -S " + CHAIN_V6 + " 2>&1 || true");
         commands.add(ip6tables + " -t nat -S " + CHAIN_V6_PRE + " 2>&1 || true");
@@ -1097,7 +1104,9 @@ public final class DnsHijackManager {
         if (!snapshot.listenersReady) {
             blockers.add("listener missing");
         }
-        if (!isRootRedirectStatusHealthy(rootStatusRaw)) {
+        if (redirectStatusMissingDaemonFilterBypass(rootStatusRaw)) {
+            blockers.add("daemon upstream filter bypass missing");
+        } else if (!isRootRedirectStatusHealthy(rootStatusRaw)) {
             blockers.add("redirect rules missing");
         }
         if (!snapshot.upstreamProbeHealthy) {
@@ -1132,6 +1141,21 @@ public final class DnsHijackManager {
             return true;
         }
         return G.enableIPv6() && redirectFamilyUsesUidFallback(values, "dns_redirect_ipv6");
+    }
+
+    private static boolean redirectStatusMissingDaemonFilterBypass(String raw) {
+        if (raw == null || raw.trim().isEmpty()) {
+            return false;
+        }
+        Map<String, String> values = parseKeyValueLines(raw);
+        if (values.isEmpty()) {
+            return false;
+        }
+        if (redirectFamilyMissingDaemonFilterBypass(values, "dns_redirect_ipv4")) {
+            return true;
+        }
+        return G.enableIPv6()
+                && redirectFamilyMissingDaemonFilterBypass(values, "dns_redirect_ipv6");
     }
 
     public static boolean isRootRedirectStatusHealthy(String raw) {
@@ -1170,6 +1194,8 @@ public final class DnsHijackManager {
                 iptables, chain));
         commands.add(buildUid0ReturnStatusCommand(prefix + "_output_uid0_return",
                 iptables, chain));
+        commands.add(buildDaemonMarkFilterAcceptStatusCommand(
+                prefix + "_filter_daemon_mark_accept", iptables));
         commands.add(buildRedirectTargetStatusCommand(prefix + "_chain_udp_redirect",
                 iptables, chain, "udp", port));
         commands.add(buildRedirectTargetStatusCommand(prefix + "_chain_tcp_redirect",
@@ -1219,6 +1245,11 @@ public final class DnsHijackManager {
                 + "; then echo " + key + "=1; else echo " + key + "=0; fi";
     }
 
+    private static String buildDaemonMarkFilterAcceptStatusCommand(String key, String iptables) {
+        return "if " + buildIptablesDaemonMarkFilterAcceptCheck(iptables)
+                + "; then echo " + key + "=1; else echo " + key + "=0; fi";
+    }
+
     private static String buildRedirectTargetStatusCommand(String key, String iptables, String chain,
                                                            String protocol, int port) {
         String pattern = "-p " + protocol + " .*--dport 53.*-j REDIRECT.*--to-ports " + port;
@@ -1235,6 +1266,7 @@ public final class DnsHijackManager {
         checks.add(buildIptablesRuleCheck(iptables, "PREROUTING", "udp", preChain));
         checks.add(buildIptablesRuleCheck(iptables, "PREROUTING", "tcp", preChain));
         checks.add(buildIptablesRecursionGuardCheck(iptables, chain));
+        checks.add(buildIptablesDaemonPathFilterCheck(iptables, chain));
         checks.add(buildIptablesRedirectTargetCheck(iptables, chain, "udp", port));
         checks.add(buildIptablesRedirectTargetCheck(iptables, chain, "tcp", port));
         checks.add(buildIptablesRedirectTargetCheck(iptables, preChain, "udp", port));
@@ -1250,7 +1282,7 @@ public final class DnsHijackManager {
         String table = ipv6 ? NFT_TABLE_V6 : NFT_TABLE_V4;
         int port = G.dnsHijackPort(DEFAULT_PORT);
         String iptablesReady = buildIptablesRedirectHealthyCondition(iptables, chain, preChain, port);
-        String nftReady = buildNftRedirectHealthyCondition(family, table, port);
+        String nftReady = buildNftRedirectHealthyCondition(family, table, port, iptables);
         String label = ipv6 ? "IPv6" : "IPv4";
         return "if ( " + iptablesReady + " ) || ( " + nftReady + " ); then true; else "
                 + "echo 'DNS redirect install verification failed for " + label + "'; false; fi; #";
@@ -1268,10 +1300,21 @@ public final class DnsHijackManager {
                 + " || " + buildIptablesUid0ReturnCheck(iptables, chain) + " )";
     }
 
+    private static String buildIptablesDaemonPathFilterCheck(String iptables, String chain) {
+        return "( ( " + buildIptablesDaemonMarkReturnCheck(iptables, chain)
+                + " && " + buildIptablesDaemonMarkFilterAcceptCheck(iptables)
+                + " ) || " + buildIptablesUid0ReturnCheck(iptables, chain) + " )";
+    }
+
     private static String buildIptablesDaemonMarkReturnCheck(String iptables, String chain) {
         String pattern = "-m mark .*--mark " + DAEMON_SOCKET_MARK + ".*-j RETURN";
         return iptables + " -t nat -S " + shellQuote(chain)
                 + " 2>/dev/null | grep -q -- " + shellQuote(pattern);
+    }
+
+    private static String buildIptablesDaemonMarkFilterAcceptCheck(String iptables) {
+        String pattern = "-m mark .*--mark " + DAEMON_SOCKET_MARK + ".*-j ACCEPT";
+        return iptables + " -S OUTPUT 2>/dev/null | grep -q -- " + shellQuote(pattern);
     }
 
     private static String buildIptablesUid0ReturnCheck(String iptables, String chain) {
@@ -1287,12 +1330,14 @@ public final class DnsHijackManager {
                 + " 2>/dev/null | grep -q -- " + shellQuote(pattern);
     }
 
-    private static String buildNftRedirectHealthyCondition(String family, String table, int port) {
+    private static String buildNftRedirectHealthyCondition(String family, String table, int port,
+                                                           String iptables) {
         List<String> checks = new ArrayList<>();
         checks.add("command -v nft >/dev/null 2>&1");
         checks.add("nft list table " + shellQuote(family) + " " + shellQuote(table)
                 + " >/dev/null 2>&1");
         checks.add(buildNftDaemonMarkReturnCheck(family, table));
+        checks.add(buildIptablesDaemonMarkFilterAcceptCheck(iptables));
         checks.add(buildNftRedirectCheck(family, table, NFT_OUTPUT, "udp", port));
         checks.add(buildNftRedirectCheck(family, table, NFT_OUTPUT, "tcp", port));
         checks.add(buildNftRedirectCheck(family, table, NFT_PREROUTING, "udp", port));
@@ -1372,9 +1417,11 @@ public final class DnsHijackManager {
         int targetScore = redirectFamilyTargetScore(values, prefix);
         int nftInstalled = redirectFamilyNftScore(values, prefix);
         boolean iptablesInstalled = hookScore >= 6 && targetScore >= 4
-                && redirectFamilyIptablesRecursionGuard(values, prefix);
-        boolean nftReady = nftInstalled >= 4 && redirectFamilyNftRecursionGuard(values, prefix);
+                && redirectFamilyIptablesDaemonPathReady(values, prefix);
+        boolean nftReady = nftInstalled >= 4 && redirectFamilyNftDaemonPathReady(values, prefix);
         String suffix = redirectFamilyUsesUidFallback(values, prefix) ? " (UID fallback)" : "";
+        String filterSuffix = redirectFamilyMissingDaemonFilterBypass(values, prefix)
+                ? " (daemon filter bypass missing)" : "";
         if (nftReady && iptablesInstalled) {
             return "installed (iptables+nft)" + suffix;
         }
@@ -1385,7 +1432,7 @@ public final class DnsHijackManager {
             return "installed" + suffix;
         }
         if (hookScore > 0 || targetScore > 0 || nftInstalled > 0 || nftTable) {
-            return "partial";
+            return "partial" + filterSuffix;
         }
         return "missing";
     }
@@ -1393,14 +1440,21 @@ public final class DnsHijackManager {
     private static boolean redirectFamilyHealthy(Map<String, String> values, String prefix) {
         return (redirectFamilyHookScore(values, prefix) >= 6
                 && redirectFamilyTargetScore(values, prefix) >= 4
-                && redirectFamilyIptablesRecursionGuard(values, prefix))
+                && redirectFamilyIptablesDaemonPathReady(values, prefix))
                 || (redirectFamilyNftScore(values, prefix) >= 4
-                && redirectFamilyNftRecursionGuard(values, prefix));
+                && redirectFamilyNftDaemonPathReady(values, prefix));
     }
 
     private static boolean redirectFamilyIptablesRecursionGuard(Map<String, String> values,
                                                                 String prefix) {
         return "1".equals(values.get(prefix + "_output_daemon_mark_return"))
+                || "1".equals(values.get(prefix + "_output_uid0_return"));
+    }
+
+    private static boolean redirectFamilyIptablesDaemonPathReady(Map<String, String> values,
+                                                                 String prefix) {
+        return ("1".equals(values.get(prefix + "_output_daemon_mark_return"))
+                && redirectFamilyDaemonFilterBypass(values, prefix))
                 || "1".equals(values.get(prefix + "_output_uid0_return"));
     }
 
@@ -1410,9 +1464,28 @@ public final class DnsHijackManager {
                 || "1".equals(values.get(prefix + "_nft_output_uid0_return"));
     }
 
+    private static boolean redirectFamilyNftDaemonPathReady(Map<String, String> values,
+                                                            String prefix) {
+        return ("1".equals(values.get(prefix + "_nft_output_daemon_mark_return"))
+                && redirectFamilyDaemonFilterBypass(values, prefix))
+                || "1".equals(values.get(prefix + "_nft_output_uid0_return"));
+    }
+
     private static boolean redirectFamilyUsesUidFallback(Map<String, String> values, String prefix) {
         return "1".equals(values.get(prefix + "_output_uid0_return"))
                 || "1".equals(values.get(prefix + "_nft_output_uid0_return"));
+    }
+
+    private static boolean redirectFamilyMissingDaemonFilterBypass(Map<String, String> values,
+                                                                   String prefix) {
+        boolean markGuard = "1".equals(values.get(prefix + "_output_daemon_mark_return"))
+                || "1".equals(values.get(prefix + "_nft_output_daemon_mark_return"));
+        return markGuard && !redirectFamilyDaemonFilterBypass(values, prefix);
+    }
+
+    private static boolean redirectFamilyDaemonFilterBypass(Map<String, String> values,
+                                                            String prefix) {
+        return "1".equals(values.get(prefix + "_filter_daemon_mark_accept"));
     }
 
     private static int redirectFamilyHookScore(Map<String, String> values, String prefix) {
@@ -2395,6 +2468,13 @@ public final class DnsHijackManager {
         return "\"" + value + "\"";
     }
 
+    private static String buildBootDaemonFilterBypass(String tool) {
+        return "  " + tool + " -D OUTPUT -m mark --mark \"$DAEMON_MARK\" -j ACCEPT >/dev/null 2>&1 || true\n"
+                + "  if ! " + tool + " -I OUTPUT 1 -m mark --mark \"$DAEMON_MARK\" -j ACCEPT >> \"$LOG\" 2>&1; then\n"
+                + "    log_msg 'DNS daemon filter bypass install failed; upstream DNS may need root allowed'\n"
+                + "  fi\n";
+    }
+
     private static String buildBootDaemonRecursionBypass(String tool, String chainVariable) {
         return "  if [ -r \"$MARK_STATUS\" ] && grep -q '^supported ' \"$MARK_STATUS\"; then\n"
                 + "    if ! " + tool + " -t nat -A \"" + chainVariable
@@ -2918,6 +2998,7 @@ public final class DnsHijackManager {
         String chain = ipv6 ? CHAIN_V6 : CHAIN_V4;
         String preChain = ipv6 ? CHAIN_V6_PRE : CHAIN_V4_PRE;
 
+        appendDirectDaemonFilterBypassPurge(commands, iptables);
         appendDirectIptables(commands, iptables,
                 "-t nat -D OUTPUT -p udp --dport 53 -j " + chain);
         appendDirectIptables(commands, iptables,
@@ -2934,6 +3015,30 @@ public final class DnsHijackManager {
 
     private static void appendDirectIptables(List<String> commands, String iptables, String args) {
         commands.add(iptables + " " + args + " >/dev/null 2>&1 || true");
+    }
+
+    private static String daemonFilterBypassArgs() {
+        return "-m mark --mark " + DAEMON_SOCKET_MARK + " -j ACCEPT";
+    }
+
+    private static void appendDaemonFilterBypass(List<String> commands) {
+        appendDaemonFilterBypassPurge(commands);
+        // The daemon is a root-owned process outside AFWall's app UID. Its marked upstream
+        // sockets must pass the normal filter table or the NAT recursion guard still leaves DNS dead.
+        commands.add("#NOCHK# -I OUTPUT 1 " + daemonFilterBypassArgs());
+    }
+
+    private static void appendDaemonFilterBypassPurge(List<String> commands) {
+        commands.add("#NOCHK# -D OUTPUT " + daemonFilterBypassArgs());
+    }
+
+    private static void appendDirectDaemonFilterBypass(List<String> commands, String iptables) {
+        appendDirectDaemonFilterBypassPurge(commands, iptables);
+        appendTolerantIptables(commands, iptables, "-I OUTPUT 1 " + daemonFilterBypassArgs());
+    }
+
+    private static void appendDirectDaemonFilterBypassPurge(List<String> commands, String iptables) {
+        appendTolerantIptables(commands, iptables, "-D OUTPUT " + daemonFilterBypassArgs());
     }
 
     private static void appendDaemonRecursionBypass(Context context, List<String> commands,
@@ -2979,6 +3084,7 @@ public final class DnsHijackManager {
         String chain = ipv6 ? CHAIN_V6 : CHAIN_V4;
         String preChain = ipv6 ? CHAIN_V6_PRE : CHAIN_V4_PRE;
 
+        appendDirectDaemonFilterBypass(commands, iptables);
         appendTolerantIptables(commands, iptables, "-t nat -D OUTPUT -p udp --dport 53 -j " + chain);
         appendTolerantIptables(commands, iptables, "-t nat -D OUTPUT -p tcp --dport 53 -j " + chain);
         appendTolerantIptables(commands, iptables, "-t nat -D PREROUTING -p udp --dport 53 -j " + preChain);
@@ -3023,6 +3129,7 @@ public final class DnsHijackManager {
         commands.add("#NOCHK# -t nat -F " + chain);
         commands.add("#NOCHK# -t nat -F " + preChain);
 
+        appendDaemonFilterBypass(commands);
         commands.add("#NOCHK# -t nat -A " + chain + " -o lo -j RETURN");
         commands.add("#LITERAL# " + buildApplyDaemonRecursionBypassCommand(context, chain));
         if (!appendOutputPolicyRules(commands, "#NOCHK# -t nat -A " + chain, port)) {
@@ -3046,6 +3153,7 @@ public final class DnsHijackManager {
         String chain = ipv6 ? CHAIN_V6 : CHAIN_V4;
         String preChain = ipv6 ? CHAIN_V6_PRE : CHAIN_V4_PRE;
 
+        appendDaemonFilterBypassPurge(commands);
         commands.add("#NOCHK# -t nat -D OUTPUT -p udp --dport 53 -j " + chain);
         commands.add("#NOCHK# -t nat -D OUTPUT -p tcp --dport 53 -j " + chain);
         commands.add("#NOCHK# -t nat -D PREROUTING -p udp --dport 53 -j " + preChain);
@@ -3531,6 +3639,7 @@ public final class DnsHijackManager {
         checks.add(buildBootIptablesRuleCheck(tool, "PREROUTING", "udp", preChainVariable));
         checks.add(buildBootIptablesRuleCheck(tool, "PREROUTING", "tcp", preChainVariable));
         checks.add(buildBootIptablesRecursionGuardCheck(tool, chainVariable));
+        checks.add(buildBootIptablesDaemonPathFilterCheck(tool, chainVariable));
         checks.add(buildBootIptablesRedirectTargetCheck(tool, chainVariable, "udp", port));
         checks.add(buildBootIptablesRedirectTargetCheck(tool, chainVariable, "tcp", port));
         checks.add(buildBootIptablesRedirectTargetCheck(tool, preChainVariable, "udp", port));
@@ -3551,11 +3660,24 @@ public final class DnsHijackManager {
                 + " || " + buildBootIptablesUid0ReturnCheck(tool, chainVariable) + " )";
     }
 
+    private static String buildBootIptablesDaemonPathFilterCheck(String tool,
+                                                                 String chainVariable) {
+        return "( ( " + buildBootIptablesDaemonMarkReturnCheck(tool, chainVariable)
+                + " && " + buildBootIptablesDaemonMarkFilterAcceptCheck(tool)
+                + " ) || " + buildBootIptablesUid0ReturnCheck(tool, chainVariable) + " )";
+    }
+
     private static String buildBootIptablesDaemonMarkReturnCheck(String tool,
                                                                  String chainVariable) {
         return tool + " -t nat -S \"" + chainVariable + "\""
                 + " 2>/dev/null | grep -q -- \"-m mark .*--mark "
                 + DAEMON_SOCKET_MARK + ".*-j RETURN\"";
+    }
+
+    private static String buildBootIptablesDaemonMarkFilterAcceptCheck(String tool) {
+        return tool + " -S OUTPUT"
+                + " 2>/dev/null | grep -q -- \"-m mark .*--mark "
+                + DAEMON_SOCKET_MARK + ".*-j ACCEPT\"";
     }
 
     private static String buildBootIptablesUid0ReturnCheck(String tool, String chainVariable) {
@@ -3607,6 +3729,8 @@ public final class DnsHijackManager {
                 + "}\n"
                 + "cleanup_redirects() {\n"
                 + "  log_msg 'cleanup guard removing stale DNS redirect rules'\n"
+                + "  ipt -D OUTPUT -m mark --mark " + DAEMON_SOCKET_MARK + " -j ACCEPT >/dev/null 2>&1 || true\n"
+                + "  ip6t -D OUTPUT -m mark --mark " + DAEMON_SOCKET_MARK + " -j ACCEPT >/dev/null 2>&1 || true\n"
                 + "  ipt -t nat -D OUTPUT -p udp --dport 53 -j \"$CHAIN4\" >/dev/null 2>&1 || true\n"
                 + "  ipt -t nat -D OUTPUT -p tcp --dport 53 -j \"$CHAIN4\" >/dev/null 2>&1 || true\n"
                 + "  ipt -t nat -D PREROUTING -p udp --dport 53 -j \"$PRE4\" >/dev/null 2>&1 || true\n"
@@ -3693,6 +3817,8 @@ public final class DnsHijackManager {
                 + "}\n"
                 + "cleanup_redirects() {\n"
                 + "  log_msg 'DNS boot cleanup removing stale redirect rules'\n"
+                + "  ipt -D OUTPUT -m mark --mark \"$DAEMON_MARK\" -j ACCEPT >/dev/null 2>&1 || true\n"
+                + "  ip6t -D OUTPUT -m mark --mark \"$DAEMON_MARK\" -j ACCEPT >/dev/null 2>&1 || true\n"
                 + "  ipt -t nat -D OUTPUT -p udp --dport 53 -j \"$CHAIN4\" >/dev/null 2>&1 || true\n"
                 + "  ipt -t nat -D OUTPUT -p tcp --dport 53 -j \"$CHAIN4\" >/dev/null 2>&1 || true\n"
                 + "  ipt -t nat -D PREROUTING -p udp --dport 53 -j \"$PRE4\" >/dev/null 2>&1 || true\n"
@@ -3728,6 +3854,7 @@ public final class DnsHijackManager {
                 + "  remove_boot_copy\n"
                 + "}\n"
                 + "restore_v4() {\n"
+                + buildBootDaemonFilterBypass("ipt")
                 + "  ipt -t nat -D OUTPUT -p udp --dport 53 -j \"$CHAIN4\" >/dev/null 2>&1\n"
                 + "  ipt -t nat -D OUTPUT -p tcp --dport 53 -j \"$CHAIN4\" >/dev/null 2>&1\n"
                 + "  ipt -t nat -D PREROUTING -p udp --dport 53 -j \"$PRE4\" >/dev/null 2>&1\n"
@@ -3748,6 +3875,7 @@ public final class DnsHijackManager {
                 + buildBootNftFallbackRestore(false, port)
                 + "}\n"
                 + "restore_v6() {\n"
+                + buildBootDaemonFilterBypass("ip6t")
                 + "  ip6t -t nat -D OUTPUT -p udp --dport 53 -j \"$CHAIN6\" >/dev/null 2>&1\n"
                 + "  ip6t -t nat -D OUTPUT -p tcp --dport 53 -j \"$CHAIN6\" >/dev/null 2>&1\n"
                 + "  ip6t -t nat -D PREROUTING -p udp --dport 53 -j \"$PRE6\" >/dev/null 2>&1\n"
@@ -3819,6 +3947,8 @@ public final class DnsHijackManager {
                 + "}\n"
                 + "cleanup_redirects() {\n"
                 + "  log_msg 'removing DNS redirect rules'\n"
+                + "  ipt -D OUTPUT -m mark --mark " + DAEMON_SOCKET_MARK + " -j ACCEPT >/dev/null 2>&1 || true\n"
+                + "  ip6t -D OUTPUT -m mark --mark " + DAEMON_SOCKET_MARK + " -j ACCEPT >/dev/null 2>&1 || true\n"
                 + "  ipt -t nat -D OUTPUT -p udp --dport 53 -j \"$CHAIN4\" >/dev/null 2>&1 || true\n"
                 + "  ipt -t nat -D OUTPUT -p tcp --dport 53 -j \"$CHAIN4\" >/dev/null 2>&1 || true\n"
                 + "  ipt -t nat -D PREROUTING -p udp --dport 53 -j \"$PRE4\" >/dev/null 2>&1 || true\n"
