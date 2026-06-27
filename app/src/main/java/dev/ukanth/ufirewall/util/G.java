@@ -186,6 +186,7 @@ public class G extends Application implements Application.ActivityLifecycleCallb
     private static final String DNS_HIJACK_DNSSEC_REQUEST = "dnsHijackDnssecRequest";
     private static final String DNS_HIJACK_DNSSEC_AUTH_REQUIRED = "dnsHijackDnssecAuthRequired";
     private static final String DNS_HIJACK_BOOT_PERSISTENCE = "dnsHijackBootPersistence";
+    private static final String DNS_HIJACK_ADB_DEBUG_CONTROL = "dnsHijackAdbDebugControl";
     private static final String DNS_HIJACK_TIMEOUT_MS = "dnsHijackTimeoutMs";
     private static final String DNS_HIJACK_CACHE_SIZE = "dnsHijackCacheSize";
     private static final String DNS_HIJACK_STALE_CACHE_SECONDS = "dnsHijackStaleCacheSeconds";
@@ -476,6 +477,10 @@ public class G extends Application implements Application.ActivityLifecycleCallb
     public static boolean dnsHijackBootPersistence(boolean val) {
         gPrefs.edit().putBoolean(DNS_HIJACK_BOOT_PERSISTENCE, val).commit();
         return val;
+    }
+
+    public static boolean dnsHijackAdbDebugControl() {
+        return gPrefs.getBoolean(DNS_HIJACK_ADB_DEBUG_CONTROL, false);
     }
 
     public static int dnsHijackTimeoutMs() {

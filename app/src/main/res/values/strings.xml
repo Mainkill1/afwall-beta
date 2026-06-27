@@ -336,6 +336,8 @@
     <string name="dns_hijack_dnssec_auth_required_summary">Only accept upstream answers with the DNSSEC authenticated-data bit. Requires a validating upstream and is not local validation.</string>
     <string name="dns_hijack_boot_persistence_title">Use Magisk DNS module at boot</string>
     <string name="dns_hijack_boot_persistence_summary">Install or remove the AFWall DNS Magisk module wrapper for boot restore and fail-open cleanup.</string>
+    <string name="dns_hijack_adb_debug_control_title">Allow ADB DNS diagnostics</string>
+    <string name="dns_hijack_adb_debug_control_summary">Temporarily allow token-authenticated root access to the DNS daemon control socket over ADB for testing.</string>
     <string name="dns_hijack_power_settings_title">Review Android power settings</string>
     <string name="dns_hijack_power_settings_summary_optimized">AFWall+ is battery optimized. The root DNS daemon can keep running, but scheduled DNS updates and app log sync may be delayed.</string>
     <string name="dns_hijack_power_settings_summary_unrestricted">AFWall+ is not battery optimized. Scheduled DNS updates and app log sync are less likely to be delayed.</string>

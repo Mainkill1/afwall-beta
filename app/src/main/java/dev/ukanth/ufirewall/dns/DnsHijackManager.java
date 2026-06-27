@@ -225,7 +225,7 @@ public final class DnsHijackManager {
             return;
         }
 
-        commands.add(buildRemoveBootPersistenceCommand());
+        commands.add(buildRemoveBootPersistenceCommand(!G.enableDnsHijack()));
         runLifecycleCommands(context,
                 commands,
                 "DNS boot persistence removal queued",
@@ -358,6 +358,7 @@ public final class DnsHijackManager {
         appendSelfTestValue(out, validateValues, "control_socket_uid");
         appendSelfTestValue(out, validateValues, "control_auth_configured");
         appendSelfTestValue(out, validateValues, "control_peer_uid_enforced");
+        appendSelfTestValue(out, validateValues, "control_adb_debug_enabled");
         String badTokenResponse = queryControl(context, "status", buildInvalidControlToken(context));
         boolean badTokenRejected = badTokenResponse.trim().startsWith("error unauthorized");
         out.append("bad_token_rejected=").append(badTokenRejected ? "1" : "0").append('\n');
@@ -555,6 +556,7 @@ public final class DnsHijackManager {
         out.append("blocklist_storage=").append(G.dnsHijackBlocklistDirectoryName("dnsd_blocklists"))
                 .append('\n');
         out.append("boot_persistence_pref=").append(G.dnsHijackBootPersistence()).append('\n');
+        out.append("adb_debug_control_pref=").append(G.dnsHijackAdbDebugControl()).append('\n');
         out.append("expected_magisk_script_version=").append(MAGISK_SCRIPT_VERSION).append('\n');
         out.append("expected_magisk_module_version=").append(MAGISK_MODULE_VERSION).append('\n');
         out.append("boot_restore_ipv6_enabled=").append(G.enableIPv6()).append('\n');
@@ -766,6 +768,8 @@ public final class DnsHijackManager {
                 "socket_mark_failures"), 0L);
         long failOpenControlSupported = parseLong(firstValue(statusValues, healthValues,
                 "fail_open_control_supported"), -1L);
+        long adbDebugControl = parseLong(firstValue(statusValues, healthValues,
+                "control_adb_debug_enabled"), G.dnsHijackAdbDebugControl() ? 1L : 0L);
         long cleanupIptablesSafe = parseLong(firstValue(statusValues, healthValues,
                 "cleanup_iptables_safe"), -1L);
         long cleanupIp6tablesSafe = parseLong(firstValue(statusValues, healthValues,
@@ -867,6 +871,9 @@ public final class DnsHijackManager {
                 + " | control " + yesNoUnknown(failOpenControlSupported)
                 + " | IPv4 tool " + yesNoUnknown(cleanupIptablesSafe)
                 + " | IPv6 tool " + listenerFamilyLabel(cleanupIp6tablesSafe == 1L, ipv6Expected);
+        String controlLine = "Control socket: app-only"
+                + (adbDebugControl == 1L ? " + ADB diagnostics" : "")
+                + " | token auth required";
         String routingScopeLine = preroutingRedirectExpected()
                 ? "DNS scope: local and forwarded port-53 capture"
                 : "DNS scope: UID-scoped app-owned port-53 sockets; Android system resolver traffic may use a system UID";
@@ -876,6 +883,7 @@ public final class DnsHijackManager {
                 + profilePolicyLabel
                 + privateDnsDashboardLine(context)
                 + "\n" + routingLine
+                + "\n" + controlLine
                 + "\n" + failOpenLine
                 + "\n" + routingScopeLine
                 + "\nBlocklist updated: " + blocklistUpdated
@@ -1157,6 +1165,9 @@ public final class DnsHijackManager {
         out.append("encrypted_dns_note=Private DNS/DoT on 853 and in-app DoH are not port-53 DNS and can bypass NAT capture\n");
         out.append("daemon_control_auth=token_required\n");
         out.append("daemon_control_socket_uid=").append(context.getApplicationInfo().uid).append('\n');
+        out.append("daemon_control_adb_debug_enabled=")
+                .append(G.dnsHijackAdbDebugControl()).append('\n');
+        out.append("daemon_control_adb_debug_note=when enabled, use adb shell su -c with the app-owned token file; diagnostics never print the token\n");
         out.append("daemon_socket_mark=").append(DAEMON_SOCKET_MARK).append('\n');
         out.append("daemon_mark_output_bypass=enabled_to_prevent_daemon_upstream_recursion\n");
         out.append("daemon_mark_filter_bypass=enabled_for_daemon_upstream_packets\n");
@@ -3649,7 +3660,8 @@ public final class DnsHijackManager {
 
     private static void appendBootPersistenceCommand(Context context, List<String> commands) {
         if (!G.dnsHijackBootPersistence()) {
-            appendRemoveBootPersistenceCommand(commands);
+            // Boot wrapper removal must not run uninstall cleanup while DNS capture is enabled.
+            appendRemoveBootPersistenceCommand(commands, false);
             return;
         }
         commands.add("#LITERAL# " + buildInstallBootPersistenceCommand(workDir(context), false));
@@ -3685,11 +3697,17 @@ public final class DnsHijackManager {
     }
 
     private static String buildRemoveBootPersistenceCommand() {
+        return buildRemoveBootPersistenceCommand(true);
+    }
+
+    private static String buildRemoveBootPersistenceCommand(boolean cleanupActiveService) {
         return "MOD=" + shellQuote(MAGISK_MODULE_DIR) + "; "
                 + "if [ -d \"$MOD\" ]; then "
-                + "if [ -x \"$MOD/" + MAGISK_UNINSTALL_SCRIPT + "\" ]; then "
+                + (cleanupActiveService
+                ? "if [ -x \"$MOD/" + MAGISK_UNINSTALL_SCRIPT + "\" ]; then "
                 + "\"$MOD/" + MAGISK_UNINSTALL_SCRIPT + "\" "
                 + ">> /data/local/tmp/" + MAGISK_MODULE_LOG + " 2>&1 || true; fi; "
+                : "echo 'DNS Magisk module wrapper removal requested; active DNS service left running'; ")
                 + "if [ -f \"$MOD/" + MAGISK_MODULE_PROP + "\" ] "
                 + "&& grep -q '^id=" + MAGISK_MODULE_ID + "$' \"$MOD/" + MAGISK_MODULE_PROP + "\"; then "
                 + "rm -f \"$MOD/" + MAGISK_MODULE_PROP + "\" "
@@ -3746,7 +3764,12 @@ public final class DnsHijackManager {
     }
 
     private static void appendRemoveBootPersistenceCommand(List<String> commands) {
-        commands.add("#LITERAL# " + buildRemoveBootPersistenceCommand());
+        appendRemoveBootPersistenceCommand(commands, true);
+    }
+
+    private static void appendRemoveBootPersistenceCommand(List<String> commands,
+                                                           boolean cleanupActiveService) {
+        commands.add("#LITERAL# " + buildRemoveBootPersistenceCommand(cleanupActiveService));
     }
 
     private static void appendRemoveLifecycleCleanupCommand(List<String> commands) {
@@ -3772,7 +3795,8 @@ public final class DnsHijackManager {
             ApplicationErrorLog.add(context,
                     "DNS Magisk boot module install queued as best effort during DNS protection repair");
         } else {
-            commands.add(buildRemoveBootPersistenceCommand());
+            // Repair keeps the live daemon path active even when boot restore is disabled.
+            commands.add(buildRemoveBootPersistenceCommand(false));
         }
         return commands;
     }
@@ -4383,6 +4407,8 @@ public final class DnsHijackManager {
         config.append("control_socket=").append(new File(dir, SOCKET).getAbsolutePath()).append('\n');
         config.append("control_socket_uid=").append(context.getApplicationInfo().uid).append('\n');
         config.append("control_token=").append(controlToken).append('\n');
+        config.append("control_adb_debug=").append(G.dnsHijackAdbDebugControl() ? "1" : "0")
+                .append('\n');
         config.append("pid_file=").append(new File(dir, PID).getAbsolutePath()).append('\n');
         config.append("heartbeat_file=").append(new File(dir, HEARTBEAT).getAbsolutePath()).append('\n');
         config.append("mark_status_file=").append(new File(dir, MARK_STATUS).getAbsolutePath()).append('\n');

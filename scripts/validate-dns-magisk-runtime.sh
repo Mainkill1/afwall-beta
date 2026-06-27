@@ -23,6 +23,7 @@ STALE_MARKER_CHECK=0
 EMBEDDED_CLEANUP_CHECK=0
 DIRECT_CLEANUP_CHECK=0
 DAEMON_FAIL_OPEN_CHECK=0
+ADB_DEBUG_CONTROL_CHECK=0
 BOOT_TIMEOUT_SECONDS="${BOOT_TIMEOUT_SECONDS:-180}"
 POST_BOOT_SETTLE_SECONDS="${POST_BOOT_SETTLE_SECONDS:-20}"
 RECOVERY_WAIT_SECONDS="${RECOVERY_WAIT_SECONDS:-45}"
@@ -33,7 +34,7 @@ warnings=0
 
 usage() {
     cat <<EOF
-Usage: $0 [--install] [--reboot-check] [--daemon-restart-check] [--orphan-service-check] [--stale-marker-check] [--embedded-cleanup-check] [--direct-cleanup-check] [--daemon-fail-open-check] [--apk path] [--package name] [--out dir]
+Usage: $0 [--install] [--reboot-check] [--daemon-restart-check] [--orphan-service-check] [--stale-marker-check] [--embedded-cleanup-check] [--direct-cleanup-check] [--daemon-fail-open-check] [--adb-debug-control-check] [--apk path] [--package name] [--out dir]
 
 Environment:
   ADB          adb executable, default: adb
@@ -68,6 +69,9 @@ Optional recovery checks:
                           Clears the enable marker and sends authenticated fail_open
                           over the daemon control socket as the AFWall app UID, then
                           verifies redirects are removed and the service restores.
+  --adb-debug-control-check
+                          Expect AFWall's ADB DNS diagnostics setting to be enabled
+                          and verify root-over-ADB can run token-authenticated status.
 EOF
 }
 
@@ -103,6 +107,10 @@ while [ "$#" -gt 0 ]; do
             ;;
         --daemon-fail-open-check)
             DAEMON_FAIL_OPEN_CHECK=1
+            shift
+            ;;
+        --adb-debug-control-check)
+            ADB_DEBUG_CONTROL_CHECK=1
             shift
             ;;
         --apk)
@@ -549,6 +557,30 @@ check_external_control_rejection() {
         pass "root-side external control probe was rejected"
     else
         fail "root-side external control probe was not rejected; see $response_file"
+    fi
+}
+
+check_adb_debug_control_allowed() {
+    local work_dir="$1"
+    local nc_cmd
+    local response_file="$OUT_DIR/$CURRENT_PHASE-adb-debug-root-control-response.txt"
+    local bad_response_file="$OUT_DIR/$CURRENT_PHASE-adb-debug-bad-token-response.txt"
+    if ! nc_cmd=$(find_unix_nc); then
+        warn "no Unix-domain nc client found on device; ADB debug control probe skipped"
+        return
+    fi
+    adb_su "TOKEN=\$(cat '$work_dir/afwall_dnsd.control' 2>/dev/null); printf 'token %s\nstatus\n' \"\$TOKEN\" | $nc_cmd -U '$work_dir/afwall_dnsd.sock' 2>&1 || true" > "$response_file" || true
+    if grep -q '^running=1' "$response_file" \
+        && grep -q '^control_adb_debug_enabled=1$' "$response_file"; then
+        pass "root-over-ADB debug control probe succeeded"
+    else
+        fail "root-over-ADB debug control probe failed or setting is disabled; see $response_file"
+    fi
+    adb_su "printf 'token %s\nstatus\n' '0000000000000000000000000000000000000000000000000000000000000000' | $nc_cmd -U '$work_dir/afwall_dnsd.sock' 2>&1 || true" > "$bad_response_file" || true
+    if grep -q '^error unauthorized' "$bad_response_file"; then
+        pass "root-over-ADB debug control still rejects a bad token"
+    else
+        fail "root-over-ADB debug control accepted a bad token; see $bad_response_file"
     fi
 }
 
@@ -1056,7 +1088,11 @@ run_runtime_checks() {
     check_work_dir_state "$work_dir"
     check_daemon_process
     check_redirect_rules
-    check_external_control_rejection "$work_dir"
+    if [ "$ADB_DEBUG_CONTROL_CHECK" -eq 1 ]; then
+        check_adb_debug_control_allowed "$work_dir"
+    else
+        check_external_control_rejection "$work_dir"
+    fi
     check_app_control_authorized "$work_dir"
     check_query_activity "$work_dir"
 }

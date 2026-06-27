@@ -1266,6 +1266,7 @@ public class RulesPreferenceFragment extends PreferenceFragment implements
                 || key.equals("dnsHijackDnssecRequest")
                 || key.equals("dnsHijackDnssecAuthRequired")
                 || key.equals("dnsHijackBootPersistence")
+                || key.equals("dnsHijackAdbDebugControl")
                 || key.equals("dnsHijackTimeoutMs")
                 || key.equals("dnsHijackCacheSize")
                 || key.equals("dnsHijackStaleCacheSeconds")

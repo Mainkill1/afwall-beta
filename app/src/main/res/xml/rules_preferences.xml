@@ -182,6 +182,13 @@
             android:summary="@string/dns_hijack_boot_persistence_summary"
             android:title="@string/dns_hijack_boot_persistence_title" />
 
+        <CheckBoxPreference
+            android:defaultValue="false"
+            android:dependency="enableDnsHijack"
+            android:key="dnsHijackAdbDebugControl"
+            android:summary="@string/dns_hijack_adb_debug_control_summary"
+            android:title="@string/dns_hijack_adb_debug_control_title" />
+
         <Preference
             android:dependency="enableDnsHijack"
             android:key="dnsHijackPowerSettings"

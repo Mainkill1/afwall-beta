@@ -219,6 +219,7 @@ typedef struct {
     int dnssec_request;
     int dnssec_auth_required;
     int control_socket_uid;
+    int control_adb_debug;
     char control_socket[256];
     char control_token[128];
     char log_file[256];
@@ -3802,6 +3803,7 @@ static void default_config(config_t *cfg) {
     cfg->persist_query_logs = 1;
     cfg->dnssec_request = 0;
     cfg->control_socket_uid = -1;
+    cfg->control_adb_debug = 0;
     safe_copy(cfg->control_socket, sizeof(cfg->control_socket), "/data/local/tmp/afwall_dnsd.sock");
     safe_copy(cfg->iptables_path, sizeof(cfg->iptables_path), "iptables");
     safe_copy(cfg->ip6tables_path, sizeof(cfg->ip6tables_path), "ip6tables");
@@ -4020,6 +4022,8 @@ static bool load_config(const char *path, config_t *new_cfg) {
             new_cfg->control_socket_uid = uid >= 0 ? uid : -1;
         } else if (strcmp(key, "control_token") == 0) {
             safe_copy(new_cfg->control_token, sizeof(new_cfg->control_token), value);
+        } else if (strcmp(key, "control_adb_debug") == 0) {
+            new_cfg->control_adb_debug = atoi(value) != 0;
         } else if (strcmp(key, "event_log_file") == 0) {
             safe_copy(new_cfg->event_log_file, sizeof(new_cfg->event_log_file), value);
         } else if (strcmp(key, "log_file") == 0) {
@@ -4452,7 +4456,7 @@ static void write_validate_response(int client) {
             "udp_listener_v4=%d\nudp_listener_v6=%d\n"
             "tcp_listener_v4=%d\ntcp_listener_v6=%d\n"
             "control_socket_configured=%d\ncontrol_socket_uid=%d\ncontrol_auth_configured=%d\n"
-            "control_peer_uid_enforced=%d\n"
+            "control_peer_uid_enforced=%d\ncontrol_adb_debug_enabled=%d\n"
             "fail_open_control_supported=1\n"
             "cleanup_iptables_safe=%d\ncleanup_ip6tables_safe=%d\n"
             "pid_file_configured=%d\nheartbeat_file_configured=%d\n"
@@ -4494,6 +4498,7 @@ static void write_validate_response(int client) {
             candidate->control_socket_uid,
             valid_control_token_value(candidate->control_token) ? 1 : 0,
             control_peer_uid_enforced(candidate->control_socket_uid),
+            candidate->control_adb_debug,
             cleanup_tool_ready(candidate->iptables_path, "iptables"),
             cleanup_tool_ready(candidate->ip6tables_path, "ip6tables"),
             candidate->pid_file[0] != '\0' ? 1 : 0,
@@ -4688,13 +4693,15 @@ static int create_control_socket(const char *path, int owner_uid) {
     return fd;
 }
 
-static bool control_peer_authorized(int client, int expected_uid) {
+static bool control_peer_authorized(int client, const config_t *cfg) {
 #ifdef SO_PEERCRED
     struct ucred cred;
     socklen_t cred_len = sizeof(cred);
-    if (client < 0 || expected_uid < 0) {
+    int expected_uid;
+    if (client < 0 || cfg == NULL || cfg->control_socket_uid < 0) {
         return false;
     }
+    expected_uid = cfg->control_socket_uid;
     memset(&cred, 0, sizeof(cred));
     if (getsockopt(client, SOL_SOCKET, SO_PEERCRED, &cred, &cred_len) != 0) {
         write_event_log("warn", "control peer credential lookup failed errno=%d", errno);
@@ -4703,13 +4710,19 @@ static bool control_peer_authorized(int client, int expected_uid) {
     if ((int) cred.uid == expected_uid) {
         return true;
     }
+    if (cfg->control_adb_debug && (int) cred.uid == 0) {
+        write_event_log("warn",
+                "ADB debug control peer accepted uid=%d pid=%d expected_uid=%d",
+                (int) cred.uid, (int) cred.pid, expected_uid);
+        return true;
+    }
     write_event_log("warn",
             "control command rejected from uid=%d pid=%d expected_uid=%d",
             (int) cred.uid, (int) cred.pid, expected_uid);
     return false;
 #else
     (void) client;
-    (void) expected_uid;
+    (void) cfg;
     write_event_log("error", "control peer credential lookup unavailable");
     return false;
 #endif
@@ -5385,6 +5398,7 @@ static void write_health_response(int client) {
             "udp_listener_v4=%d\nudp_listener_v6=%d\n"
             "tcp_listener_v4=%d\ntcp_listener_v6=%d\n"
             "control_socket_uid=%d\ncontrol_peer_uid_enforced=%d\n"
+            "control_adb_debug_enabled=%d\n"
             "fail_open_control_supported=1\n"
             "cleanup_iptables_safe=%d\ncleanup_ip6tables_safe=%d\n"
             "generation=%llu\nupstreams=%d\nsplit_upstreams=%d\nupstream_probe=%s\n"
@@ -5445,6 +5459,7 @@ static void write_health_response(int client) {
             g_tcp_listener_v6_ready,
             g_cfg.control_socket_uid,
             control_peer_uid_enforced(g_cfg.control_socket_uid),
+            g_cfg.control_adb_debug,
             cleanup_tool_ready(g_cfg.iptables_path, "iptables"),
             cleanup_tool_ready(g_cfg.ip6tables_path, "ip6tables"),
             (unsigned long long) g_cfg.generation,
@@ -5658,7 +5673,7 @@ static void handle_control(int fd) {
     if (client < 0) {
         return;
     }
-    if (!control_peer_authorized(client, g_cfg.control_socket_uid)) {
+    if (!control_peer_authorized(client, &g_cfg)) {
         write_control_response(client, "error unauthorized\n");
         close(client);
         return;
@@ -5721,6 +5736,7 @@ static void handle_control(int fd) {
                 "udp_listener_v4=%d\nudp_listener_v6=%d\n"
                 "tcp_listener_v4=%d\ntcp_listener_v6=%d\n"
                 "control_socket_uid=%d\ncontrol_peer_uid_enforced=%d\n"
+                "control_adb_debug_enabled=%d\n"
                 "fail_open_control_supported=1\n"
                 "cleanup_iptables_safe=%d\ncleanup_ip6tables_safe=%d\n"
                 "queries=%llu\nudp_queries=%llu\ntcp_queries=%llu\ninvalid_queries=%llu\n"
@@ -5787,6 +5803,7 @@ static void handle_control(int fd) {
                 g_tcp_listener_v6_ready,
                 g_cfg.control_socket_uid,
                 control_peer_uid_enforced(g_cfg.control_socket_uid),
+                g_cfg.control_adb_debug,
                 cleanup_tool_ready(g_cfg.iptables_path, "iptables"),
                 cleanup_tool_ready(g_cfg.ip6tables_path, "ip6tables"),
                 (unsigned long long) g_stats.queries,
