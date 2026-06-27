@@ -47,6 +47,7 @@ public final class DnsHijackManager {
     private static final String SUPERVISOR_PID = "afwall_dnsd_supervisor.pid";
     private static final String RESTART_COUNT = "afwall_dnsd_restart_count";
     private static final String LAST_EXIT = "afwall_dnsd_last_exit";
+    private static final String HEARTBEAT = "afwall_dnsd.heartbeat";
     private static final String BOOT_SCRIPT = "afwall_dnsd_boot.sh";
     private static final String BOOT_LOG = "afwall_dnsd_boot.log";
     private static final String CHAIN_V4 = "afwall-dns";
@@ -176,6 +177,7 @@ public final class DnsHijackManager {
         File supervisorPid = new File(dir, SUPERVISOR_PID);
         File restartCount = new File(dir, RESTART_COUNT);
         File lastExit = new File(dir, LAST_EXIT);
+        File heartbeat = new File(dir, HEARTBEAT);
         File bootScript = new File(dir, BOOT_SCRIPT);
         File bootLog = new File(dir, BOOT_LOG);
 
@@ -222,6 +224,7 @@ public final class DnsHijackManager {
         appendFileInfo(out, "supervisor_pid", supervisorPid);
         appendFileInfo(out, "restart_count", restartCount);
         appendFileInfo(out, "last_exit", lastExit);
+        appendFileInfo(out, "heartbeat", heartbeat);
         appendFileInfo(out, "boot_script", bootScript);
         appendFileInfo(out, "boot_log", bootLog);
 
@@ -229,6 +232,7 @@ public final class DnsHijackManager {
         appendSmallFileValue(out, "watchdog_pid", supervisorPid);
         appendSmallFileValue(out, "restart_count", restartCount);
         appendSmallFileValue(out, "last_exit", lastExit);
+        appendSmallFileValue(out, "heartbeat", heartbeat);
 
         out.append("\n[control status]\n");
         out.append(queryControl(context, "status"));
@@ -1501,6 +1505,7 @@ public final class DnsHijackManager {
         config.append("port=").append(G.dnsHijackPort(DEFAULT_PORT)).append('\n');
         config.append("control_socket=").append(new File(dir, SOCKET).getAbsolutePath()).append('\n');
         config.append("pid_file=").append(new File(dir, PID).getAbsolutePath()).append('\n');
+        config.append("heartbeat_file=").append(new File(dir, HEARTBEAT).getAbsolutePath()).append('\n');
         config.append("log_file=").append(new File(dir, QUERY_LOG).getAbsolutePath()).append('\n');
         config.append("fail_open=").append(G.dnsHijackFailOpen() ? "1" : "0").append('\n');
         config.append("strict_mode=").append(G.dnsHijackStrictMode() ? "1" : "0").append('\n');
@@ -1892,6 +1897,7 @@ public final class DnsHijackManager {
         String config = new File(dir, CONF).getAbsolutePath();
         String pid = new File(dir, PID).getAbsolutePath();
         String socket = new File(dir, SOCKET).getAbsolutePath();
+        String heartbeat = new File(dir, HEARTBEAT).getAbsolutePath();
         String log = new File(dir, SUPERVISOR_LOG).getAbsolutePath();
         String supervisorPid = new File(dir, SUPERVISOR_PID).getAbsolutePath();
         String restartCount = new File(dir, RESTART_COUNT).getAbsolutePath();
@@ -1903,6 +1909,7 @@ public final class DnsHijackManager {
                 + "CONF=" + shellQuote(config) + "\n"
                 + "PID=" + shellQuote(pid) + "\n"
                 + "SOCKET=" + shellQuote(socket) + "\n"
+                + "HEARTBEAT=" + shellQuote(heartbeat) + "\n"
                 + "SUP_PID=" + shellQuote(supervisorPid) + "\n"
                 + "MARKER=" + shellQuote(marker) + "\n"
                 + "LOG=" + shellQuote(log) + "\n"
@@ -1914,9 +1921,18 @@ public final class DnsHijackManager {
                 + "is_running() {\n"
                 + "  [ -f \"$PID\" ] && kill -0 \"$(cat \"$PID\")\" 2>/dev/null\n"
                 + "}\n"
-                + "# PID alone is not readiness; DNS redirects need the control socket listener too.\n"
+                + "heartbeat_ok() {\n"
+                + "  [ -f \"$HEARTBEAT\" ] || return 1\n"
+                + "  beat=$(cat \"$HEARTBEAT\" 2>/dev/null || echo 0)\n"
+                + "  case \"$beat\" in *[!0-9]*|'') return 1 ;; esac\n"
+                + "  now=$(date +%s 2>/dev/null || echo 0)\n"
+                + "  case \"$now\" in *[!0-9]*|'') return 1 ;; esac\n"
+                + "  age=$((now - beat))\n"
+                + "  [ \"$age\" -ge 0 ] && [ \"$age\" -le 15 ]\n"
+                + "}\n"
+                + "# PID alone is not readiness; DNS redirects need listeners and a fresh event-loop heartbeat.\n"
                 + "daemon_ready() {\n"
-                + "  is_running && [ -S \"$SOCKET\" ]\n"
+                + "  is_running && [ -S \"$SOCKET\" ] && heartbeat_ok\n"
                 + "}\n"
                 + "wait_ready() {\n"
                 + "  tries=0\n"
@@ -1937,7 +1953,7 @@ public final class DnsHijackManager {
                 + "  echo \"$count\" > \"$RESTARTS\" 2>/dev/null\n"
                 + "}\n"
                 + "watch_loop() {\n"
-                + "  trap 'rm -f \"$SUP_PID\"; exit 0' TERM INT\n"
+                + "  trap 'if [ -f \"$PID\" ]; then kill -TERM \"$(cat \"$PID\")\" 2>/dev/null || true; fi; rm -f \"$SUP_PID\"; exit 0' TERM INT\n"
                 + "  log_msg 'watchdog started'\n"
                 + "  while [ -f \"$MARKER\" ]; do\n"
                 + "    if [ ! -x \"$DAEMON\" ]; then\n"
@@ -1946,12 +1962,45 @@ public final class DnsHijackManager {
                 + "      sleep 5\n"
                 + "      continue\n"
                 + "    fi\n"
-                + "    \"$DAEMON\" --config \"$CONF\" >> \"$LOG\" 2>&1\n"
-                + "    exit_code=$?\n"
-                + "    echo \"$(date +%s) exit=$exit_code\" > \"$LAST_EXIT\" 2>/dev/null\n"
-                + "    if [ -f \"$MARKER\" ]; then\n"
+                + "    rm -f \"$PID\" \"$SOCKET\" \"$HEARTBEAT\" 2>/dev/null || true\n"
+                + "    \"$DAEMON\" --config \"$CONF\" >> \"$LOG\" 2>&1 &\n"
+                + "    daemon_pid=$!\n"
+                + "    if ! wait_ready; then\n"
+                + "      echo \"$(date +%s) start_not_ready\" > \"$LAST_EXIT\" 2>/dev/null\n"
+                + "      log_msg 'daemon did not become ready; restarting'\n"
+                + "      kill -TERM \"$daemon_pid\" 2>/dev/null || true\n"
+                + "      if [ -f \"$PID\" ]; then kill -TERM \"$(cat \"$PID\")\" 2>/dev/null || true; fi\n"
+                + "      wait \"$daemon_pid\" 2>/dev/null || true\n"
                 + "      increment_restarts\n"
-                + "      log_msg \"daemon exited with $exit_code; restarting\"\n"
+                + "      sleep 2\n"
+                + "      continue\n"
+                + "    fi\n"
+                + "    while [ -f \"$MARKER\" ]; do\n"
+                + "      if ! kill -0 \"$daemon_pid\" 2>/dev/null; then\n"
+                + "        wait \"$daemon_pid\" 2>/dev/null\n"
+                + "        exit_code=$?\n"
+                + "        echo \"$(date +%s) exit=$exit_code\" > \"$LAST_EXIT\" 2>/dev/null\n"
+                + "        log_msg \"daemon exited with $exit_code; restarting\"\n"
+                + "        increment_restarts\n"
+                + "        break\n"
+                + "      fi\n"
+                + "      if ! daemon_ready; then\n"
+                + "        echo \"$(date +%s) heartbeat_stale\" > \"$LAST_EXIT\" 2>/dev/null\n"
+                + "        log_msg 'daemon heartbeat stale; restarting'\n"
+                + "        kill -TERM \"$daemon_pid\" 2>/dev/null || true\n"
+                + "        if [ -f \"$PID\" ]; then kill -TERM \"$(cat \"$PID\")\" 2>/dev/null || true; fi\n"
+                + "        sleep 2\n"
+                + "        kill -KILL \"$daemon_pid\" 2>/dev/null || true\n"
+                + "        wait \"$daemon_pid\" 2>/dev/null || true\n"
+                + "        increment_restarts\n"
+                + "        break\n"
+                + "      fi\n"
+                + "      sleep 5\n"
+                + "    done\n"
+                + "    if [ ! -f \"$MARKER\" ]; then\n"
+                + "      kill -TERM \"$daemon_pid\" 2>/dev/null || true\n"
+                + "      wait \"$daemon_pid\" 2>/dev/null || true\n"
+                + "    else\n"
                 + "      sleep 2\n"
                 + "    fi\n"
                 + "  done\n"
@@ -1964,7 +2013,7 @@ public final class DnsHijackManager {
                 + "  chmod 755 \"$DAEMON\" 2>/dev/null || true\n"
                 + "  touch \"$MARKER\"\n"
                 + "  if daemon_ready; then exit 0; fi\n"
-                + "  if ! is_running; then rm -f \"$PID\" \"$SOCKET\" 2>/dev/null || true; fi\n"
+                + "  if ! is_running; then rm -f \"$PID\" \"$SOCKET\" \"$HEARTBEAT\" 2>/dev/null || true; fi\n"
                 + "  if supervisor_running; then\n"
                 + "    if wait_ready; then exit 0; fi\n"
                 + "    log_msg 'watchdog already running but daemon is not ready'\n"
@@ -1981,7 +2030,7 @@ public final class DnsHijackManager {
                 + "  rm -f \"$MARKER\"\n"
                 + "  if [ -f \"$PID\" ]; then kill -TERM \"$(cat \"$PID\")\" 2>/dev/null || true; fi\n"
                 + "  if [ -f \"$SUP_PID\" ]; then kill -TERM \"$(cat \"$SUP_PID\")\" 2>/dev/null || true; fi\n"
-                + "  rm -f \"$SUP_PID\"\n"
+                + "  rm -f \"$SUP_PID\" \"$HEARTBEAT\"\n"
                 + "}\n"
                 + "case \"$1\" in\n"
                 + "  start) start_daemon ;;\n"
@@ -1991,6 +2040,8 @@ public final class DnsHijackManager {
                 + "  status) \n"
                 + "    if is_running; then echo \"daemon=running pid=$(cat \"$PID\")\"; else echo daemon=stopped; fi\n"
                 + "    if [ -S \"$SOCKET\" ]; then echo control_socket=ready; else echo control_socket=missing; fi\n"
+                + "    if heartbeat_ok; then echo heartbeat=fresh; else echo heartbeat=stale; fi\n"
+                + "    echo \"heartbeat_value=$(cat \"$HEARTBEAT\" 2>/dev/null || echo none)\"\n"
                 + "    if daemon_ready; then echo readiness=ready; else echo readiness=not_ready; fi\n"
                 + "    if supervisor_running; then echo \"watchdog=running pid=$(cat \"$SUP_PID\")\"; else echo watchdog=stopped; fi\n"
                 + "    echo \"restart_count=$(cat \"$RESTARTS\" 2>/dev/null || echo 0)\"\n"

@@ -125,6 +125,7 @@ typedef struct {
     char control_socket[256];
     char log_file[256];
     char pid_file[256];
+    char heartbeat_file[256];
     upstream_t upstreams[MAX_UPSTREAMS];
     int upstream_count;
     split_upstream_t split_upstreams[MAX_SPLIT_UPSTREAMS];
@@ -1912,6 +1913,8 @@ static bool load_config(const char *path, config_t *new_cfg) {
             safe_copy(new_cfg->log_file, sizeof(new_cfg->log_file), value);
         } else if (strcmp(key, "pid_file") == 0) {
             safe_copy(new_cfg->pid_file, sizeof(new_cfg->pid_file), value);
+        } else if (strcmp(key, "heartbeat_file") == 0) {
+            safe_copy(new_cfg->heartbeat_file, sizeof(new_cfg->heartbeat_file), value);
         } else if (strcmp(key, "fail_open") == 0) {
             new_cfg->fail_open = atoi(value) != 0;
         } else if (strcmp(key, "strict_mode") == 0) {
@@ -2108,6 +2111,18 @@ static void write_pid_file(void) {
     fp = fopen(g_cfg.pid_file, "w");
     if (fp != NULL) {
         fprintf(fp, "%ld\n", (long) getpid());
+        fclose(fp);
+    }
+}
+
+static void write_heartbeat_file(void) {
+    FILE *fp;
+    if (g_cfg.heartbeat_file[0] == '\0') {
+        return;
+    }
+    fp = fopen(g_cfg.heartbeat_file, "w");
+    if (fp != NULL) {
+        fprintf(fp, "%llu\n", (unsigned long long) now_seconds());
         fclose(fp);
     }
 }
@@ -2750,6 +2765,7 @@ int main(int argc, char **argv) {
     int tcp_fd;
     int control_fd;
     int i;
+    uint64_t last_heartbeat = 0;
     default_config(&g_cfg);
     g_stats.start_time = now_seconds();
     for (i = 1; i < argc; i++) {
@@ -2786,15 +2802,21 @@ int main(int argc, char **argv) {
             unlink(g_cfg.control_socket);
         }
         unlink(g_cfg.pid_file);
+        if (g_cfg.heartbeat_file[0] != '\0') {
+            unlink(g_cfg.heartbeat_file);
+        }
         fprintf(stderr, "failed to create listeners on port %d\n", g_cfg.listen_port);
         return 1;
     }
     /* Publish the PID only after listeners exist so supervisors do not accept a half-start. */
     write_pid_file();
+    write_heartbeat_file();
+    last_heartbeat = now_seconds();
     start_log_thread();
     while (g_running) {
         fd_set readfds;
         struct timeval timeout;
+        uint64_t heartbeat_now;
         int maxfd = udp_fd;
         int ready;
         if (g_reload_requested) {
@@ -2832,6 +2854,11 @@ int main(int argc, char **argv) {
         if (!g_log_thread_started) {
             flush_logs();
         }
+        heartbeat_now = now_seconds();
+        if (heartbeat_now != last_heartbeat) {
+            write_heartbeat_file();
+            last_heartbeat = heartbeat_now;
+        }
     }
     stop_log_thread();
     close(udp_fd);
@@ -2839,6 +2866,9 @@ int main(int argc, char **argv) {
     close(control_fd);
     unlink(g_cfg.control_socket);
     unlink(g_cfg.pid_file);
+    if (g_cfg.heartbeat_file[0] != '\0') {
+        unlink(g_cfg.heartbeat_file);
+    }
     free_config_dynamic(&g_cfg);
     return 0;
 }
