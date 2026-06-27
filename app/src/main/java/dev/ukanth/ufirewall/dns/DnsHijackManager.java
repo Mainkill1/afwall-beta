@@ -412,6 +412,40 @@ public final class DnsHijackManager {
         long allowedToday = parseLong(firstValue(statusValues, healthValues, "allowed_today"), 0L);
         long reloads = parseLong(firstValue(statusValues, healthValues, "reloads"), 0L);
         long reloadFailures = parseLong(firstValue(statusValues, healthValues, "reload_failures"), 0L);
+        long uptime = parseLong(firstValue(statusValues, healthValues, "uptime"), 0L);
+        long cacheSize = parseLong(firstValue(statusValues, healthValues, "cache_size"), 0L);
+        long cacheEntries = parseLong(firstValue(statusValues, healthValues, "cache_entries"), 0L);
+        long cacheHits = parseLong(firstValue(statusValues, healthValues, "cache_hits"), 0L);
+        long cacheMisses = parseLong(firstValue(statusValues, healthValues, "cache_misses"), 0L);
+        long cacheHitRatePpm = parseLong(firstValue(statusValues, healthValues, "cache_hit_rate_ppm"), -1L);
+        long cacheStaleHits = parseLong(firstValue(statusValues, healthValues, "cache_stale_hits"), 0L);
+        long avgLatency = parseLong(firstValue(statusValues, healthValues, "avg_latency_ms"), -1L);
+        long maxLatency = parseLong(firstValue(statusValues, healthValues, "max_latency_ms"), -1L);
+        long upstreamAvgLatency = parseLong(firstValue(statusValues, healthValues,
+                "upstream_avg_latency_ms"), -1L);
+        long upstreamRequests = parseLong(firstValue(statusValues, healthValues,
+                "upstream_requests"), 0L);
+        long upstreamSuccesses = parseLong(firstValue(statusValues, healthValues,
+                "upstream_successes"), 0L);
+        long upstreamFailures = parseLong(firstValue(statusValues, healthValues,
+                "upstream_failures"), 0L);
+        long upstreamBackoffActive = parseLong(firstValue(statusValues, healthValues,
+                "upstream_backoff_active"), 0L);
+        long compiledUpstreams = parseLong(firstValue(statusValues, healthValues,
+                "compiled_upstream_addresses"), 0L);
+        long reusableUdpSockets = parseLong(firstValue(statusValues, healthValues,
+                "reusable_udp_upstream_sockets"), 0L);
+        long memoryRssKb = parseLong(firstValue(statusValues, healthValues, "memory_rss_kb"), -1L);
+        long memoryHwmKb = parseLong(firstValue(statusValues, healthValues, "memory_hwm_kb"), -1L);
+        long cpuTotalMs = parseLong(firstValue(statusValues, healthValues, "cpu_total_ms"), -1L);
+        long logRingEntries = parseLong(firstValue(statusValues, healthValues,
+                "log_ring_entries"), 0L);
+        long logUnflushedEntries = parseLong(firstValue(statusValues, healthValues,
+                "log_unflushed_entries"), 0L);
+        long ruleCount = parseLong(firstValue(healthValues, statusValues, "rules_total"), -1L);
+        if (ruleCount < 0L) {
+            ruleCount = sumDashboardRuleCounts(statusValues, healthValues);
+        }
         boolean udpListener = "1".equals(firstValue(statusValues, healthValues, "udp_listener"));
         boolean tcpListener = "1".equals(firstValue(statusValues, healthValues, "tcp_listener"));
         boolean controlListener = "1".equals(firstValue(statusValues, healthValues, "control_listener"));
@@ -445,16 +479,42 @@ public final class DnsHijackManager {
         if (upstreamLatency >= 0L) {
             upstream += " " + upstreamLatency + "ms";
         }
+        String cacheLine = cacheSize <= 0L
+                ? "Cache: disabled"
+                : "Cache: " + cacheEntries + "/" + cacheSize
+                + " | Hit rate: " + cacheHitRate(cacheHitRatePpm, cacheHits, cacheMisses)
+                + " | Stale hits: " + cacheStaleHits;
+        String latencyLine = "Latency: avg " + formatMillis(avgLatency)
+                + " | upstream avg " + formatMillis(upstreamAvgLatency)
+                + " | max " + formatMillis(maxLatency);
+        String upstreamLine = "Upstream: " + upstream
+                + " | Requests: " + upstreamSuccesses + "/" + upstreamRequests
+                + " ok | Failures: " + upstreamFailures
+                + " | Backoff: " + upstreamBackoffActive
+                + "\nResolvers: compiled " + compiledUpstreams
+                + " | UDP sockets: " + reusableUdpSockets
+                + " | " + upstreamRuntimeSummary(statusValues, healthValues);
+        String systemLine = "System: uptime " + formatDuration(uptime)
+                + " | RSS " + formatKilobytes(memoryRssKb)
+                + " | HWM " + formatKilobytes(memoryHwmKb)
+                + " | CPU " + formatMillis(cpuTotalMs);
+        String rulesLine = "Rules: " + ruleCount
+                + " | Log ring: " + logRingEntries
+                + " | Pending log writes: " + logUnflushedEntries;
         String details = "Daemon: " + (running ? "running" : "stopped")
                 + " | Redirect setting: " + (enabled ? "enabled" : "disabled")
                 + " | Profile: " + profile
                 + (G.dnsHijackUseProfilePolicy() ? " override" : " global")
-                + "\nUpstream: " + upstream
-                + " | Blocklist updated: " + blocklistUpdated
+                + "\nBlocklist updated: " + blocklistUpdated
                 + "\nToday: " + allowedToday + " allowed | " + blockedToday + " blocked"
                 + "\nTotal: " + queries + " queries | Restarts: " + restartCount
                 + " | Reloads: " + reloads
                 + " | Reload failures: " + reloadFailures
+                + "\n" + cacheLine
+                + "\n" + latencyLine
+                + "\n" + upstreamLine
+                + "\n" + systemLine
+                + "\n" + rulesLine
                 + "\nListeners: UDP " + listenerLabel(udpListener)
                 + " | TCP " + listenerLabel(tcpListener)
                 + " | Control " + listenerLabel(controlListener);
@@ -726,6 +786,160 @@ public final class DnsHijackManager {
         } catch (NumberFormatException e) {
             return fallback;
         }
+    }
+
+    private static String cacheHitRate(long ppm, long hits, long misses) {
+        if (ppm >= 0L) {
+            return String.format(Locale.US, "%.1f%%", ppm / 10000.0d);
+        }
+        long total = hits + misses;
+        if (total <= 0L) {
+            return "0%";
+        }
+        return String.format(Locale.US, "%.1f%%", (hits * 100.0d) / total);
+    }
+
+    private static String formatMillis(long value) {
+        return value < 0L ? "n/a" : value + "ms";
+    }
+
+    private static String formatKilobytes(long value) {
+        if (value < 0L) {
+            return "n/a";
+        }
+        if (value < 1024L) {
+            return value + " KB";
+        }
+        return String.format(Locale.US, "%.1f MB", value / 1024.0d);
+    }
+
+    private static String formatDuration(long seconds) {
+        if (seconds <= 0L) {
+            return "0s";
+        }
+        long days = seconds / 86400L;
+        seconds %= 86400L;
+        long hours = seconds / 3600L;
+        seconds %= 3600L;
+        long minutes = seconds / 60L;
+        seconds %= 60L;
+        if (days > 0L) {
+            return days + "d " + hours + "h";
+        }
+        if (hours > 0L) {
+            return hours + "h " + minutes + "m";
+        }
+        if (minutes > 0L) {
+            return minutes + "m " + seconds + "s";
+        }
+        return seconds + "s";
+    }
+
+    private static long sumDashboardRuleCounts(Map<String, String> preferred,
+                                               Map<String, String> fallback) {
+        String[] keys = new String[] {
+                "rules_exact_allow",
+                "rules_suffix_allow",
+                "rules_exact_block",
+                "rules_suffix_block",
+                "rules_app_exact_allow",
+                "rules_app_exact_block",
+                "rules_app_suffix_allow",
+                "rules_app_suffix_block",
+                "rules_network_allow",
+                "rules_network_block",
+                "rules_regex_allow",
+                "rules_regex_block",
+                "rules_temp_allow",
+                "rules_temp_block"
+        };
+        long total = 0L;
+        for (String key : keys) {
+            total += parseLong(firstValue(preferred, fallback, key), 0L);
+        }
+        return total;
+    }
+
+    private static String upstreamRuntimeSummary(Map<String, String> preferred,
+                                                 Map<String, String> fallback) {
+        List<String> summaries = new ArrayList<>();
+        for (int i = 0; i < 3; i++) {
+            String raw = firstValue(preferred, fallback, "upstream_runtime[" + i + "]");
+            if (!raw.isEmpty()) {
+                summaries.add(formatUpstreamRuntime(raw));
+            }
+        }
+        if (summaries.isEmpty()) {
+            return "runtime unavailable";
+        }
+        return joinWithSeparator(summaries, " | ");
+    }
+
+    private static String formatUpstreamRuntime(String raw) {
+        String endpoint = "";
+        String protocol = tokenValue(raw, "protocol", "");
+        String requests = tokenValue(raw, "requests", "0");
+        String successes = tokenValue(raw, "successes", "0");
+        String failures = tokenValue(raw, "failures", "0");
+        String averageLatency = tokenValue(raw, "avg_latency_ms", "n/a");
+        String backoffRemaining = tokenValue(raw, "backoff_remaining", "0");
+        String[] parts = raw.trim().split("\\s+");
+        for (String part : parts) {
+            if (part.startsWith("upstream=")) {
+                endpoint = part.substring("upstream=".length());
+                break;
+            }
+            if (!part.contains("=") && endpoint.isEmpty()) {
+                endpoint = part;
+            }
+        }
+        if (endpoint.isEmpty()) {
+            endpoint = "upstream";
+        }
+        if (protocol.isEmpty()) {
+            protocol = "auto";
+        }
+        String backoff = "0".equals(backoffRemaining)
+                ? ""
+                : " backoff=" + backoffRemaining + "s";
+        return endpoint + " " + protocol
+                + " ok=" + successes + "/" + requests
+                + " fail=" + failures
+                + " avg=" + formatRuntimeLatency(averageLatency)
+                + backoff;
+    }
+
+    private static String formatRuntimeLatency(String value) {
+        return "n/a".equals(value) ? value : value + "ms";
+    }
+
+    private static String tokenValue(String raw, String key, String fallback) {
+        if (raw == null || key == null) {
+            return fallback;
+        }
+        String prefix = key + "=";
+        String[] parts = raw.trim().split("\\s+");
+        for (String part : parts) {
+            if (part.startsWith(prefix)) {
+                String value = part.substring(prefix.length()).trim();
+                return value.isEmpty() ? fallback : value;
+            }
+        }
+        return fallback;
+    }
+
+    private static String joinWithSeparator(List<String> values, String separator) {
+        StringBuilder out = new StringBuilder();
+        for (String value : values) {
+            if (value == null || value.trim().isEmpty()) {
+                continue;
+            }
+            if (out.length() > 0) {
+                out.append(separator);
+            }
+            out.append(value.trim());
+        }
+        return out.toString();
     }
 
     private static String emptyFallback(String value, String fallback) {
